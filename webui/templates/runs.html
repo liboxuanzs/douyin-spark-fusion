@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+
+{% block nav_key %}runs{% endblock %}
+{% block page_key %}runs{% endblock %}
+{% block title %}运行记录 · 续火花{% endblock %}
+{% block page_title %}运行记录{% endblock %}
+{% block page_subtitle %}每一轮任务的发送明细，以及每条目标的判定依据{% endblock %}
+
+{% block topbar_actions %}
+<a class="button button-quiet" href="/">
+  <i data-lucide="layout-dashboard"></i><span>首页总览</span>
+</a>
+{% endblock %}
+
+{% block content %}
+{% set summary = view.summary %}
+{% set run = view.last_run %}
+
+<div class="console-shell" data-overview-root>
+
+  {# ---- 任务横幅（B 的轮询器写这里） ------------------------------------------- #}
+  <div
+    class="status-banner {% if view.task.running %}warning{% else %}success{% endif %}"
+    data-task-banner
+  >
+    <strong>
+      <i data-lucide="{% if view.task.running %}loader-circle{% else %}circle-check{% endif %}"></i>
+      <span data-task-text>
+        {% if view.task.running %}
+        发送任务运行中，已运行约 {{ view.task.ageSeconds }} 秒
+        {% else %}
+        当前没有发送任务运行
+        {% endif %}
+      </span>
+    </strong>
+    <span class="pill info" data-overview-live-state>实时</span>
+  </div>
+
+  <div class="status-banner info refresh-notice" data-refresh-notice>
+    <strong><i data-lucide="circle-check"></i><span>任务已结束，详细发送记录可以刷新查看。</span></strong>
+    <button class="button button-quiet" type="button" data-refresh-page>
+      <i data-lucide="refresh-cw"></i><span>刷新详情</span>
+    </button>
+  </div>
+
+  {% for banner in view.banners %}
+  <div class="status-banner {{ banner.level }}">
+    <strong><i data-lucide="{{ banner.icon }}"></i><span>{{ banner.text }}</span></strong>
+    {% if banner.until %}
+    <span class="pill {{ 'danger' if banner.level == 'danger' else 'info' }}"
+          data-countdown-until="{{ banner.until }}">
+      <span data-countdown-text>{{ banner.untilText }}</span>
+    </span>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  {# ---- 本轮结论 -------------------------------------------------------------- #}
+  <div class="status-banner {% if summary.attention %}warning{% elif summary.total %}success{% else %}info{% endif %}"
+       data-today-summary>
+    <strong><i data-lucide="clipboard-check"></i><span>
+      {% if not view.has_records %}
+      还没有跑过任务。上面点「立即运行」空跑一轮，或者等定时任务触发。
+      {% else %}
+      本轮结论：强确认 <b data-run-value="confirmed">{{ summary.confirmed }}</b>
+      · 弱证据 <b data-run-value="pageEcho">{{ summary.pageEcho }}</b>
+      · 需处理 <b data-run-value="attention">{{ summary.attention }}</b>
+      · 未尝试 <b data-run-value="pending">{{ summary.pending }}</b>
+      <span class="muted">（已发送 {{ summary.sent }}/{{ summary.total }}）</span>
+      {%- if run %}（{{ run.started_text }} 一轮，档位 {{ run.dry_run_text }}，来源 {{ run.source_text }}）{% endif %}
+      {% endif %}
+    </span></strong>
+  </div>
+
+  <section class="metric-grid" aria-label="本轮状态分布">
+    <article class="metric-card success">
+      <div class="metric-label">强确认</div>
+      <div class="metric-value" data-run-value="confirmed">{{ summary.confirmed }}</div>
+      <div class="metric-help">会话选中与会话回执两边都确认</div>
+    </article>
+    <article class="metric-card warning">
+      <div class="metric-label">弱证据</div>
+      <div class="metric-value" data-run-value="pageEcho">{{ summary.pageEcho }}</div>
+      <div class="metric-help">只拿到页面回显或网络信号，不能算强确认</div>
+    </article>
+    <article class="metric-card danger">
+      <div class="metric-label">需处理</div>
+      <div class="metric-value" data-run-value="attention">{{ summary.attention }}</div>
+      <div class="metric-help">失败、选中失败或不在会话列表里</div>
+    </article>
+    <article class="metric-card info">
+      <div class="metric-label">未尝试</div>
+      <div class="metric-value" data-run-value="pending">{{ summary.pending }}</div>
+      <div class="metric-help">这一轮没有走到的目标</div>
+    </article>
+  </section>
+
+  {# ---- 历史轮次 -------------------------------------------------------------- #}
+  <section class="dashboard-section" id="run-history">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">历史轮次</h2>
+        <p class="muted compact">账本里最近 {{ view.runs|length }} 轮，点一行看那一轮的明细。</p>
+      </div>
+    </div>
+    {% if view.runs %}
+    <div class="table-shell">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">开始</th>
+            <th scope="col">档位</th>
+            <th scope="col">来源</th>
+            <th scope="col">结果</th>
+            <th scope="col">账号</th>
+            <th scope="col">成功 / 失败</th>
+            <th scope="col">耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in view.runs %}
+          <tr {% if row.run_id == view.selected_run_id %}class="is-selected"{% endif %}>
+            <td>
+              <a href="/ops/runs?run={{ row.run_id }}">{{ row.started_text or row.run_id }}</a>
+              {% if row.is_latest %}<span class="pill info">最新</span>{% endif %}
+            </td>
+            <td>{{ row.dry_run_text }}</td>
+            <td>{{ row.source_text }}</td>
+            <td>
+              <span class="status-chip {{ row.chip }}">{{ row.status_text }}</span>
+              {% if row.rate_limited %}<span class="pill danger">风控</span>{% endif %}
+            </td>
+            <td>{{ row.accounts }}</td>
+            <td>{{ row.sent_ok }} / {{ row.sent_fail }}</td>
+            <td>{{ row.duration_text or "—" }}</td>
+          </tr>
+          {% if row.skip_reason or row.note %}
+          <tr class="muted compact">
+            <td colspan="7">
+              {% if row.skip_reason %}整轮跳过：{{ row.skip_reason }}{% if row.skip_until %}（跳过至 {{ row.skip_until }}）{% endif %}{% endif %}
+              {% if row.note %}{{ row.note }}{% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-state">账本还是空的。跑一轮之后这里会出现明细。</div>
+    {% endif %}
+  </section>
+
+  {# ---- 选中那一轮的目标级明细（B 的 account-console 结构） ------------------- #}
+  <section class="dashboard-section" id="account-detail">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">目标明细</h2>
+        <p class="muted compact">
+          {% if run %}
+          {{ run.started_text }} 那一轮 · 档位 {{ run.dry_run_text }} · 来源 {{ run.source_text }}
+          {% else %}还没有可看的轮次{% endif %}
+        </p>
+      </div>
+    </div>
+
+    <div class="account-console-list">
+      {% for account in view.accounts %}
+      <details
+        class="account-console state-{{ account.state_css }}"
+        id="account-{{ account.unique_id }}"
+        data-segment-owner
+        {# 这一页讲的是"选中的那一轮"，账号行必须冻在那一轮上：
+           总览轮询（app.js 的 updateAccounts）永远拿最近一轮的数据，
+           所以这里刻意用只属于本页的挂点，不挂 data-account-overview。 #}
+        data-run-account="{{ account.unique_id }}"
+        {% if loop.first %}open{% endif %}
+      >
+        <summary>
+          <span class="account-ident">
+            <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
+            <span class="account-name">
+              <strong>{{ account.username }}</strong>
+              <small>{{ account.state_label }}{% if account.gate_text %} · 门禁 {{ account.gate_text }}{% endif %}</small>
+            </span>
+          </span>
+          <span class="account-console-metrics">
+            <span class="status-chip {{ account.chip }}">
+              成功 {{ account.confirmed }} · 弱 {{ account.weak }} · 需处理 {{ account.failed }} · 未尝试 {{ account.pending }}
+            </span>
+            <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>强确认</small></span>
+            <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>需处理</small></span>
+            <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>未尝试</small></span>
+          </span>
+          <i class="summary-chevron" data-lucide="chevron-down"></i>
+        </summary>
+
+        <div class="account-console-body">
+          {% if account.run_missing %}
+          <p class="notice-inline" data-account-run-missing>
+            <i data-lucide="calendar-clock"></i>
+            {% if account.own_run_text %}
+            <span>这一轮没有轮到它 —— 每个账号按自己的发送时间分开跑，这里显示的是<strong>选中那一轮</strong>的成绩（那一轮里没有它）。
+              它最近一次是 <strong>{{ account.own_run_text }}</strong> 那一轮。</span>
+            {% else %}
+            <span>最近这些轮次里都没有它 —— 这些目标一次都还没试过。</span>
+            {% endif %}
+          </p>
+          {% endif %}
+
+          {% if account.cookie_message %}
+          <div class="{{ 'danger-box' if not account.ready else 'warning-box' }}">
+            <strong><i data-lucide="key-round"></i>凭据</strong>
+            <p>{{ account.cookie_message }}</p>
+          </div>
+          {% endif %}
+
+          <div class="account-meta-strip">
+            <span>目标 {{ account.total }} 个</span>
+            <span>本轮 {{ account.run_text or "—" }}</span>
+            {% if account.dry_run != "off" %}<span class="pill warning">空跑：{{ account.dry_run_text }}</span>{% endif %}
+            {% if account.cookie_names %}
+            {# 只报数量：56 个变量名铺在页面上是一面墙，需要时鼠标停上去看 #}
+            <span title="{{ account.cookie_names|join('、') }}">已配置 {{ account.cookie_names|length }} 项 cookie</span>
+            {% endif %}
+          </div>
+
+          {% for issue in account.issues %}
+          <div class="{{ 'danger-box' if issue.level == 'danger' else 'warning-box' }}">{{ issue.text }}</div>
+          {% endfor %}
+
+          <div class="progress-line">
+            <span class="progress-track">
+              <i class="progress-strong" style="width:{{ account.strong_pct }}%" data-account-progress></i>
+              <i class="progress-echo" style="width:{{ account.weak_pct }}%" data-account-progress-echo></i>
+            </span>
+            <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }} · 强确认 {{ account.confirmed }}</span>
+          </div>
+
+          <div class="segmented-control" role="tablist" aria-label="{{ account.username }} 的目标档位">
+            {% for seg in view.segments %}
+            <button
+              class="segment-button {% if loop.first %}active{% endif %}"
+              type="button"
+              role="tab"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              data-segment-target="seg-{{ account.unique_id }}-{{ seg.key }}"
+            >{{ seg.label }} {{ account.segment_counts[seg.key] }}</button>
+            {% endfor %}
+          </div>
+
+          {% for seg in view.segments %}
+          <div data-segment-panel="seg-{{ account.unique_id }}-{{ seg.key }}" {% if not loop.first %}hidden{% endif %}>
+            {% set rows = account.segments[seg.key] %}
+            {% if rows %}
+            <div class="target-list">
+              {% for row in rows %}
+              <article class="target-record">
+                <div class="target-record-main">
+                  <strong>{{ row.target }}</strong>
+                  <small>
+                    {% if row.level_text %}{{ row.level_text }}{% endif %}
+                    {%- if row.via_text %} · {{ row.via_text }}{% endif %}
+                    {%- if row.at_text %} · {{ row.at_text }}{% endif %}
+                  </small>
+                </div>
+                {% if row.reason_text %}
+                <div class="target-reason {{ 'is-danger' if row.bucket == 'failed' else 'is-warning' }}">{{ row.reason_text }}</div>
+                {% endif %}
+                {% if row.message_id %}
+                <div class="target-message">回执 message_id：{{ row.message_id }}</div>
+                {% endif %}
+                <span class="target-meta">
+                  {%- if row.bucket == "pending" %}这一轮没有走到
+                  {%- elif row.dry_run and row.dry_run != "off" %}空跑（没有真的发送）
+                  {%- elif row.ok %}已发送
+                  {%- else %}未发送{% endif %}
+                  {%- if row.rate_limited %} · 命中风控关键词{% endif %}
+                </span>
+              </article>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state">{{ seg.label }}档位没有目标。</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% else %}
+      <div class="empty-state">没有账号。先在 <code>.env</code> 的 <code>TASKS</code> 里配置账号。</div>
+      {% endfor %}
+    </div>
+  </section>
+
+</div>
+{% endblock %}

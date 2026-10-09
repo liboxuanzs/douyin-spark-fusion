@@ -1,0 +1,3 @@
+{# 日志尾部片段：只输出 <pre id="log-area"><span id="log-body">…</span></pre>
+   前端用 fetch + DOMParser 取 #log-body 的 textContent（不把日志内容当 HTML 解析）。 #}
+<pre class="log-view" id="log-area"><span id="log-body">{{ log_tail.as_text() }}</span></pre>

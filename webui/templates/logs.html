@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+
+{% block nav_key %}logs{% endblock %}
+{% block page_key %}logs{% endblock %}
+{% block title %}运行日志 · 续火花{% endblock %}
+{% block page_title %}运行日志{% endblock %}
+{% block page_subtitle %}登录同步 · 会话选中 · 发送与回执{% endblock %}
+
+{% block topbar_actions %}
+<a class="button button-quiet" href="/">
+  <i data-lucide="layout-dashboard"></i><span>首页总览</span>
+</a>
+<a class="button button-quiet" href="/ops/runs">
+  <i data-lucide="list-checks"></i><span>运行记录</span>
+</a>
+{% endblock %}
+
+{% block content %}
+<style>
+  .logs-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .logs-toolbar__left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .logs-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-soft);
+    font-size: 13px;
+    font-weight: 600;
+    /* 作为 flex 项时"行数"两个字会被压成竖排，钉住不换行 */
+    white-space: nowrap;
+  }
+  .logs-meta .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--fire-grad);
+    box-shadow: 0 0 0 4px rgba(255, 122, 61, 0.14);
+  }
+  .logs-meta .dot.live {
+    background: linear-gradient(135deg, #18a558, #4fd08a);
+    box-shadow: 0 0 0 4px rgba(24, 165, 88, 0.16);
+    animation: livePulse 1.6s ease-in-out infinite;
+  }
+  @keyframes livePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+  .toggle-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .toggle-track {
+    width: 42px;
+    height: 24px;
+    border-radius: 999px;
+    background: var(--border-strong);
+    position: relative;
+    transition: background 0.18s ease;
+    flex: 0 0 42px;
+  }
+  .toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 2px 5px rgba(20, 35, 70, 0.18);
+    transition: transform 0.18s ease;
+  }
+  .toggle-switch input { display: none; }
+  .toggle-switch input:checked + .toggle-track {
+    background: linear-gradient(180deg, var(--primary), var(--primary-strong));
+  }
+  .toggle-switch input:checked + .toggle-track::after {
+    transform: translateX(18px);
+  }
+  .logs-code {
+    margin: 0;
+    border-radius: var(--radius-md);
+    background: #0f1728;
+    color: #d8e2fb;
+    padding: 18px 20px;
+    overflow: auto;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.75;
+    min-height: 420px;
+    max-height: 70vh;
+    white-space: pre-wrap;
+    word-break: break-word;
+    tab-size: 2;
+  }
+  .logs-code:empty::before {
+    content: "暂无日志输出";
+    color: #5f6f8c;
+  }
+  .logs-empty {
+    padding: 60px 24px;
+    text-align: center;
+    border-radius: var(--radius-md);
+    border: 1px dashed var(--border-strong);
+    background: var(--empty-bg);
+    color: var(--text-soft);
+  }
+  .logs-select {
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 10px;
+  }
+</style>
+
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <h2>详细日志</h2>
+      <p class="muted compact">
+        面板触发和定时任务写的是同一个文件，日志页每 5 秒从文件尾部读一次
+        （最多读 512 KB，不会把整个日志读进内存）。
+      </p>
+    </div>
+  </div>
+
+  <div class="logs-toolbar">
+    <div class="logs-toolbar__left">
+      <span class="logs-meta">
+        <span class="dot" id="logs-live-dot"></span>
+        <span id="logs-status-text">最近更新：刚刚</span>
+      </span>
+      <span class="logs-meta">
+        <span class="dot"></span>
+        <span id="logs-line-count">{{ (log_tail.as_text()|trim).splitlines()|length }} 行</span>
+      </span>
+      {% if not log_tail.exists %}
+      <span class="status-chip danger">文件不存在</span>
+      {% elif log_tail.error %}
+      <span class="status-chip danger">{{ log_tail.error }}</span>
+      {% elif log_tail.truncated %}
+      <span class="status-chip warning">已按字节上限截断</span>
+      {% endif %}
+    </div>
+    <div class="logs-toolbar__left">
+      <label class="logs-meta" for="logs-lines">行数
+        <select class="logs-select" id="logs-lines">
+          {% for option in [50, 100, 300, 800, 2000] %}
+          <option value="{{ option }}" {% if option == log_lines %}selected{% endif %}>{{ option }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="toggle-switch" title="每 5 秒自动刷新日志">
+        <input type="checkbox" id="logs-autorefresh">
+        <span class="toggle-track"></span>
+        <span>自动刷新</span>
+      </label>
+      <input type="search" id="logs-filter" placeholder="只看包含…的行（关键词 / 账号 / 会话）">
+      <button type="button" class="button button-quiet" id="logs-refresh-btn">
+        <i data-lucide="refresh-cw"></i><span>刷新</span>
+      </button>
+      <a class="button button-quiet" id="logs-download-btn" href="/ops/logs/download">
+        <i data-lucide="download"></i><span>下载日志</span>
+      </a>
+    </div>
+  </div>
+
+  <p class="muted compact" id="logs-path">
+    <span class="mono">{{ log_file }}</span>
+    {%- if not log_tail.exists %} · 文件还不存在：跑一轮任务之后就会有{% endif %}
+    · 本站不提供清空 / 删除日志的入口
+  </p>
+
+  {% if log_tail.as_text()|trim %}
+  <pre class="logs-code" id="logs-code">{{ log_tail.as_text() }}</pre>
+  <div class="logs-empty" id="logs-empty" style="display:none">当前没有日志输出。任务运行后这里会实时显示。</div>
+  {% else %}
+  <pre class="logs-code" id="logs-code" style="display:none"></pre>
+  <div class="logs-empty" id="logs-empty">当前没有日志输出。任务运行后这里会实时显示。</div>
+  {% endif %}
+</section>
+
+<script>
+  (() => {
+    const codeEl = document.getElementById("logs-code");
+    const emptyEl = document.getElementById("logs-empty");
+    const statusEl = document.getElementById("logs-status-text");
+    const lineEl = document.getElementById("logs-line-count");
+    const liveDot = document.getElementById("logs-live-dot");
+    const toggle = document.getElementById("logs-autorefresh");
+    const refreshBtn = document.getElementById("logs-refresh-btn");
+    const filterEl = document.getElementById("logs-filter");
+    const linesEl = document.getElementById("logs-lines");
+    let timer = null;
+    let rawText = "";
+
+    const fmtTime = () => {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      return `最近更新：${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
+
+    const applyFilter = () => {
+      const query = String((filterEl && filterEl.value) || "").trim().toLowerCase();
+      const lines = rawText ? rawText.split(/\r?\n/) : [];
+      const shown = query ? lines.filter((line) => line.toLowerCase().includes(query)) : lines;
+      if (codeEl) codeEl.textContent = shown.join("\n");
+      if (lineEl) {
+        lineEl.textContent = query
+          ? `显示 ${shown.length} / 共 ${lines.length} 行`
+          : `${lines.length} 行`;
+      }
+    };
+
+    const renderBody = (text) => {
+      rawText = text || "";
+      const has = !!(rawText && rawText.trim());
+      if (codeEl) codeEl.style.display = has ? "" : "none";
+      if (emptyEl) emptyEl.style.display = has ? "none" : "";
+      if (has) applyFilter();
+      else if (lineEl) lineEl.textContent = "0 行";
+    };
+
+    const tailUrl = () => {
+      const lines = linesEl ? linesEl.value : "";
+      return `/ops/log-tail${lines ? `?lines=${encodeURIComponent(lines)}` : ""}`;
+    };
+
+    const refresh = async () => {
+      try {
+        const res = await fetch(tailUrl(), {
+          credentials: "same-origin",
+          headers: { Accept: "text/html" },
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const body = doc.getElementById("log-body");
+        renderBody(body ? body.textContent : "");
+        if (statusEl) statusEl.textContent = fmtTime();
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `刷新失败：${err.message}`;
+      }
+    };
+
+    const setLive = (on) => {
+      if (liveDot) liveDot.classList.toggle("live", on);
+      if (timer) { clearInterval(timer); timer = null; }
+      if (on) {
+        timer = setInterval(refresh, 5000);
+        refresh();
+      }
+    };
+
+    if (toggle) toggle.addEventListener("change", () => setLive(toggle.checked));
+    if (refreshBtn) refreshBtn.addEventListener("click", refresh);
+    if (linesEl) linesEl.addEventListener("change", refresh);
+    if (filterEl) filterEl.addEventListener("input", applyFilter);
+    if (statusEl) statusEl.textContent = fmtTime();
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+[Unit]
+Description=抖音续火花（融合版）web 仪表盘
+Documentation=file:/opt/douyin-spark-fusion/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/douyin-spark-fusion
+Environment=PYTHONUNBUFFERED=1
+# 口令与密钥都在 .env 里（install.sh 会生成 WEBUI_SESSION_SECRET）。
+#
+# ★ 这里**故意不写** EnvironmentFile=/opt/douyin-spark-fusion/.env：
+#   systemd 会按转义序列解析它的值，`.env` 里的字面 `\n`（消息模板的换行）
+#   会被吃成裸 `n`，而面板预览读的是文件 —— 那就成了"面板一套、实际一套"。
+#   .env 由程序自己用 python-dotenv 读（`python -m webui` → `webui.__main__.load_env`）。
+ExecStart=/opt/douyin-spark-fusion/.venv/bin/python -m webui
+Restart=always
+RestartSec=5
+# 与既有 douyin-spark.service 并存：端口不冲突（那个占 8000，这个用 8787）
+StandardOutput=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log
+StandardError=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log
+
+[Install]
+WantedBy=multi-user.target

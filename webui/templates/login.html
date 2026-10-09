@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="robots" content="noindex, nofollow">
+    <title>登录 | 续火花控制台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}">
+  </head>
+  <body class="login-page">
+    <aside class="login-brand-panel">
+      <a class="brand" href="/login">
+        <span class="brand-mark"><i data-lucide="flame"></i></span>
+        <span>
+          <strong class="brand-title">续火花</strong>
+          <small class="brand-subtitle">抖音自动续火花控制台</small>
+        </span>
+      </a>
+
+      <div class="login-brand-copy">
+        <h1>让每个好友<br><span>都不再断火花</span></h1>
+        <p>集中查看账号登录态、发送结果与下一轮自动触发，在一个控制台里完成续火花运维。</p>
+        <ul class="login-features">
+          <li><i data-lucide="badge-check"></i><span>通过才记账：会话与回执双确认</span></li>
+          <li><i data-lucide="shield-alert"></i><span>命中风控关键词即冷却整轮跳过</span></li>
+          <li><i data-lucide="flask-conical"></i><span>空跑三档，先看选中再决定发不发</span></li>
+        </ul>
+      </div>
+
+      <small class="muted">DouYin Spark Fusion · Admin Console</small>
+    </aside>
+
+    <main class="login-form-panel">
+      <section class="login-card">
+        <h2>控制台登录</h2>
+        <p>登录后可查看发送进度、运行记录与运行日志。</p>
+
+        {% if error %}
+        <div class="flash flash-error" role="status">{{ error }}</div>
+        {% endif %}
+
+        {% if saved %}
+        <div class="flash flash-success" role="status">{{ saved }}</div>
+        {% endif %}
+
+        {% if auth_enabled %}
+        <form method="post" action="/login" class="stack-form">
+          <input type="hidden" name="next" value="{{ next }}">
+          <label>
+            <span>访问口令</span>
+            <input type="password" name="password" autocomplete="current-password" autofocus required>
+          </label>
+          <button class="button button-primary button-block" type="submit">
+            <i data-lucide="log-in"></i><span>登录控制台</span>
+          </button>
+        </form>
+        {% else %}
+        <div class="warning-box">
+          未启用认证：<code>.env</code> 里既没有 <code>WEBUI_PASSWORD_HASH</code> 也没有 <code>WEBUI_PASSWORD</code>。
+          {% if loopback %}
+          当前绑定回环地址（{{ host }}），所以允许直接进入。
+          {% else %}
+          当前绑定非回环地址（{{ host }}），这是不允许的 —— 请配置口令后重启服务。
+          {% endif %}
+        </div>
+        <form method="get" action="/">
+          <button class="button button-primary button-block" type="submit">
+            <i data-lucide="arrow-right"></i><span>直接进入控制台</span>
+          </button>
+        </form>
+        {% endif %}
+
+        <div class="login-foot">
+          口令存在服务器 <code>.env</code> 的 <code>WEBUI_PASSWORD</code>（明文）或
+          <code>WEBUI_PASSWORD_HASH</code>（哈希，优先）里。
+          <strong>登录后在首页「访问口令」一栏可以自己改</strong>，不需要动服务器文件；
+          万一忘了口令，在服务器上跑 <code>python -m webui.hash_password</code>
+          （或 <code>bash netinv/reset_webui_password.sh</code>）重置。
+          认证页面不会展示任何凭据或登录态数据。
+        </div>
+      </section>
+    </main>
+
+    <script defer src="/static/lucide.min.js?v=20260710"></script>
+    <script defer src="/static/app.js?v={{ asset_version() }}"></script>
+  </body>
+</html>

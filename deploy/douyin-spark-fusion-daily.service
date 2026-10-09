@@ -1,0 +1,33 @@
+[Unit]
+Description=抖音续火花（融合版）发送时间表派发
+Documentation=file:/opt/douyin-spark-fusion/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/douyin-spark-fusion
+Environment=PYTHONUNBUFFERED=1
+# ★ 这里**故意不写** EnvironmentFile=/opt/douyin-spark-fusion/.env。
+#
+#   systemd 解析 EnvironmentFile 时按"转义序列"处理值：`.env` 里消息模板写的
+#   字面 `\n`（规则："用 \n 表示换行"）会被吃掉反斜杠、只剩一个裸 `n`，
+#   于是发出去的消息变成一整行、行尾还挂着 n —— 2026-10-02 那一轮就是这样。
+#   同一份 .env 交给 python-dotenv 读则原样保留。
+#
+#   所以：.env 只由程序自己读（`main.py` → `utils.config.load_env_file`），
+#   它同时是"面板预览看到的"和"实际发出去的"唯一真相。
+#   改 .env 不需要 daemon-reload，重启/下一轮自动生效。
+# 只在这一个 unit 里声明"这轮是定时器触发的"：面板的"触发来源"列靠它区分
+# 定时任务 / 命令行 / 面板触发。**不要**把它写进 .env —— .env 三个入口共用。
+Environment=RUN_SOURCE=timer
+ExecStart=/opt/douyin-spark-fusion/.venv/bin/python main.py task
+# 由 -daily.timer 每 5 分钟触发一次。没账号到点的那几次会立刻退出 0，
+# 属于常态，不要在监控里当失败。要无视时间表强制发一轮：
+#     python main.py task --force
+#     python main.py task --only 10050yi
+# 一轮可能跑十几分钟（多账号 + 拟人间隔）；给足时间，别让 systemd 中途掐掉
+TimeoutStartSec=3600
+StandardOutput=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log
+StandardError=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log

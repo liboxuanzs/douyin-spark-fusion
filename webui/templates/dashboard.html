@@ -1,0 +1,892 @@
+{% extends "base.html" %}
+
+{% block nav_key %}dashboard{% endblock %}
+{% block page_key %}dashboard{% endblock %}
+{% block title %}首页总览 · 续火花{% endblock %}
+{% block page_title %}今日续火花{% endblock %}
+{% block page_subtitle %}确认进度、异常目标与下一次自动触发{% endblock %}
+
+{% block topbar_actions %}
+<a class="button button-quiet" href="/ops/runs">
+  <i data-lucide="list-checks"></i><span>运行记录</span>
+</a>
+{% endblock %}
+
+{% block content %}
+{% set summary = view.summary %}
+
+<div class="dashboard-stack" data-overview-root>
+
+  {# ---- 任务横幅：B 的轮询器每 10 秒用 /api/ops/overview 重写这里 ---------------- #}
+  <div
+    class="status-banner {% if view.task.running %}warning{% else %}success{% endif %}"
+    data-task-banner
+  >
+    <strong>
+      <i data-lucide="{% if view.task.running %}loader-circle{% else %}circle-check{% endif %}"></i>
+      <span data-task-text>
+        {% if view.task.running %}
+        发送任务运行中，已运行约 {{ view.task.ageSeconds }} 秒
+        {% else %}
+        当前没有发送任务运行
+        {% endif %}
+      </span>
+    </strong>
+    <span class="pill info" data-overview-live-state>实时</span>
+  </div>
+
+  <div class="status-banner info refresh-notice" data-refresh-notice>
+    <strong><i data-lucide="circle-check"></i><span>任务已结束，详细发送记录可以刷新查看。</span></strong>
+    <button class="button button-quiet" type="button" data-refresh-page>
+      <i data-lucide="refresh-cw"></i><span>刷新详情</span>
+    </button>
+  </div>
+
+  {# ---- C 专属横幅：风控冷却 / 禁跑时间窗 / 账号阻断 / 缺依赖 -------------------- #}
+  {% for banner in view.banners %}
+  <div class="status-banner {{ banner.level }}">
+    <strong>
+      <i data-lucide="{{ banner.icon }}"></i>
+      <span>{{ banner.title }}{% if banner.title %}：{% endif %}{{ banner.text }}</span>
+    </strong>
+    {% if banner.until %}
+    <span class="pill {{ 'danger' if banner.level == 'danger' else 'info' }}"
+          data-countdown-until="{{ banner.until }}">
+      <span data-countdown-text>{{ banner.untilText }}</span>
+    </span>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+    {% if not view.schedule.nextTriggerText %}
+    <div class="danger-box" data-schedule-warning>
+      <strong><i data-lucide="alarm-clock-off"></i>不会自动跑</strong>
+      <ul>
+        <li>
+          {% if view.schedule.timer.state == "missing" %}
+          这台机器上没装 <code>douyin-spark-fusion-daily.timer</code>，
+          {% else %}
+          <code>douyin-spark-fusion-daily.timer</code> 现在是 <b>disabled</b>，
+          {% endif %}
+          到点不会自动发。要开：<code>systemctl enable --now douyin-spark-fusion-daily.timer</code>。
+        </li>
+        {% if view.schedule.times %}
+        <li>`.env` 里写的 <code>TASK_SCHEDULE_TIMES={{ view.schedule.times|join('、') }}</code> 只是"打算几点跑"，真正说了算的是 systemd 定时器。</li>
+        {% endif %}
+      </ul>
+    </div>
+    {% elif view.schedule.timerMismatch %}
+    <div class="warning-box" data-schedule-mismatch>
+      <strong><i data-lucide="alarm-clock"></i>定时时间对不上</strong>
+      <ul>
+        <li>系统定时器是 <code>{{ view.schedule.timerTimes|join('、') }}</code>，`.env` 里写的是 <code>{{ view.schedule.times|join('、') }}</code>。</li>
+        <li>真正会跑的是系统定时器那个时间；`.env` 里的 <code>TASK_SCHEDULE_TIMES</code> 只影响面板上算的"下次触发"。</li>
+      </ul>
+    </div>
+    {% endif %}
+
+    {# 禁跑窗盖住定时器时间 = 到点整轮跳过、一条都不发；必须独立于上面那个
+       if/elif 显示（否则会被 timerMismatch 这类分支吃掉）。 #}
+    {% if view.schedule.quietClash %}
+    <div class="danger-box" data-schedule-quiet-clash>
+      <strong><i data-lucide="moon"></i>禁跑时间窗把定时器的时间盖住了</strong>
+      <ul>
+        <li>{{ view.schedule.quietClash.text }}</li>
+        <li>要自动跑：到「运行配置」里把 <code>QUIET_WINDOW</code> 改成 <code>off</code>，或者把定时器挪出这个时段。</li>
+      </ul>
+    </div>
+    {% endif %}
+
+  {# ---- 今日进度（和其它 KPI 卡同一套排版：标签 / 数字 / 进度条 / 说明） ------- #}
+  <section class="overview-strip" aria-label="今日发送概览">
+    <div class="overview-primary">
+      <div class="overview-head">
+        <span class="overview-label">今日发送进度</span>
+        {% if summary.dry_run and summary.dry_run != "off" %}
+        <span class="pill warning" data-overview-dry-run>{{ summary.dry_run_text }}</span>
+        {% endif %}
+      </div>
+      <div class="overview-value" data-overview-value="progress">{{ summary.sent }}/{{ summary.total }}</div>
+      <div class="progress-line overview-progress">
+        <span class="progress-track">
+          <i class="progress-strong" style="width:{{ summary.strong_pct }}%" data-overview-bar-strong></i>
+          <i class="progress-echo" style="width:{{ summary.weak_pct }}%" data-overview-bar-echo></i>
+        </span>
+        <span class="progress-text" data-overview-value="progressPercent">{{ summary.sent_pct }}%</span>
+      </div>
+      <div class="overview-help">
+        强确认 <b data-overview-value="confirmed">{{ summary.confirmed }}</b>
+        · 弱证据 <b data-overview-value="weakSent">{{ summary.weak }}</b>
+        · {{ summary.accounts }} 个账号，共 <b data-overview-value="total">{{ summary.total }}</b> 个目标
+      </div>
+      {% if summary.mixed_runs %}
+      <div class="overview-help" data-overview-mixed-runs>
+        每个账号按自己的发送时间分开跑，上面是<strong>各账号各自最近一次</strong>的结果（共 {{ summary.run_count }} 轮）。
+      </div>
+      {% endif %}
+      {% if summary.dry_run == "mixed" %}
+      <div class="overview-help" data-overview-dry-run-hint>
+        各账号的档位不一致：有的真发、有的只是<strong>空跑</strong>排练 —— 每张账号卡上写着自己那一轮的档位。
+      </div>
+      {% elif summary.dry_run and summary.dry_run != "off" %}
+      <div class="overview-help" data-overview-dry-run-hint>
+        这是<strong>空跑</strong>的数字（{{ summary.dry_run_text }}），一条都没真发出去。
+      </div>
+      {% endif %}
+    </div>
+    <div class="overview-cell">
+      <div class="overview-label">下次自动触发</div>
+      <div class="overview-value" data-overview-value="nextTriggerAt">
+        {{ view.schedule.nextTriggerText or "不会自动跑" }}
+      </div>
+      <div class="overview-help" data-overview-value="scheduleLabel">{{ view.schedule.label or "-" }}</div>
+      <div class="overview-help" data-overview-value="nextTriggerHint">
+        {%- if not view.schedule.armed -%}
+        只能手动点「立即运行」
+        {%- elif view.schedule.dispatcher -%}
+        {# 派发器模式：各账号按自己的发送时间分开跑，'下次触发还剩几个目标'是上一轮的账 #}
+        {%- if view.schedule.nextTriggerText -%}
+        按各账号自己的时间发：{{ view.schedule.nextTriggerText }}
+        {%- else -%}
+        今天该发的都发完了
+        {%- endif -%}
+        {%- else -%}
+        {{ view.schedule.timerText }}
+        {%- endif -%}
+      </div>
+    </div>
+    <div class="overview-cell">
+      <div class="overview-label">最近强确认</div>
+      <div class="overview-value" data-overview-value="lastConfirmedAt">
+        {{ summary.lastConfirmedAt or "-" }}
+      </div>
+      <div class="overview-help" data-overview-help="lastConfirmedAt">
+        {%- if summary.lastConfirmedAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}通过会话选择 + 回执双确认的目标
+        {%- elif summary.lastWeakAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}只有弱证据（拿到页面回显，没拿到回执），不算强确认
+        {%- else %}{{ '最近这些轮次里' if summary.mixed_runs else '上一轮' }}没有确认成功的目标{% endif -%}
+      </div>
+    </div>
+    <div class="overview-cell">
+      <div class="overview-label">需要处理</div>
+      <div class="overview-value" data-overview-value="attention">{{ summary.attention }}</div>
+      <div class="overview-help">失败、选中失败或被账号状态阻断</div>
+    </div>
+  </section>
+
+  {# ---- 四档分布 -------------------------------------------------------------- #}
+  {# 只放四张卡：B 的 .metric-grid 是 auto-fit 栅格，第五张会单独掉到第二行；
+     "本轮已发送" 上面那条进度条里已经有（已发送 N/M 与百分比），不重复占位。 #}
+  <section class="metric-grid" aria-label="今日状态分布">
+    <article class="metric-card success">
+      <div class="metric-label">确认成功</div>
+      <div class="metric-value" data-overview-value="confirmed">{{ summary.confirmed }}</div>
+      <div class="metric-help">
+        会话选中与会话回执两边都确认 · 另有
+        <b data-overview-value="pageEcho">{{ summary.pageEcho }}</b> 个弱证据
+      </div>
+    </article>
+    <article class="metric-card warning">
+      <div class="metric-label">弱证据</div>
+      <div class="metric-value" data-overview-value="pageEcho">{{ summary.pageEcho }}</div>
+      <div class="metric-help">只拿到页面回显或网络信号，不能算强确认</div>
+    </article>
+    <article class="metric-card danger">
+      <div class="metric-label">失败或阻断</div>
+      <div class="metric-value" data-overview-value="attention">{{ summary.attention }}</div>
+      <div class="metric-help">
+        {% if summary.accounts_blocked %}
+        {{ summary.accounts_blocked }} 个账号本轮被阻断
+        {% else %}
+        目标级失败：下一轮重新扫描时还会再试一次
+        {% endif %}
+      </div>
+    </article>
+    <article class="metric-card info">
+      <div class="metric-label">未尝试</div>
+      <div class="metric-value" data-overview-value="pending">{{ summary.pending }}</div>
+      <div class="metric-help">{{ '各账号自己最近一轮里还没轮到的目标（下一次轮到它的时候处理）' if summary.mixed_runs else '还没有尝试过的目标（下一轮会处理）' }}</div>
+    </article>
+  </section>
+
+  {# ---- 账号状态 -------------------------------------------------------------- #}
+  <section class="dashboard-section" id="account-management">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">账号与目标好友</h2>
+        <p class="muted compact">勾上要续火花的人 → 保存。勾过之后按抖音的 id 匹配，改名字也不会发错人。</p>
+      </div>
+      <a class="section-link" href="/ops/runs">查看全部发送明细</a>
+    </div>
+
+    {# .notice-inline 自带 display:flex，hidden 盖不住它，所以 hidden 挂在外层这层普通 div 上 #}
+    <div data-friend-status-wrap {% if view.login.friend.session.state == "idle" and not view.login.friend.total %}hidden{% endif %}>
+    <div class="notice-inline" data-friend-status data-friend-state="{{ view.login.friend.session.state }}">
+      <i data-lucide="list-checks"></i>
+      <span>
+        <strong data-friend-state-text>{{ view.login.friend.session.state_label }}</strong>
+        <span class="muted" data-friend-status-text>{% if view.login.friend.total %}已读到 {{ view.login.friend.total }} 个会话{% else %}{{ view.login.friend.session.message }}{% endif %}</span>
+        {% if view.login.friend.session.note %}
+        <span class="muted" data-friend-note>（{{ view.login.friend.session.note }}）</span>
+        {% endif %}
+      </span>
+      {% if view.login.friend.session.active %}
+      <form method="post" action="/ops/friends/cancel">
+        <button class="button button-quiet" type="submit" data-friend-cancel>
+          <i data-lucide="circle-slash"></i><span>停止读取</span>
+        </button>
+      </form>
+      {% endif %}
+    </div>
+    </div>
+
+    {% for account in view.account_cards %}
+    {% set picker = account.picker %}
+    <article
+      class="account-card"
+      id="account-{{ account.unique_id }}"
+      data-account-overview="{{ account.unique_id }}"
+      data-account-state="{{ account.state }}"
+    >
+      <header class="account-card-head">
+        <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
+        <div class="account-title">
+          <strong data-account-name>{{ account.username }}</strong>
+          <small class="muted">
+            抖音号 {{ account.unique_id or "—" }}
+            {%- if account.fingerprint %} · 指纹 {{ account.fingerprint }}{% endif %}
+            {%- if account.orphan %} · 不在 TASKS 里
+            {%- elif account.cookie_configured %} · cookie {{ account.cookie_names|length }} 项
+            {%- else %} · <span class="danger-text">cookie 缺失</span>{% endif %}
+            {# 每张卡的数字来自"这个账号自己的最近一轮"：把那一轮写出来，
+               否则看着像是刚刚这一轮的（每个账号按自己的时间分开跑）。 #}
+            {%- if account.run_text and not account.run_missing %} · 数字来自 {{ account.run_text }} 那一轮{% endif %}
+          </small>
+        </div>
+        <span class="status-chip {{ account.chip }}">{{ account.state_label }}</span>
+        <div class="account-card-actions">
+          <a class="button button-quiet" href="/ops/runs#account-{{ account.unique_id }}">
+            <i data-lucide="list-tree"></i><span>明细</span>
+          </a>
+          {% if not account.orphan %}
+          <form method="post" action="/ops/login/start">
+            <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+            <input type="hidden" name="fingerprint" value="{{ account.fingerprint }}">
+            <button class="button button-quiet" type="submit" {% if view.login.session.active %}disabled{% endif %}>
+              <i data-lucide="refresh-cw"></i><span>重新登录</span>
+            </button>
+          </form>
+          <form method="post" action="/ops/account/remove">
+            <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+            <button
+              class="button button-danger"
+              type="submit"
+              data-confirm-title="移除账号"
+              data-confirm="会把 {{ account.username }}（{{ account.unique_id }}）从 TASKS 里删掉，并删除它的 COOKIES_{{ account.unique_id }}。写前会先备份 .env。确认继续吗？"
+              data-confirm-accept="确认移除"
+            >
+              <i data-lucide="trash-2"></i><span>移除</span>
+            </button>
+          </form>
+          {% endif %}
+        </div>
+      </header>
+
+      {% if account.run_missing %}
+      <p class="notice-inline" data-account-run-missing>
+        <i data-lucide="calendar-clock"></i>
+        {% if account.own_run_text %}
+        <span>这一轮没有轮到它 —— 每个账号按自己的发送时间分开跑，上面的数字是<strong>这一轮</strong>的。
+          它最近一次是 <strong>{{ account.own_run_text }}</strong> 那一轮。</span>
+        {% else %}
+        <span>最近这些轮次里都没有它 —— 下面的数字只是 <code>TASKS</code> 里的目标，一次都还没试过。</span>
+        {% endif %}
+      </p>
+      {% endif %}
+
+      {% if account.orphan %}
+      <p class="notice-inline" data-account-orphan>
+        <i data-lucide="history"></i>
+        <span>这个账号已经不在 <code>TASKS</code> 里了，下面这些只是它上一轮留下的记录 —— 下一轮不会再处理它，
+          所以也没有「移除」可点。想让它重新发，得先把抖音号加回 <code>.env</code> 的 <code>TASKS</code>。</span>
+      </p>
+      {% endif %}
+
+      <div class="account-stats">
+        <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>强确认</small></span>
+        <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>需处理</small></span>
+        <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>未尝试</small></span>
+        <div class="progress-line">
+          <span class="progress-track">
+            <i class="progress-strong" style="width:{{ account.strong_pct }}%" data-account-progress></i>
+            <i class="progress-echo" style="width:{{ account.weak_pct }}%" data-account-progress-echo></i>
+          </span>
+          <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }} · 强确认 {{ account.confirmed }}{% if account.dry_run and account.dry_run != "off" %} · 上一轮是空跑（{{ account.dry_run_text }}）{% endif %}</span>
+        </div>
+      </div>
+
+      {% if account.issues %}
+      {% set box = 'danger-box' if account.state == 'blocked' else 'warning-box' %}
+      <div class="{{ 'warning-box' if account.orphan else box }}">
+        <strong>
+          <i data-lucide="{{ 'history' if account.orphan else 'triangle-alert' }}"></i>
+          {{ '它上一轮的情况' if account.orphan else '要处理一下' }}
+        </strong>
+        <ul>
+          {% for issue in account.issues %}<li>{{ issue.text }}</li>{% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% if picker %}
+      <div class="time-editor" data-time-editor data-time-account="{{ account.unique_id }}">
+        <form method="post" action="/ops/account/time" data-time-form>
+          <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+          <div class="time-editor-head">
+            <div class="time-editor-lead">
+              <strong>发送时间</strong>
+              <small class="muted" data-time-window>{{ account.send_window }}</small>
+            </div>
+            <div class="time-editor-tools">
+              <input class="time-input" type="time" name="time" data-time-input
+                     value="{{ account.send_time }}"
+                     aria-label="这个账号每天几点发送">
+              <button class="button button-soft" type="submit">
+                <i data-lucide="clock"></i><span>保存时间</span>
+              </button>
+            </div>
+          </div>
+          <small class="muted">
+            <span class="time-state time-state-{{ account.send_state }}" data-time-state="{{ account.send_state }}">{{ account.send_state_text }}</span>
+            {%- if not account.send_time_custom %} · 现在跟全局默认 <code>TASK_SCHEDULE_TIMES</code>{% endif %}
+            · 一天只发一次，到点的那一刻由 <code>SCHEDULE_JITTER_MINUTES</code> 决定；
+            留空 = 跟全局默认。过了点没发是正常的：下一个门铃（每 5 分钟）会补发。
+          </small>
+        </form>
+      </div>
+
+      <div class="message-editor" data-message-editor data-message-account="{{ account.unique_id }}">
+        <form method="post" action="/ops/account/message" data-message-form>
+          <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+          <div class="message-editor-head">
+            <div class="message-editor-lead">
+              <strong>发送内容</strong>
+              <small class="muted" data-message-summary>
+                {%- if account.has_message -%}
+                  这个账号单独配了内容（{{ account.message_lines }} 行），下一轮就发它
+                {%- else -%}
+                  没单独配置，下一轮用全局模板
+                {%- endif -%}
+              </small>
+            </div>
+            <button class="button button-soft" type="submit">
+              <i data-lucide="save"></i><span>保存内容</span>
+            </button>
+          </div>
+          <textarea class="message-input" name="message" rows="3" data-message-input
+                    aria-label="发给这个账号目标好友的内容"
+                    placeholder="{{ view.message_template }}">{{ account.message }}</textarea>
+          <small class="muted">
+            留空 = 用全局模板 <code>MESSAGE_TEMPLATE</code>。<code>[API]</code> 照样换成每日一言，
+            而且是<strong>每个好友各取一次</strong>；换行照原样发出。保存前自动备份 <code>.env</code>。
+          </small>
+        </form>
+      </div>
+
+      <div class="friend-picker" data-friend-picker data-friend-account="{{ account.unique_id }}">
+        <div class="friend-picker-toolbar">
+          <div class="friend-picker-lead">
+            <strong>目标好友</strong>
+            <small class="muted" data-friend-summary>{{ picker.summary }}</small>
+          </div>
+          <div class="friend-picker-tools">
+            {% if picker.rows %}
+            <input class="friend-search-input" type="search" placeholder="搜好友 / 抖音号" data-friend-search>
+            <span class="muted compact"><strong data-friend-count>{{ picker.selected }}</strong> 个已勾选</span>
+            {% endif %}
+            <form method="post" action="/ops/friends/scan">
+              <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+              <input type="hidden" name="fingerprint" value="{{ account.fingerprint }}">
+              <button class="button button-soft" type="submit"{% if view.login.friend.session.active %} disabled{% endif %}>
+                <i data-lucide="list"></i><span>{% if picker.scan_active %}正在读取…{% else %}读取好友列表{% endif %}</span>
+              </button>
+            </form>
+          </div>
+        </div>
+        <form method="post" action="/ops/account/targets" data-friend-form>
+          <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+          <div class="friend-picker-list" data-friend-list>
+            {% for pick in picker.rows %}
+            <label class="friend-option{% if pick.selected %} selected{% endif %}"
+                   data-friend-option data-friend-name="{{ pick.search }}">
+              <input type="checkbox" name="picked" value="{{ pick.value }}"{% if pick.selected %} checked{% endif %}>
+              <span class="friend-option-name">{{ pick.name }}</span>
+              {% if pick.douyin_id %}<small class="muted">{{ pick.douyin_id }}</small>{% endif %}
+              {% if pick.is_group %}<span class="pill info">群</span>{% endif %}
+              {% if not pick.saved and picker.has_saved %}<span class="pill warning">新</span>{% endif %}
+            </label>
+            {% else %}
+            <p class="friend-picker-empty muted">读完会列在这里，勾上要续火花的人再保存。</p>
+            {% endfor %}
+          </div>
+          <div class="form-actions">
+            <button class="button button-primary" type="submit"{% if not picker.rows %} disabled{% endif %}>
+              <i data-lucide="save"></i><span>保存勾选</span>
+            </button>
+            <span class="muted compact">只影响这个账号的 <code>TASKS[].targets</code>，写前自动备份。</span>
+          </div>
+        </form>
+      </div>
+      {% endif %}
+    </article>
+    {% else %}
+    <div class="empty-state">
+      还没有账号。扫一次码就会自动加进 <code>TASKS</code>（好友列表可以之后再勾）。
+    </div>
+    {% endfor %}
+  </section>
+
+
+  {# ---- 扫码登录：把 Cookie 换掉的正路 ---------------------------------------- #}
+  {% set login_state = view.login.session.state %}
+  <section class="dashboard-section section-flush" id="login-panel">
+    <details class="collapsible-section section-collapse"
+             {% if view.login.session.active or view.login.session.persist or view.login.session.error or view.login.session.has_qr %}open{% endif %}>
+      <summary>
+        <span class="summary-copy">
+          <i data-lucide="scan-line"></i>
+          <span>
+            <strong>扫码登录</strong>
+            <small>换 Cookie 用抖音 App 扫码；登录成功后直接写进 .env（写前自动备份，写完权限收回 600）</small>
+          </span>
+        </span>
+        <span class="collapse-tail">
+          <span class="status-chip {% if login_state == 'done' %}success{% elif login_state == 'error' %}danger{% elif view.login.session.active %}warning{% endif %}"
+                data-login-state-label>{{ view.login.session.state_label }}</span>
+          <i class="summary-chevron" data-lucide="chevron-down"></i>
+        </span>
+      </summary>
+
+      <div class="collapsible-body">
+        {% if view.login.tasks_error %}
+        <div class="danger-box">
+          <strong><i data-lucide="triangle-alert"></i>TASKS 读不出来</strong>
+          <p>{{ view.login.tasks_error }}</p>
+        </div>
+        {% endif %}
+
+        <div
+          class="login-grid"
+          data-login-root
+          data-login-state="{{ view.login.session.state }}"
+          data-login-persisted="{{ '1' if view.login.session.persist else '0' }}"
+          data-qr-seq="{{ view.login.session.qr_seq }}"
+        >
+          <div class="login-main">
+            <div class="login-status-panel">
+              <p class="muted compact" data-login-status>{{ view.login.session.message }}</p>
+              <p class="muted compact" data-login-hint {% if not view.login.session.hint %}hidden{% endif %}>{{ view.login.session.hint }}</p>
+              {% if view.login.session.error %}
+              <div class="danger-box" data-login-error><strong>{{ view.login.session.error }}</strong></div>
+              {% else %}
+              <div class="danger-box" data-login-error hidden></div>
+              {% endif %}
+
+              {# 二次验证：风控账号扫完码还要填一条短信验证码。
+                 固定走「接收短信验证码」，不走「发指定短信到指定号码」那条路。 #}
+              <div class="code-box" data-login-code-wrap {% if not view.login.session.need_code %}hidden{% endif %}>
+                <p class="muted compact">
+                  <strong>这个账号需要二次验证。</strong>
+                  请选「接收短信验证码」拿到短信，把验证码填在下面
+                  {% if view.login.session.code_tries %}（已经提交过 {{ view.login.session.code_tries }} 次，最多 {{ view.login.session.code_max_attempts }} 次）{% endif %}。
+                </p>
+                <form method="post" action="/ops/login/code" data-login-code-form>
+                  <input
+                    type="text"
+                    name="code"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    maxlength="12"
+                    placeholder="短信验证码（照短信原文填数字）"
+                    aria-label="短信验证码"
+                    data-login-code-input
+                    required
+                  >
+                  <button class="button" type="submit" data-login-code-submit>提交验证码</button>
+                </form>
+                <p class="muted compact" data-login-code-status {% if not view.login.session.code_error %}hidden{% endif %}>{{ view.login.session.code_error }}</p>
+                {% if view.login.session.has_shot %}
+                <img class="login-shot" src="/ops/login/shot.png?v={{ view.login.session.shot_seq }}"
+                     alt="抖音的身份验证页截图" data-login-shot>
+                {% else %}
+                <img class="login-shot" alt="抖音的身份验证页截图" data-login-shot hidden>
+                {% endif %}
+              </div>
+
+              {% if view.login.session.persist %}
+              {% if view.login.session.persist.ok %}
+              <div class="warning-box" data-login-persist>
+                <strong><i data-lucide="check-check"></i>已经写进 .env</strong>
+                <ul>
+                  <li>变量：<code>{{ view.login.session.persist.key }}</code>（{{ view.login.session.persist.cookies }} 条 cookie：{{ view.login.session.persist.names|join("、") }}）</li>
+                  {% if view.login.session.persist.account %}
+                  <li>账号：{{ view.login.session.persist.account.nickname or "未读到昵称" }}{% if view.login.session.persist.account.unique_id %}（抖音号 {{ view.login.session.persist.account.unique_id }}）{% endif %}</li>
+                  {% endif %}
+                  {% if view.login.session.persist.note %}<li>{{ view.login.session.persist.note }}</li>{% endif %}
+                  {% if view.login.session.persist.backup %}<li>备份：<code>{{ view.login.session.persist.backup }}</code></li>{% endif %}
+                  <li>本进程已重读 .env，现在点「立即运行」就会用这份 Cookie。</li>
+                </ul>
+              </div>
+              {% else %}
+              <div class="danger-box" data-login-persist>
+                <strong><i data-lucide="triangle-alert"></i>登录成功，但没能写进 .env</strong>
+                <p>{{ view.login.session.persist.error }}</p>
+              </div>
+              {% endif %}
+              {% else %}
+              <div class="warning-box" data-login-persist hidden></div>
+              {% endif %}
+            </div>
+
+            <form class="stack-form" method="post" action="/ops/login/start" data-login-form>
+              <div class="field-pair">
+                <label>
+                  <span>抖音号（可选）</span>
+                  <input type="text" name="unique_id" placeholder="页面上读不到时用它决定写哪个变量" autocomplete="off">
+                </label>
+                <label>
+                  <span>备注名（可选）</span>
+                  <input type="text" name="username" placeholder="留空就用抖音昵称" autocomplete="off">
+                </label>
+              </div>
+              <div class="button-row">
+                <button class="button button-primary" type="submit" data-login-start
+                        {% if view.login.session.active %}disabled{% endif %}>
+                  <i data-lucide="scan-line"></i><span>开始扫码登录</span>
+                </button>
+                <button class="button button-danger" type="submit" formaction="/ops/login/cancel" data-login-cancel
+                        {% if not view.login.session.active %}disabled{% endif %}>
+                  <i data-lucide="x-circle"></i><span>取消</span>
+                </button>
+                <span class="muted compact" data-login-timer>
+                  {% if view.login.session.active %}已进行 {{ view.login.session.age_seconds }} 秒{% endif %}
+                </span>
+              </div>
+              <p class="muted compact">
+                登录成功后回到上面的「账号与目标好友」点「读取好友列表」勾人 —— 不用手打名字。
+              </p>
+            </form>
+          </div>
+
+          <aside class="login-qr-panel">
+            <img
+              class="login-qr-image"
+              data-login-qr
+              alt="抖音登录二维码"
+              {% if view.login.session.has_qr %}src="/ops/login/qr.png?v={{ view.login.session.qr_seq }}"{% else %}src="data:," hidden{% endif %}
+            >
+            <p class="muted compact" data-login-qr-status>
+              {% if view.login.session.has_qr %}用抖音 App 扫这张码，然后在手机上确认。{% else %}点「开始扫码登录」，二维码会显示在这里。{% endif %}
+            </p>
+            <p class="muted compact">
+              资料目录：<code>{{ view.login.profile_root }}</code>（一个账号一个，反复登录才不会天天换设备）
+            </p>
+          </aside>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  {# ---- 立即运行：整个面板唯一会改变外部状态的操作 ---------------------------- #}
+  <section class="dashboard-section" id="ops-panel">
+    <div class="section-header">
+      <div>
+        <h2 class="section-title">立即运行</h2>
+        <p class="muted compact">手动跑一轮，和定时任务走的是同一条链路。</p>
+      </div>
+    </div>
+
+    {% if view.blockers %}
+    <div class="warning-box">
+      <strong><i data-lucide="octagon-alert"></i>现在跑不了</strong>
+      <ul>
+        {% for blocker in view.blockers %}<li>{{ blocker }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    <form class="stack-form" method="post" action="/ops/run-now" data-dry-run-group data-segment-owner>
+      <div class="field-label">空跑档位</div>
+      <div class="segmented-control" role="tablist" aria-label="空跑档位">
+        {% for level in view.dry_run.levels %}
+        <button
+          class="segment-button {% if level == view.dry_run.default %}active{% endif %}"
+          type="button"
+          role="tab"
+          data-segment-target="dry-{{ level }}"
+          aria-selected="{{ 'true' if level == view.dry_run.default else 'false' }}"
+        >{{ view.dry_run.labels[level] }}</button>
+        {% endfor %}
+      </div>
+      {% for level in view.dry_run.levels %}
+      {# 面板必须套一层普通 div：.notice-inline 自己带 display:flex，
+         直接给它加 hidden 是盖不住的（第一次截图时三档提示全显示出来了）。 #}
+      <div data-segment-panel="dry-{{ level }}" {% if level != view.dry_run.default %}hidden{% endif %}>
+        <div class="notice-inline">{{ view.dry_run.hints[level] }}</div>
+      </div>
+      {% endfor %}
+      <input type="hidden" name="dry_run" id="dry-run-value" value="{{ view.dry_run.default }}">
+
+      <div class="form-actions">
+        <button
+          class="button {{ 'button-danger' if view.dry_run.default == 'off' else 'button-soft' }}"
+          type="submit"
+          id="run-now-submit"
+          {% if not view.can_run %}disabled{% endif %}
+        >
+          <i data-lucide="play"></i>
+          <span data-run-now-label>{{ view.dry_run.labels[view.dry_run.default] }}</span>
+        </button>
+        <span class="muted compact">
+          本轮剩余 <b data-overview-value="remaining">{{ summary.pending }}</b> 个目标未尝试
+          {%- if view.last_run %} · 上一轮 {{ view.last_run.run_text }}{% endif %}
+        </span>
+      </div>
+    </form>
+  </section>
+
+  {# ---- 运行配置（可改：写回 .env，白名单见 webui/settings.py） ----------------- #}
+  <section class="dashboard-section section-flush" id="config-panel">
+    <details class="collapsible-section section-collapse" data-config-panel>
+      <summary>
+        <span class="summary-copy">
+          <i data-lucide="settings-2"></i>
+          <span>
+            <strong>运行配置</strong>
+            <small>改完点保存：写回 <code>.env</code>（先备份）并立刻重读，定时任务与「立即运行」下一轮就用新值</small>
+          </span>
+        </span>
+        <span class="collapse-tail">
+          <span class="muted compact">{{ view.config_editable }} 项可改</span>
+          <i class="summary-chevron" data-lucide="chevron-down"></i>
+        </span>
+      </summary>
+      <div class="collapsible-body">
+        {% if view.config_problems %}
+        <div class="danger-box" data-config-problems>
+          <i data-lucide="alert-triangle"></i>
+          <div>
+            <strong>.env 里现在有 {{ view.config_problems|length }} 项工具认不出来</strong>
+            <ul>
+              {% for item in view.config_problems %}
+              <li><code>{{ item.key }}</code> = <code>{{ item.value }}</code> ：{{ item.error }}</li>
+              {% endfor %}
+            </ul>
+            <small class="muted">这些值会让下一轮「读配置」直接报错、或者悄悄回落到默认值 —— 在下面改好保存即可。</small>
+          </div>
+        </div>
+        {% endif %}
+
+        <form method="post" action="/ops/config/save" class="stack-form config-form" data-config-form>
+          <div class="table-shell">
+            <table>
+              <tbody>
+                {% for row in view.config_form %}
+                <tr data-config-row="{{ row.key }}">
+                  <th scope="row">
+                    {{ row.label }}
+                    {% if row.restart %}<br><small class="muted">要重启服务才生效</small>{% endif %}
+                  </th>
+                  <td>
+                    {% if row.kind == 'select' %}
+                    <select name="cfg_{{ row.key }}" id="cfg-{{ row.key }}" data-config-input="{{ row.key }}">
+                      {% for option in row.options %}
+                      <option value="{{ option.value }}" {% if option.value == row.value %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                    {% else %}
+                    <input
+                      type="text"
+                      name="cfg_{{ row.key }}"
+                      id="cfg-{{ row.key }}"
+                      data-config-input="{{ row.key }}"
+                      value="{{ row.value }}"
+                      placeholder="{{ row.placeholder }}"
+                      class="{% if row.bad %}input-bad{% endif %}"
+                      autocomplete="off"
+                      spellcheck="false"
+                    >
+                    {% endif %}
+                    <div class="config-hint muted">
+                      {{ row.hint }}
+                      {%- if row.bad %} · <span class="danger-text" data-config-bad>现在这个值就是坏的</span>
+                      {%- elif row.missing %} · <span data-config-missing>.env 里没有这一项，工具用的是默认值 {{ row.default }}</span>
+                      {%- endif %}
+                    </div>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="form-actions">
+            <button class="button button-soft" type="submit" data-config-submit>
+              <i data-lucide="save"></i>
+              <span>保存到 .env</span>
+            </button>
+            <span class="muted compact">
+              只写上面这些键：注释、变量顺序、<code>TASKS</code> 与 <code>COOKIES_*</code> 一个字节都不动
+            </span>
+          </div>
+        </form>
+
+        <div class="table-shell">
+          <table>
+            <tbody>
+              {% for row in view.config_rows %}
+              <tr>
+                <th scope="row">{{ row.label }}</th>
+                <td>
+                  {{ row.value if row.value != "" else "—" }}
+                  {% if row.hint %}<small class="muted"> · {{ row.hint }}</small>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        {% if view.message_template_rendered %}
+        <details class="collapsible-section">
+          <summary>
+            <span class="summary-copy">
+              <i data-lucide="message-square-text"></i>
+              <span><strong>消息模板预览</strong><small>实际发出去的样子（{{ view.message_template_lines }} 行）</small></span>
+            </span>
+            <i class="summary-chevron" data-lucide="chevron-down"></i>
+          </summary>
+          <div class="collapsible-body">
+            <pre class="logs-code" data-message-preview>{{ view.message_template_rendered }}</pre>
+            <small class="muted">.env 里的原文：<code data-message-raw>{{ view.message_template }}</code></small>
+          </div>
+        </details>
+        {% endif %}
+      </div>
+    </details>
+  </section>
+  {# ---- 访问口令（面板自己设：写回 .env 的 WEBUI_PASSWORD / WEBUI_PASSWORD_HASH） --- #}
+  <section class="dashboard-section section-flush" id="password-panel">
+    <details class="collapsible-section section-collapse" data-password-panel>
+      <summary>
+        <span class="summary-copy">
+          <i data-lucide="key-round"></i>
+          <span>
+            <strong>访问口令</strong>
+            <small>登录这个面板用的口令 —— 在这里改，不用碰服务器文件；改完所有旧会话（包括当前这个）立刻失效</small>
+          </span>
+        </span>
+        <span class="collapse-tail">
+          <span class="muted compact">{{ "已设置" if view.password_panel.has_password else "未设置" }}</span>
+          <i class="summary-chevron" data-lucide="chevron-down"></i>
+        </span>
+      </summary>
+      <div class="collapsible-body">
+        <div class="table-shell">
+          <table>
+            <tbody>
+              <tr>
+                <th scope="row">当前状态</th>
+                <td data-password-state>
+                  {% if view.password_panel.mode_label %}
+                  已启用口令，存为{{ view.password_panel.mode_label }}
+                  {% elif view.password_panel.from_environment %}
+                  已启用口令，但它来自进程环境（不在 <code>.env</code> 里）—— 改这里的口令会写进 <code>.env</code>，并优先生效
+                  {% elif view.password_panel.auth_enabled %}
+                  认证开着，但读不到口令（<code>.env</code> 被改了？）
+                  {% else %}
+                  没有口令：面板没有认证
+                  {% endif %}
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">会话有效期</th>
+                <td>
+                  {{ view.password_panel.session_hours }} 小时（<code>WEBUI_SESSION_MAX_AGE</code>，改口令会立刻作废所有会话）
+                  {% if not view.password_panel.secret_configured %}
+                  <br><small class="muted">没设 <code>WEBUI_SESSION_SECRET</code>：签名密钥是每次启动随机生成的，重启服务就得重新登录。</small>
+                  {% endif %}
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">存在哪里</th>
+                <td><code>{{ view.password_panel.env_file }}</code> · 改之前自动备份一份（只保留最近 5 份）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <form method="post" action="/ops/password" class="stack-form config-form" data-password-form>
+          <div class="table-shell">
+            <table>
+              <tbody>
+                <tr data-password-row="current">
+                  <th scope="row">当前口令</th>
+                  <td>
+                    <input type="password" name="current" id="password-current"
+                           data-password-input="current" autocomplete="current-password" required>
+                    <div class="config-hint muted">改口令要先证明是本人：就算这个会话还没过期，也要再输一次现在的口令。</div>
+                  </td>
+                </tr>
+                <tr data-password-row="new">
+                  <th scope="row">新口令</th>
+                  <td>
+                    <input type="password" name="new" id="password-new"
+                           data-password-input="new" autocomplete="new-password" required>
+                    <div class="config-hint muted">
+                      {{ view.password_panel.min_length }}–{{ view.password_panel.max_length }} 个字符；
+                      不能带英文单引号 <code>'</code>（会破坏 <code>.env</code> 的引号写法）和换行。
+                    </div>
+                  </td>
+                </tr>
+                <tr data-password-row="confirm">
+                  <th scope="row">再输一遍</th>
+                  <td>
+                    <input type="password" name="confirm" id="password-confirm"
+                           data-password-input="confirm" autocomplete="new-password" required>
+                    <div class="config-hint muted">两次不一致就一个字节都不写。</div>
+                  </td>
+                </tr>
+                <tr data-password-row="store">
+                  <th scope="row">保存方式</th>
+                  <td>
+                    <select name="store" id="password-store" data-password-input="store">
+                      {% for option in view.password_panel.modes %}
+                      <option value="{{ option.value }}" {% if option.value == view.password_panel.default_mode %}selected{% endif %}>{{ option.label }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="config-hint muted">
+                      两种只能留一种（写这个就清掉另一个）。明文省事：忘了能直接在服务器上翻开 <code>.env</code> 看；
+                      哈希稳妥：文件被看到也拿不到原口令，但忘了只能在服务器上重置。
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="form-actions">
+            <button class="button button-soft" type="submit" data-password-submit>
+              <i data-lucide="key-round"></i>
+              <span>改口令</span>
+            </button>
+            <span class="muted compact">
+              提交后会跳到登录页，请用新口令重新登录；其它设备上已经登录的会话也会一起失效。
+            </span>
+          </div>
+        </form>
+      </div>
+    </details>
+  </section>
+
+</div>
+{% endblock %}

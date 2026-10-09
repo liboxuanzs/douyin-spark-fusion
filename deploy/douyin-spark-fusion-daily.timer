@@ -1,0 +1,29 @@
+[Unit]
+Description=抖音续火花（融合版）发送时间表派发器
+Documentation=file:/opt/douyin-spark-fusion/docs/deploy.md
+
+[Timer]
+# 每 5 分钟敲一次门；**几点发由应用自己决定**（每个账号一个时间点，见 core/schedule.py）。
+#
+# 为什么不再写 `OnCalendar=*-*-* 20:30:00`：
+#   1. 每个账号可以有各自的发送时间（`TASKS[].time`），一个固定的 OnCalendar 表达不了；
+#   2. 抖动必须按账号算，而 `RandomizedDelaySec` 是"整个 unit 抖一次" ——
+#      所有账号会一起挪到同一个随机点，那恰好是最像机器人的行为。
+#
+# 现在抖动在应用里按 `sha256(抖音号|日期)` 算，同一个账号同一天恒定一个时刻
+# （不能每 tick 变，否则到点时间会一直往后飘，永远等不到）。
+#
+# 敲门本身很便宜：没有账号到点时 `main.py` 直接 exit 0，而且**不写运行账本**
+# （否则一天 288 条"什么都没干"的记录把历史刷没了）。
+#
+# ⚠️ `.env` 的 `TASK_SCHEDULE_TIMES` 现在的含义是"**没单独配时间的账号**用几点"，
+#    不再需要和本文件同步 —— 面板显示的是应用算出来的时间表，不是 OnCalendar。
+OnCalendar=*:0/5
+
+# 机器当时关机，开机后立刻补敲一次：当天还没发的账号还有机会补发。
+Persistent=true
+AccuracySec=1m
+Unit=douyin-spark-fusion-daily.service
+
+[Install]
+WantedBy=timers.target
