@@ -305,6 +305,26 @@ def mark_sent(state, unique_id, *, when=None, plan=None, run_id="", status=STATU
     return record
 
 
+def clear_mark(state, unique_id, *, when=None):
+    """撤销"这个账号今天办过了"的记录，返回是否真的撤掉了。
+
+    用途只有一个：**当天一条都没发出去**（登录失效等）之后重新登录成功，
+    要让门铃在当天剩下的时间里把它补发掉。已经成功发过的账号绝不走这条路 ——
+    那会变成一天发两遍（调用方负责判断，见 webui/app.py 的扫码成功回调）。
+    """
+    accounts = (state or {}).get("accounts")
+    if not isinstance(accounts, dict):
+        return False
+    key = str(unique_id or "")
+    record = accounts.get(key)
+    if not isinstance(record, dict):
+        return False
+    if when is not None and str(record.get("date") or "") != day_of(when):
+        return False
+    accounts.pop(key, None)
+    return True
+
+
 def prune(state, *, today=None, keep_days=7):
     """丢掉明显过期的记录（按日期字符串比，不动今天的）。
 

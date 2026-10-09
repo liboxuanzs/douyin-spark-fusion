@@ -82,6 +82,7 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
     """
     guard = guard or limit_guard.LimitGuard()
     sent_ok = sent_fail = 0     # 必须在 try 之外初始化：门禁阶段抛异常也要能走到收尾
+    login_lost = False          # 运行期掉登录（发送时复检出来的）—— 决定账号级结论
     out = {
         "username": username, "unique_id": unique_id,
         "status": "ok", "gate": None, "sent_ok": 0, "sent_fail": 0,
@@ -165,6 +166,21 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 )
             else:
                 sent_fail += 1
+                if r.get("login_lost"):
+                    # 掉登录：重试没有意义，剩下的目标也别试了（每个目标白等 20 秒
+                    # 回执再复检一次，只会把风控喂大）。账号级结论由下面标成 error，
+                    # 面板据此提示「请重新扫码登录」—— 见 core/douyin_im.recheck_login。
+                    login_lost = True
+                    logger.error(
+                        f"账号 {username} → {friend['display']} 发送时发现登录已失效"
+                        f"（{r.get('login_state') or 'UNKNOWN'}）：停止本轮发送，"
+                        f"请到面板「扫码登录」重新登录这个账号"
+                    )
+                    if len(out["entries"]) < ENTRY_CAP:
+                        out["entries"].append(_entry(friend, r, dry_run))
+                    else:
+                        out["entries_truncated"] = True
+                    break
                 # 重试一次：用 conv_id 重新选中（列表可能已滚动，原来的下标失效）
                 logger.warning(
                     f"账号 {username} → {friend['display']} 未拿到可信回执，重试一次"
@@ -214,6 +230,19 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 gap = random.uniform(lo, hi)
                 logger.debug(f"账号 {username} 下一条目标前等待 {gap:.1f}s")
                 time.sleep(gap)
+
+        if login_lost:
+            # 账号级结论：**掉登录 ≠ 发送失败**。记成 ok 会让调度把这一天
+            # 当成"已发"（core/schedule.select 当天不再重试），面板上也没有任何
+            # 提示 —— 2026-10-09 wheat 就是这么静默丢掉一整天的。记成 error 后
+            # 面板计入「需要处理」，人只要重新扫码登录，当天就会被补发
+            # （见 webui/app.py 的扫码成功回调）。
+            out["status"] = "error"
+            out["error"] = (
+                "login_lost: 登录已失效（服务端不认这个 sessionid），"
+                f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
+                "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+            )
 
         scan = im.last_scan or {}
         out.update({

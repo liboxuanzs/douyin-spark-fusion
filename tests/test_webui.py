@@ -3532,5 +3532,130 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
         self.assertIn("今天该发的都发完了", schedule["nextTriggerText"])
 
 
+
+class ReloginRequeueTests(unittest.TestCase):
+    """重新扫码登录成功后，当天没发出去的要自动补发。
+
+    时间表把"失败"也算办过（防的是坏 cookie 一天被门铃踹 288 次），所以掉登录
+    那一轮记完之后，人重新登录还得手点「立即运行」才会补发 —— 2026-10-09 wheat
+    掉登录那天就丢在这儿。`_requeue_after_relogin()` 在登录成功的瞬间撤掉记账，
+    下一个 5 分钟门铃自动补上；**已经成功发过的账号绝不撤**（撤了就一天发两遍）。
+
+    ★ 刻意**不继承** `WebUITestCase`：这里只碰账本与时间表两个文件，
+      继承会把整套面板用例再跑一遍（还会带上那两条环境相关的既有失败）。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="dsf-requeue-test-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.ledger = self.tmp / "runs.jsonl"
+        self.schedule_file = self.tmp / "schedule_state.json"
+
+        self._saved_env = {k: os.environ.get(k)
+                           for k in ("RUN_LEDGER_FILE", "SCHEDULE_STATE_FILE")}
+        os.environ["RUN_LEDGER_FILE"] = str(self.ledger)
+        os.environ["SCHEDULE_STATE_FILE"] = str(self.schedule_file)
+
+        def restore() -> None:
+            for key, value in self._saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+
+        from core import schedule
+        self.schedule = schedule
+        state = schedule.load_state(self.schedule_file)
+        schedule.mark_sent(state, UID, when=schedule.now(),
+                           status=schedule.STATUS_ERROR, note="login_lost")
+        schedule.save_state(state, self.schedule_file)
+
+    # ------------------------------------------------------------ 脚手架
+
+    def write_ledger(self, rows: List[Any]) -> None:
+        lines = [r if isinstance(r, str) else json.dumps(r, ensure_ascii=False) for r in rows]
+        self.ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _run_today(self, sent_ok: Any, unique_id: str = UID) -> Dict[str, Any]:
+        started = datetime.now().astimezone()
+        return {
+            "run_id": "20261009-173500-abcd",
+            "started_at": _iso(started),
+            "finished_at": _iso(started),
+            "dry_run": "off",
+            "accounts": [{
+                "username": ACCOUNT_NAME if unique_id == UID else OTHER_ACCOUNT,
+                "unique_id": unique_id,
+                "status": "error" if sent_ok == 0 else "ok",
+                "gate": "READY",
+                "sent_ok": sent_ok,
+                "sent_fail": 0,
+                "entries": [],
+                "missing": [],
+                "select_failed": [],
+                "targets": [],
+            }],
+        }
+
+    def _marked_today(self) -> bool:
+        state = self.schedule.load_state(self.schedule_file)
+        return self.schedule.entry_for(state, UID, self.schedule.now()) is not None
+
+    # -------------------------------------------------------------- 用例
+
+    def test_zero_sent_today_clears_the_mark(self):
+        self.write_ledger([self._run_today(sent_ok=0)])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertTrue(out["requeued"], out)
+        self.assertFalse(self._marked_today())
+
+    def test_already_sent_today_keeps_the_mark(self):
+        self.write_ledger([self._run_today(sent_ok=2)])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "already-sent")
+        self.assertTrue(self._marked_today())
+
+    def test_partial_success_also_keeps_the_mark(self):
+        """只要当天发出去过一条，就不许再补 —— 补了朋友会收到两遍。"""
+        self.write_ledger([self._run_today(sent_ok=1)])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "already-sent")
+        self.assertTrue(self._marked_today())
+
+    def test_unreadable_count_is_treated_as_sent(self):
+        self.write_ledger([self._run_today(sent_ok="不知道")])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "already-sent")
+        self.assertTrue(self._marked_today())
+
+    def test_no_run_today_is_left_alone(self):
+        """今天根本没轮到它 → 没有记账要撤，保持原样（信息类返回，不报错）。"""
+        self.write_ledger([])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "no-run-today")
+        self.assertTrue(self._marked_today())
+
+    def test_another_accounts_run_does_not_requeue(self):
+        """账本里今天的记录是**别的**账号的 → 不能撤这个账号的记账。"""
+        self.write_ledger([self._run_today(sent_ok=0, unique_id=OTHER_UID)])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "no-run-today")
+        self.assertTrue(self._marked_today())
+
+    def test_empty_uid_is_a_noop(self):
+        out = webui_app._requeue_after_relogin("")
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "no-uid")
+        self.assertTrue(self._marked_today())
+
+
 if __name__ == "__main__":
     unittest.main()

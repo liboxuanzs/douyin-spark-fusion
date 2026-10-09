@@ -812,5 +812,60 @@ class ScheduleGateTests(_TasksCase):
         self.assertNotIn("cookies", brief)
 
 
+
+class RuntimeLoginLostTests(_TasksCase):
+    """运行期掉登录：账号级结论必须记 error，并且立刻停掉剩余目标。
+
+    2026-10-09 wheat 的真实事故：网页登录态失效之后，页面仍然长着 IM 的样子，
+    点击发送"成功"、回执永远不来，4 个目标被记成「发送失败」，而整轮按
+    `status=ok` 记账 —— 等于"今天已发"，当天不再重试，面板上也没有任何提示。
+    这条用例钉住：掉登录要 break、账号级 status=error、记账写进时间表的是 error。
+    """
+
+    def _login_lost(self, dry_run="off"):
+        return {"ok": False, "via": None, "message_id": None, "code": None,
+                "status": None, "conv_id": "0:1:2", "display": "甲同学",
+                "reason": "login_lost", "level": "none", "dry_run": dry_run,
+                "login_lost": True, "login_state": "EXPIRED",
+                "rate_limited": False, "limit": None}
+
+    def test_login_lost_breaks_the_loop_and_marks_error(self):
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.result = self._login_lost()
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("login_lost", acct["error"])
+        self.assertIn("重新登录", acct["error"])
+        self.assertEqual(acct["sent_ok"], 0)
+        self.assertEqual(acct["sent_fail"], 1)
+        # 只试了第一个目标（共 2 个）：掉登录之后不再白等第二个的 20 秒超时
+        self.assertEqual(len(_FakeIM.instances[0].messages), 1)
+        self.assertEqual([e["reason"] for e in acct["entries"]], ["login_lost"])
+        # 时间表里必须是 error（面板会计入「需要处理」），不能是 ok
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "error")
+        self.assertIn("login_lost", state["accounts"]["111"]["note"])
+
+    def test_send_failure_without_login_lost_still_retries(self):
+        """对照：普通发送失败（登录还在）保持原来的"重试一次"，结果仍是 ok。"""
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.result = {"ok": False, "via": None, "message_id": None,
+                          "code": None, "status": None, "conv_id": "0:1:2",
+                          "display": "甲同学", "reason": "no_receipt",
+                          "level": "none", "dry_run": "off",
+                          "rate_limited": False, "limit": None}
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "ok")
+        self.assertEqual(acct["sent_fail"], 2)          # 两个目标各失败一次
+        # 每个目标都重试了一次：4 次调用（2 目标 × 2 次）
+        self.assertEqual(len(_FakeIM.instances[0].messages), 4)
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], schedule.STATUS_OK)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1081,6 +1081,51 @@ def login_view() -> Dict[str, Any]:
     }
 
 
+def _requeue_after_relogin(unique_id: str) -> Dict[str, Any]:
+    """重新登录成功后，把"今天已经办过"的记账撤掉 —— **前提是今天一条都没发出去**。
+
+    为什么需要它：登录失效那一轮记的是 `status=error`（见 `core/tasks.py`），
+    而时间表把"失败"也算办过（当天不再重试，否则坏 cookie 一天被门铃踹 288 次）。
+    于是重新扫码登录之后，人还得手动点「立即运行」才会补发 —— 2026-10-09 wheat
+    掉登录那次就是丢在这里。登录成功的瞬间把今天的记账撤掉，下一个 5 分钟门铃
+    就会补上；**今天已经成功发过的账号绝不撤**（撤了就变成一天发两遍）。
+    """
+    uid = str(unique_id or "").strip()
+    if not uid:
+        return {"requeued": False, "reason": "no-uid"}
+    try:
+        from core import run_ledger, schedule
+    except Exception as exc:  # noqa: BLE001 —— 补发判断失败不能让扫码登录本身失败
+        return {"requeued": False, "reason": f"import-failed: {type(exc).__name__}"}
+
+    today = schedule.day_of(schedule.now())
+    seen_today = sent_today = False
+    for record in run_ledger.read_runs(limit=200):
+        if not str(record.get("started_at") or "").startswith(today):
+            continue
+        for account in record.get("accounts") or []:
+            if str(account.get("unique_id") or "") != uid:
+                continue
+            seen_today = True
+            try:
+                if int(account.get("sent_ok") or 0) > 0:
+                    sent_today = True
+            except (TypeError, ValueError):
+                sent_today = True      # 读不懂就当发过：宁可不补发，也不能补出双份
+    if sent_today:
+        return {"requeued": False, "reason": "already-sent"}
+    if not seen_today:
+        return {"requeued": False, "reason": "no-run-today"}
+    try:
+        state = schedule.load_state()
+        changed = schedule.clear_mark(state, uid, when=schedule.now())
+        saved = schedule.save_state(state) if changed else False
+    except Exception as exc:  # noqa: BLE001
+        return {"requeued": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return {"requeued": bool(changed), "saved": bool(saved),
+            "reason": "" if changed else "no-mark"}
+
+
 def start_login_session(
     *, unique_id: str = "", username: str = "", fingerprint: str = "",
 ) -> Dict[str, Any]:
@@ -1137,6 +1182,7 @@ def start_login_session(
         adopt = str(login_profile_dir(real_uid))
         if adopt == str(result.get("profile_dir") or ""):
             adopt = ""
+        requeue = _requeue_after_relogin(real_uid)
         return {
             "ok": bool(merged.get("ok")),
             "error": merged.get("error") or "",
@@ -1148,6 +1194,7 @@ def start_login_session(
             "tasks": merged,
             "note": merged.get("message") or "",
             "adopt_profile": adopt,
+            "requeue": requeue,
         }
 
     try:

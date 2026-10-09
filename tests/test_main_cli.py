@@ -111,5 +111,44 @@ class EnvFilePrecedenceTests(unittest.TestCase):
             self.assertEqual(os.environ["MESSAGE_TEMPLATE"], "甲\\n乙")
 
 
+
+class FlagParsingTests(unittest.TestCase):
+    """`--only` / `--force` / 认不出来的开关。
+
+    这里曾经有个"通吃型"分支（`startswith("-")` → 报错）排在 `--only` **前面**，
+    于是 `--only`、`-o`、`--only=x` 全被判成"认不出来的开关"，而报错信息里给出的
+    示例偏偏就是 `python main.py task --only 10050yi` —— 2026-10-09 想只跑一个账号
+    时撞上的就是这个。位置参数的"静默忽略"更隐蔽：`--only x` 被吞掉后 `x` 会留在
+    rest 里当子命令，`task x` 照样跑全部账号。
+    """
+
+    def test_only_with_a_value(self):
+        force, only, rest, error = main._parse_flags(["task", "--only", "10050yi"])
+        self.assertEqual((force, only, rest, error), (False, "10050yi", ["task"], ""))
+
+    def test_only_alias_and_equals_form(self):
+        self.assertEqual(main._parse_flags(["task", "-o", "wheat"])[1], "wheat")
+        self.assertEqual(main._parse_flags(["task", "--only=wheat"])[1], "wheat")
+
+    def test_only_without_a_value_is_an_error(self):
+        _, _, _, error = main._parse_flags(["task", "--only"])
+        self.assertIn("--only", error)
+
+    def test_force_and_force_all_are_distinguishable(self):
+        self.assertEqual(main._parse_flags(["task", "--force"])[0], True)
+        self.assertEqual(main._parse_flags(["task", "--force-all"])[0], "all")
+
+    def test_unknown_switch_is_still_rejected(self):
+        """修 `--only` 不能把"认不出来的开关"这条防线一起修没。"""
+        for bad in ("--froce", "--onlyy", "-x"):
+            _, only, rest, error = main._parse_flags(["task", bad])
+            self.assertTrue(error, bad)
+            self.assertEqual(only, "")
+
+    def test_positional_args_are_passed_through(self):
+        self.assertEqual(main._parse_flags(["dry-run", "full"])[2], ["dry-run", "full"])
+        self.assertEqual(main._parse_flags([])[2], [])
+
+
 if __name__ == "__main__":
     unittest.main()

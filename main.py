@@ -89,11 +89,6 @@ def _parse_flags(args):
             force = True
         elif item == "--force-all":
             force_all = True
-        elif item.startswith("-") and item != "-":
-            # 认不出来的开关**不能**塞进 rest：它会变成"子命令"，而 rest 里
-            # 只要有一个合法位置参数，它就被静默忽略 —— `task --froce` 等于 `task`，
-            # 用户以为限制了什么，其实没有。
-            error = error or f"认不出来的开关：{item}"
         elif item.startswith("--only="):
             only = item.split("=", 1)[1].strip()
         elif item in ("--only", "-o"):
@@ -102,6 +97,16 @@ def _parse_flags(args):
             else:
                 index += 1
                 only = str(args[index]).strip()
+        elif item.startswith("-") and item != "-":
+            # 认不出来的开关**不能**塞进 rest：它会变成"子命令"，而 rest 里
+            # 只要有一个合法位置参数，它就被静默忽略 —— `task --froce` 等于 `task`，
+            # 用户以为限制了什么，其实没有。
+            #
+            # ★ 这一条必须放在**所有**合法开关之后：它按"以 - 开头"通吃，
+            #   排在前面会把 `--only` / `-o` / `--only=x` 全部吞掉（线上真的发生过：
+            #   2026-10-09 想用它只跑一个账号，得到的却是「认不出来的开关：--only」，
+            #   而报错里给出的示例偏偏就是这个用法）。
+            error = error or f"认不出来的开关：{item}"
         else:
             rest.append(item)
         index += 1

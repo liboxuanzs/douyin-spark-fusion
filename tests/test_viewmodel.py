@@ -11,7 +11,9 @@ viewmodel 是"面板要显示什么"的**唯一**来源（B 的模板与 app.js 
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +21,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from core import schedule  # noqa: E402
 from webui import viewmodel  # noqa: E402
 
 
@@ -889,6 +892,116 @@ class ViaLabelCoverageTests(unittest.TestCase):
         label = viewmodel.VIA_LABELS["http"]
         self.assertNotIn("仅", label, f"「{label}」暗示会话回显看过了且不认，事实是没等到")
         self.assertIn("会话回显", label, "要说清楚少的是哪一侧")
+
+
+
+class LoginLostCardTests(unittest.TestCase):
+    """运行期掉登录的账号卡：必须说清"登录失效、去重新扫码"，而不是"有几个失败"。
+
+    2026-10-09 wheat：发送时才发现登录失效，账本里是 4 条发送失败，卡片当时只会
+    显示「需处理 4」和一堆"发送失败"，用户根本不知道要做的是重新扫码。
+    """
+
+    def _card(self, **over):
+        account = _account(sent_fail=4, status="error",
+                           error="login_lost: 登录已失效（服务端不认这个 sessionid）"
+                                 "，请到面板「扫码登录」重新登录该账号",
+                           entries=[_entry(ok=False, level="none",
+                                           reason="login_lost")], **over)
+        return viewmodel.build_account(_snapshot(), _record(accounts=[account]))
+
+    def test_state_is_blocked_not_just_attention(self):
+        card = self._card()
+        self.assertEqual(card["state"], "blocked")
+
+    def test_issue_tells_the_user_to_scan_again(self):
+        card = self._card()
+        texts = [issue["text"] for issue in card["issues"]]
+        self.assertTrue(any("登录已失效" in t for t in texts), texts)
+        self.assertTrue(any("扫码" in t for t in texts), texts)
+        self.assertTrue(any(issue["level"] == "danger" for issue in card["issues"]))
+
+    def test_gate_expired_points_at_scanning_again(self):
+        """门禁就判出登录失效（EXPIRED）时，卡片也要说清下一步是重新扫码。"""
+        account = _account(status="skipped", sent_ok=0, sent_fail=0, entries=[],
+                           gate="EXPIRED")
+        snapshot = _snapshot(gate="EXPIRED", gate_text="登录已失效",
+                             status="skipped", status_text="跳过")
+        card = viewmodel.build_account(snapshot, _record(accounts=[account]))
+        texts = [issue["text"] for issue in card["issues"]]
+        self.assertTrue(any("上次门禁" in t and "扫码" in t for t in texts), texts)
+        self.assertEqual(card["state"], "blocked")
+
+    def test_plain_send_failure_stays_attention(self):
+        """对照：普通发送失败（登录还在）仍然是 attention，不该被这条规则吞掉。"""
+        account = _account(sent_fail=4, status="ok", error=None,
+                           entries=[_entry(ok=False, level="none", reason="no_receipt")])
+        card = viewmodel.build_account(_snapshot(), _record(accounts=[account]))
+        self.assertEqual(card["state"], "attention")
+        self.assertFalse(any("登录已失效" in issue["text"] for issue in card["issues"]))
+
+
+
+class NextDueSkipTests(unittest.TestCase):
+    """「下一个该发的是谁」必须和派发器同一口径：`skipped` 当天还会再试。
+
+    2026-10-09 wheat 掉登录：上一轮被记成 `skipped`（门禁没过、一条都没发出去），
+    派发器下一次门铃还会再试它，而面板顶上却写着「今天该发的都发完了」——
+    两处说法相反，用户只能猜。根因是 `next_due()` 把"今天有记录"一律当成"发过了"。
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="dsf-nextdue-")
+        self.addCleanup(shutil.rmtree, self._dir, True)
+        self.state_file = os.path.join(self._dir, "schedule_state.json")
+        self._old = os.environ.get("SCHEDULE_STATE_FILE")
+        os.environ["SCHEDULE_STATE_FILE"] = self.state_file
+
+        def restore():
+            if self._old is None:
+                os.environ.pop("SCHEDULE_STATE_FILE", None)
+            else:
+                os.environ["SCHEDULE_STATE_FILE"] = self._old
+        self.addCleanup(restore)
+
+    @staticmethod
+    def _when(text="2026-10-09 22:30:00"):
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").astimezone()
+
+    def _mark(self, status, text="2026-10-09 22:30:00"):
+        when = self._when(text)
+        state = schedule.load_state()
+        schedule.mark_sent(state, "10050yi", when=when, status=status,
+                           plan={"time": "17:20", "due_at": when}, run_id="r1")
+        schedule.save_state(state)
+
+    def _account(self):
+        return {"unique_id": "10050yi", "username": "wheat", "send_time": "17:20"}
+
+    def test_skipped_keeps_it_as_the_next_one(self):
+        self._mark(schedule.STATUS_SKIPPED)
+        got = viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
+        self.assertIsNotNone(got, "跳过的那一轮当天还会再试，不能说'都发完了'")
+        self.assertEqual(got["name"], "wheat")
+
+    def test_ok_means_nothing_left_today(self):
+        self._mark(schedule.STATUS_OK)
+        self.assertIsNone(
+            viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
+        )
+
+    def test_error_also_counts_as_done_for_today(self):
+        """`error`（跑挂了）**不**当天重试（否则坏 cookie 一天被踹 288 次）。"""
+        self._mark(schedule.STATUS_ERROR)
+        self.assertIsNone(
+            viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
+        )
+
+    def test_yesterdays_skip_does_not_resurrect_today(self):
+        self._mark(schedule.STATUS_SKIPPED, text="2026-10-08 17:31:00")
+        got = viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
+        # 今天的 due_at 是 17:31（已过），仍然应该报它是"下一个"
+        self.assertIsNotNone(got)
 
 
 if __name__ == "__main__":

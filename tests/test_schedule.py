@@ -395,5 +395,60 @@ class PersistedStateShapeTests(_StateCase):
         self.assertNotIn("\\u", text)
 
 
+
+class ClearMarkTests(_StateCase):
+    """`clear_mark` —— 重新登录成功后把"今天办过了"撤掉，让当天还能补发。
+
+    没有它：掉登录那一轮被记成 error（失败也算办过，防的是坏 cookie 一天被门铃
+    踹 288 次），人重新扫码登录之后还得手点「立即运行」，否则这一天就没了。
+    有了它：登录成功的瞬间撤掉记账，下一个 5 分钟门铃自动补发。
+    危险面只有一个 —— **已经成功发过的账号绝不能被撤**（撤了就一天发两遍），
+    所以这里同时钉住"别人的记录不许动""别的日期的记录不许动"。
+    """
+
+    def test_removes_only_that_account_and_only_today(self):
+        state = schedule.load_state(self.path)
+        today = _at()
+        yesterday = today - timedelta(days=1)
+        schedule.mark_sent(state, "10050yi", when=yesterday, status=schedule.STATUS_OK)
+        schedule.mark_sent(state, "10050yi", when=today, status=schedule.STATUS_ERROR)
+        schedule.mark_sent(state, "76998876121", when=today, status=schedule.STATUS_OK)
+
+        # 昨天的记录还在 → 今天的撤销请求不该被它挡住
+        self.assertTrue(schedule.clear_mark(state, "10050yi", when=today))
+        self.assertNotIn("10050yi", state["accounts"])
+        self.assertIn("76998876121", state["accounts"])
+
+    def test_is_a_noop_when_there_is_no_mark(self):
+        state = schedule.load_state(self.path)
+        self.assertFalse(schedule.clear_mark(state, "10050yi", when=_at()))
+        self.assertEqual(state["accounts"], {})
+
+    def test_does_not_touch_another_days_record(self):
+        state = schedule.load_state(self.path)
+        yesterday = _at() - timedelta(days=1)
+        schedule.mark_sent(state, "10050yi", when=yesterday, status=schedule.STATUS_OK)
+        self.assertFalse(schedule.clear_mark(state, "10050yi", when=_at()))
+        self.assertIn("10050yi", state["accounts"])
+
+    def test_survives_a_broken_state(self):
+        """状态文件里塞了乱七八糟的东西也不能抛 —— 扫码登录不能被它拖垮。"""
+        self.assertFalse(schedule.clear_mark({}, "10050yi"))
+        self.assertFalse(schedule.clear_mark({"accounts": None}, "10050yi"))
+        self.assertFalse(schedule.clear_mark({"accounts": {"10050yi": "坏了"}}, "10050yi"))
+
+    def test_roundtrip_through_the_state_file(self):
+        state = schedule.load_state(self.path)
+        schedule.mark_sent(state, "10050yi", when=_at(), status=schedule.STATUS_ERROR)
+        schedule.save_state(state, self.path)
+        again = schedule.load_state(self.path)
+        self.assertTrue(schedule.clear_mark(again, "10050yi", when=_at()))
+        schedule.save_state(again, self.path)
+        final = schedule.load_state(self.path)
+        self.assertNotIn("10050yi", final["accounts"])
+        # 选举逻辑据此重新认为"今天还没发"
+        self.assertIsNone(schedule.entry_for(final, "10050yi", _at()))
+
+
 if __name__ == "__main__":
     unittest.main()

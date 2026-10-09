@@ -108,6 +108,9 @@ REASON_LABELS: Dict[str, str] = {
     "editor_text_mismatch": "输入框里的字与要发的内容对不上",
     "editor_not_cleared": "输入框里上一次的字没清干净，这条先不发（免得叠着发两遍）",
     "editor_residue": "输入框里发现上一条消息的残留，这条先不发",
+    # core/douyin_im.py 的登录态复检（2026-10-09 wheat 掉登录那次加的）：
+    # 页面还长着 IM 的样子，回执却永远不来 —— 这不是"没发出去"，是"没登录"。
+    "login_lost": "登录已失效（要重新扫码登录）",
 }
 
 #: 回执来源（``core.douyin_im`` 的 ``via`` 字段）。
@@ -348,10 +351,15 @@ def _account_state(
 
 
 def _account_state_for(data: Dict[str, Any], *, ready: bool, gate: str, status: str,
-                       attempted: int, failed: int) -> str:
+                       attempted: int, failed: int, login_lost: bool = False) -> str:
     """和 ``_account_state`` 一样，只是先认「只在账本里、配置里已经没了」这一档。"""
     if data.get("orphan"):
         return "orphan"
+    # 运行期掉登录：页面上一切正常、发送却永远拿不到回执，最后一条都没发出去。
+    # 这既不是"干了活有几个失败"（attention），也不是门禁没过（gate 仍是 READY），
+    # 而是**根本上没法干活** —— 按 blocked 处理，卡片给出重新扫码的指引。
+    if login_lost:
+        return "blocked"
     return _account_state(
         ready=ready, gate=gate, status=status, attempted=attempted, failed=failed
     )
@@ -427,12 +435,21 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
     best: Optional[Dict[str, Any]] = None
     for item in accounts or []:
         uid = _text(_get(item, "unique_id"))
+        if not uid:
+            continue
         # 今天已经记过账的账号不会再发 —— 不排除掉的话"下次"会一直指向一个
         # 已经发生过、且今天不会再发生的时间。
-        if not uid or schedule.entry_for(state, uid, when):
+        #
+        # ★ 口径必须与派发器一致（`core.schedule.select`）：`skipped` 是
+        #   "门禁没过 / 命中风控，一条都没发出去"，当天名额还在、下一次门铃还会再试。
+        #   把它算成"今天发过了"，面板就会一边显示该账号「下一次门铃会重试」、
+        #   一边在顶上写「今天该发的都发完了」（2026-10-09 wheat 掉登录时就是这样）。
+        record = schedule.entry_for(state, uid, when)
+        if record is not None and _text(record.get("status")) != schedule.STATUS_SKIPPED:
             continue
         plan = schedule.plan_for(
-            {"unique_id": uid, "time": _text(_get(item, "send_time"))}, when=when
+            {"unique_id": uid, "username": _text(_get(item, "username")),
+             "time": _text(_get(item, "send_time"))}, when=when
         )
         if best is None or plan["due_at"] < best["due_at"]:
             best = plan
@@ -523,8 +540,12 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     gate = _text(data.get("gate")).upper()
     status = _text(data.get("status")).lower()
     orphan = bool(data.get("orphan"))
+    # 「运行期掉登录」只写在账本的账号结果里（`core/tasks.py` 的 `out["error"]`），
+    # 配置快照 `data` 上没有这个字段 —— 必须从 `account` 上取。
+    login_lost = str(_get(account, "error") or "").startswith("login_lost")
     state = _account_state_for(
-        data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed
+        data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed,
+        login_lost=login_lost,
     )
 
     issues: List[Dict[str, str]] = []
@@ -538,7 +559,22 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             }
         )
     if gate and gate != _GATE_OK:
-        issues.append({"level": "danger", "text": f"上次门禁：{_text(data.get('gate_text'), gate)}"})
+        text = f"上次门禁：{_text(data.get('gate_text'), gate)}"
+        if gate in ("EXPIRED", "LOGGED_OUT"):
+            # 登录失效是**唯一**能一眼看出该怎么办的门禁失败：重新扫码。
+            # 只说"上次门禁：登录已失效"用户还得自己猜下一步做什么。
+            text += " —— 到下面「扫码登录」用这个账号重新扫一次即可（登录成功后当天会自动补发）"
+        issues.append({"level": "danger", "text": text})
+    if login_lost:
+        # 与"门禁没过"分开说：门禁是**操作前**就看出来的，这条是**发送时**才暴露的
+        # ——页面还长着 IM 的样子（列表、输入框、发送按钮都在），点击也"成功"，
+        # 但服务端不认这个登录态，于是每条都拿不到回执，一条也没发出去。
+        issues.append({
+            "level": "danger",
+            "text": "上一轮登录已失效（服务端不认这个 sessionid），一条都没发出去 —— "
+                    "到下面「扫码登录」用这个账号重新扫一次即可；"
+                    "重新登录成功后，当天会自动补发（不用手点「立即运行」）",
+        })
     if status == "skipped":
         issues.append({"level": "warning", "text": "上一轮该账号被跳过"})
     if truncated:

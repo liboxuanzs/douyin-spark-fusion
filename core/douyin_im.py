@@ -207,20 +207,33 @@ EDITOR_CANDIDATES = (
 # ===========================================================================
 
 JS_LOGIN_DOM = """(() => {
+  const shown = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const st = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && st.display !== 'none'
+        && st.visibility !== 'hidden' && parseFloat(st.opacity || '1') > 0.05;
+  };
   const box = document.querySelector('[data-e2e="login-container"]');
-  let boxVisible = false;
-  if (box) {
-    const r = box.getBoundingClientRect();
-    const st = getComputedStyle(box);
-    boxVisible = r.width > 0 && r.height > 0 && st.display !== 'none'
-              && st.visibility !== 'hidden' && parseFloat(st.opacity || '1') > 0.05;
-  }
+  const boxVisible = shown(box);
+  // 2026-10 新版登录弹窗没有 data-e2e，只有 class / 组件 id。
+  // 线上 wheat 掉登录那天：页面上明摆着画着这个弹窗，旧选择器一个都没命中，
+  // 于是门禁判成"等待超时"，用户看到的是"超时"而不是"去重新登录"。
+  const fresh = document.querySelector('.douyin_login_new_class')
+             || document.querySelector('#douyin_login_comp_mobile_code')
+             || document.querySelector('#douyin_login_comp_button_input_id');
+  const hasChatRoot = !!document.querySelector('[data-e2e="msg-input"]')
+                   || !!document.querySelector('.conversationConversationListwrapper');
+  const body = (document.body && document.body.innerText) || '';
+  const loginWords = /扫码登录|验证码登录|密码登录/.test(body);
   return {
     loginVisible: boxVisible,     // 登录框**真的画在屏幕上**（不止是存在于 DOM）
     loginBox: !!box,
+    // 新版弹窗真的画出来了；或者整页**连聊天界面都没有**却写着登录用词（兜底）
+    loginNew: shown(fresh) || (loginWords && !hasChatRoot),
+    loginWords: loginWords,
     avatarCard: !!document.querySelector('[data-e2e="user-avatar-card"]'),
-    hasChatRoot: !!document.querySelector('[data-e2e="msg-input"]')
-              || !!document.querySelector('.conversationConversationListwrapper'),
+    hasChatRoot: hasChatRoot,
     itemCount: document.querySelectorAll('[data-e2e="conversation-item"]').length,
   };
 })()"""
@@ -1196,6 +1209,10 @@ class ImMonitor:
             self.errors.append((url, str(e)))
             return
         if not body:
+            # 空响应体以前是**静默丢弃**的：2026-10-09 wheat 掉登录那一轮，4 条发送
+            # 请求里有 3 条的响应体是空的，日志上一行痕迹都没有，事后只能靠"没有回执"
+            # 反推。至少留一条 debug 说清是哪条路由、哪个 URL。
+            logger.debug(f"[NET] {route} 响应体为空  url={url}")
             return
 
         self.hits[route] = self.hits.get(route, 0) + 1
@@ -1341,7 +1358,7 @@ def check_login(page, mon):
         dom = page.evaluate(JS_LOGIN_DOM)
     except Exception:
         dom = {}
-    login_box = bool(dom.get("loginVisible"))
+    login_box = bool(dom.get("loginVisible") or dom.get("loginNew"))
     if state == "LOGGED_IN" and login_box and not dom.get("avatarCard"):
         state, user_id, nickname, sec_uid = "NOT_LOGGED_IN", None, None, None
 
@@ -1425,6 +1442,11 @@ class DouyinIM:
         # 输入框里"可能有没清干净的自己写的字" —— 只由本进程记账，因为 Draft.js
         # 的内容真相在它自己的 EditorState 里、DOM 判空会被骗（见 _clear_editor）。
         self._editor_dirty = False
+        # 发送全都没回执时**复检**出来的"登录已失效"（见 recheck_login）。
+        # 一旦置位，本轮剩下的目标不再白等 20 秒超时 —— 已经没登录了，
+        # 继续点发送只会让风控更难看（2026-10-09 wheat 掉登录那次就是这么烧的）。
+        self._login_dead = False
+        self._login_dead_reason = ""
 
         # ① 先挂钩子，再导航。顺序反了会漏首屏响应。
         self.mon = ImMonitor(page)
@@ -1476,13 +1498,32 @@ class DouyinIM:
             pass
         self._on_resp_login_lost = on_resp
 
-    def _emit_login_lost(self, code):
-        logger.error(f"[LOGIN] ⛔ 运行期检测到掉登录（status_code={code}）")
+    def _emit_login_lost(self, code, reason=""):
+        head = (f"[LOGIN] ⛔ 运行期检测到掉登录（status_code={code}）" if code is not None
+                else "[LOGIN] ⛔ 运行期检测到掉登录（发送失败后复检）")
+        logger.error(head + (f"  {reason}" if reason else ""))
         for cb in list(self._login_lost):
             try:
-                cb({"code": code, "at": time.time()})
+                cb({"code": code, "at": time.time(), "reason": reason})
             except Exception:
                 traceback.print_exc()
+
+    def recheck_login(self):
+        """发送拿不到回执时**主动复检**登录态，返回 `check_login()` 的结论。
+
+        为什么必须在发送失败时再查一次：2026-10-09 wheat 的事故里，网页登录态失效
+        之后页面**仍然长着 IM 的样子**（会话列表、输入框、发送按钮一应俱全），于是
+        点击照样"成功"、回执永远不来，4 个目标被记成「发送失败」而不是「登录失效」，
+        整轮还按 `status=ok` 写进时间表 —— 面板上一切正常，人却在那边干等消息，
+        而且当天再也不会重试。掉登录和发送失败必须分开报。
+        """
+        lg = check_login(self.page, self.mon)
+        state = str((lg or {}).get("state") or "UNKNOWN")
+        if state != "LOGGED_IN":
+            self._login_dead = True
+            self._login_dead_reason = state
+            self._emit_login_lost(None, reason=f"发送失败后复检登录态 = {state}")
+        return lg
 
     def _run_preflight(self):
         """两道门禁：登录态 → 列表就绪。"""
@@ -1500,6 +1541,17 @@ class DouyinIM:
 
         ls = self._wait_list_ready(lg)
         if not ls["ready"]:
+            # 列表等不到**不等于**超时：登录失效时页面既没有会话列表，也可能
+            # 没有我们认得出的登录框（2026-10 新版弹窗）。再判一次登录态，
+            # 把"登录已失效"从"等待超时"里分出来 —— 面板上"超时"没法告诉用户
+            # 该去重新扫码，而 wheat 2026-10-09 那天正是被报成超时的。
+            again = ls.get("login_recheck") or {}
+            again_state = str(again.get("state") or "")
+            if again_state in ("NOT_LOGGED_IN", "EXPIRED"):
+                return self._finish(
+                    STATUS_LOGGED_OUT if again_state == "NOT_LOGGED_IN" else STATUS_EXPIRED,
+                    again, ls,
+                )
             return self._finish(STATUS_TIMEOUT, lg, ls)
 
         return self._finish(STATUS_READY, lg, ls)
@@ -1538,6 +1590,16 @@ class DouyinIM:
                         f"  has_more={self.mon.list_has_more}")
         else:
             logger.warning(f"[LIST] ⚠️ {self.ready_timeout:.0f}s 内未判定列表就绪")
+            # 超时前复检登录态：报"超时"对用户没有指导意义，报"登录已失效"
+            # 才指向唯一的出路（重新扫码）。结论交给 `_run_preflight` 决定终态。
+            try:
+                again = check_login(self.page, self.mon)
+            except Exception:
+                again = {}
+            result["login_recheck"] = again
+            if str(again.get("state") or "") in ("NOT_LOGGED_IN", "EXPIRED"):
+                logger.error(f"[LOGIN] ⛔ 列表等不到，复检登录态="
+                             f"{again.get('state')} —— 需要重新扫码登录")
         return result
 
     def _finish(self, status, lg, ls=None):
@@ -2300,6 +2362,20 @@ class DouyinIM:
         base = {"conv_id": hit.get("conv_id"), "display": hit.get("display"),
                 "dry_run": dry, "rate_limited": False, "limit": None}
 
+        # ⓪ 本轮已经复检确认掉登录：剩下的目标不再试。
+        #    每个目标白等 20 秒回执、再重试一次，只是把风控喂大而已（见 recheck_login）。
+        if getattr(self, "_login_dead", False):
+            logger.warning(f"[SEND] ⏭️ 跳过 {hit.get('display')}：登录已失效"
+                           f"（{getattr(self, '_login_dead_reason', '') or 'UNKNOWN'}），"
+                           f"本轮不再尝试发送")
+            out = dict(base)
+            out.update({"ok": False, "via": None, "reason": "login_lost",
+                        "login_lost": True,
+                        "login_state": getattr(self, "_login_dead_reason", ""),
+                        "message_id": None, "code": None, "status": None,
+                        "level": "none", "text_len": len(text)})
+            return out
+
         # ① 草稿残留自查：上一条没清干净会导致两条消息串发
         try:
             empty = self.page.evaluate(JS_EDITOR_EMPTY)
@@ -2493,6 +2569,21 @@ class DouyinIM:
             reason = (rc.get("verdict").reason if rc.get("verdict") else "unknown")
             logger.warning(f"[SEND] ⚠️ {timeout:.0f}s 内没拿到可信回执"
                            f"（原因={reason}，可能走 WS 通道，或发送被拦）")
+            # 没有回执 ≠ 发送失败：也可能登录态已经没了（页面还是 IM 的样子）。
+            # 复检一次，把「掉登录」从「发送失败」里分出来 —— 不做这一步，掉登录
+            # 会被记成"跑了但 4 个目标失败"，整轮照样按 ok 记账，当天不再重试，
+            # 面板上也没有任何提示（2026-10-09 wheat 的真实事故）。
+            lg = self.recheck_login()
+            if str((lg or {}).get("state") or "") != "LOGGED_IN":
+                logger.error(f"[SEND] ⛔ 放弃发送：登录已失效"
+                             f"（{(lg or {}).get('state')}），本轮剩余目标不再尝试")
+                out = dict(base)
+                out.update({"ok": False, "via": None, "reason": "login_lost",
+                            "login_lost": True,
+                            "login_state": (lg or {}).get("state"),
+                            "message_id": None, "code": None, "status": None,
+                            "level": "none", "text_len": len(text)})
+                return out
         else:
             # 消息确实发出去了 = 抖音那边把输入框清空了，本进程的账跟着清；
             # 没拿到回执时**故意保留** dirty 标记 —— 那正是重试前必须清残留的场合

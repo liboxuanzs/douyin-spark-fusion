@@ -12,6 +12,7 @@ import inspect
 import json
 import re
 import unittest
+from unittest import mock
 
 from core import douyin_im
 from core.douyin_im import (
@@ -1678,6 +1679,209 @@ class IdentitySelectionTests(unittest.TestCase):
         ]))
         self.assertEqual(sorted(i["conv_id"] for i in got),
                          sorted([self._conv(1), self._conv(40)]))
+
+
+class LoginRecheckTests(unittest.TestCase):
+    """「发送拿不到回执」与「登录已失效」必须分开报。
+
+    2026-10-09 wheat 的真实事故：网页登录态失效之后页面**仍然长着 IM 的样子**，
+    点击发送照样"成功"、回执永远不来，4 个目标被记成「发送失败」而整轮按 ok 记账
+    —— 面板上一切正常，人却在等消息，而且当天再也不会重试。这里把接线钉住：
+    发送失败要复检登录态，复检出掉登录要（1）带 `login_lost` 出来，
+    （2）本轮剩下的目标直接跳过，不再每个白等 20 秒。
+    """
+
+    class _IM(_Stub):
+        def __init__(self, receipt_ok=False, login_state="EXPIRED"):
+            super().__init__()
+            self.page = SendLimitWiringTests._Page()
+            self.mon = type("M", (), {"sends": []})()
+            self.editor = SendLimitWiringTests._Editor()
+            self._receipt_ok = receipt_ok
+            self._login_state = login_state
+            self.send_clicks = 0
+            self.rechecks = 0
+            self._login_dead = False
+            self._login_dead_reason = ""
+            self._login_lost = []
+
+        def _input_mode(self):
+            return "real"
+
+        def _editor(self):
+            return self.editor
+
+        def _click_send(self):
+            self.send_clicks += 1
+            return "btn"
+
+        def _msg_state(self):
+            return {"count": 1, "lastFromMe": False, "convId": None}
+
+        def _wait_receipt(self, *a, **kw):
+            return {"ok": self._receipt_ok, "http": None, "dom": None,
+                    "verdict": None, "dom_conv_off": False, "receipts": []}
+
+        def limit_texts(self):
+            return []
+
+        def recheck_login(self):
+            """替身：只决定"复检结论"，真正的 check_login 另有单测。"""
+            self.rechecks += 1
+            if self._login_state != "LOGGED_IN":
+                self._login_dead = True
+                self._login_dead_reason = self._login_state
+            return {"state": self._login_state}
+
+    def _send(self, im, text="你好"):
+        return im.type_and_send({"conv_id": f"0:1:{ME}:{PEER_A}", "uid": PEER_A,
+                                 "display": "甲同学"}, text, dry_run="off")
+
+    def test_failed_receipt_with_dead_login_reports_login_lost(self):
+        im = self._IM(receipt_ok=False, login_state="EXPIRED")
+        out = self._send(im)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["login_lost"])
+        self.assertEqual(out["reason"], "login_lost")
+        self.assertEqual(out["login_state"], "EXPIRED")
+        self.assertEqual(im.rechecks, 1)
+
+    def test_failed_receipt_with_live_login_stays_a_plain_failure(self):
+        im = self._IM(receipt_ok=False, login_state="LOGGED_IN")
+        out = self._send(im)
+        self.assertFalse(out["ok"])
+        self.assertFalse(out.get("login_lost"))
+        self.assertNotEqual(out["reason"], "login_lost")
+
+    def test_next_target_is_skipped_once_login_is_known_dead(self):
+        im = self._IM(receipt_ok=False, login_state="NOT_LOGGED_IN")
+        first = self._send(im)
+        self.assertTrue(first["login_lost"])
+        clicks_after_first = im.send_clicks
+        second = self._send(im, text="第二条")
+        self.assertTrue(second["login_lost"])
+        self.assertEqual(im.send_clicks, clicks_after_first)   # 第二次连点都没点
+        self.assertEqual(im.rechecks, 1)                      # 也没再复检
+
+    def test_recheck_login_sets_flag_and_emits_callback(self):
+        """真 `recheck_login`：结论不是 LOGGED_IN 就置位 + 触发掉登录回调。"""
+        im = self._IM(receipt_ok=False)
+        im._login_dead = False
+        seen = []
+        im._login_lost = [lambda info: seen.append(info)]
+        with mock.patch.object(douyin_im, "check_login",
+                               return_value={"state": "EXPIRED", "log": "登录已失效"}):
+            lg = douyin_im.DouyinIM.recheck_login(im)
+        self.assertEqual(lg["state"], "EXPIRED")
+        self.assertTrue(im._login_dead)
+        self.assertEqual(im._login_dead_reason, "EXPIRED")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["reason"], "发送失败后复检登录态 = EXPIRED")
+
+    def test_recheck_login_keeps_working_when_login_is_fine(self):
+        im = self._IM(receipt_ok=False)
+        im._login_dead = False
+        with mock.patch.object(douyin_im, "check_login",
+                               return_value={"state": "LOGGED_IN"}):
+            douyin_im.DouyinIM.recheck_login(im)
+        self.assertFalse(im._login_dead)
+        self.assertEqual(im._login_dead_reason, "")
+
+
+class ListTimeoutLoginRecheckTests(unittest.TestCase):
+    """列表等不到时先复检登录态：登录失效要报「登录已失效」，不是「等待超时」。
+
+    2026-10-09 wheat：网页登录态失效后，2026-10 新版登录弹窗（没有 `data-e2e`，
+    只有 `.douyin_login_new_class` / `#douyin_login_comp_*`）画在页面上，
+    旧选择器一个都没命中 → 门禁判成 TIMEOUT。而面板上"超时"没法告诉用户
+    该去重新扫码，只有"登录已失效"才指向唯一的出路。
+    """
+
+    class _IM(_Stub):
+        def __init__(self, list_result):
+            super().__init__()
+            self.page = object()
+            self.mon = None
+            self.ready_timeout = 0.01
+            self._callbacks = []
+            self._login_lost = []
+            self._list_result = list_result
+
+        def _wait_list_ready(self, lg):
+            return dict(self._list_result)
+
+    @staticmethod
+    def _login(state):
+        return {"state": state, "user_id": None, "nickname": None,
+                "sec_uid": None, "log": f"登录态={state}"}
+
+    def _run(self, list_result, first_state="LOGGED_IN"):
+        im = self._IM(list_result)
+        with mock.patch.object(douyin_im, "check_login",
+                               return_value=self._login(first_state)):
+            return im._run_preflight()
+
+    def test_expired_wins_over_timeout(self):
+        st = self._run({"ready": False,
+                        "login_recheck": self._login("EXPIRED")})
+        self.assertEqual(st["status"], "EXPIRED")
+        self.assertEqual(st["login_state"], "EXPIRED")
+
+    def test_not_logged_in_wins_over_timeout(self):
+        st = self._run({"ready": False,
+                        "login_recheck": self._login("NOT_LOGGED_IN")})
+        self.assertEqual(st["status"], "LOGGED_OUT")
+
+    def test_plain_timeout_is_still_timeout(self):
+        """复检说还在登录 → 老老实实报超时，不许把超时说成掉登录。"""
+        st = self._run({"ready": False,
+                        "login_recheck": self._login("LOGGED_IN")})
+        self.assertEqual(st["status"], "TIMEOUT")
+
+    def test_missing_recheck_keeps_old_behaviour(self):
+        st = self._run({"ready": False})
+        self.assertEqual(st["status"], "TIMEOUT")
+
+
+class NewLoginDialogDetectionTests(unittest.TestCase):
+    """新版登录弹窗必须算登录框 —— 它的选择器不认识，门禁就会报"超时"。"""
+
+    class _Page:
+        def __init__(self, dom, cookie_names=("sessionid_ss",)):
+            self.dom = dom
+            self.cookie_names = list(cookie_names)
+
+        def content(self):
+            return ""
+
+        def evaluate(self, expr, *a):
+            return self.dom if expr == douyin_im.JS_LOGIN_DOM else {}
+
+        class _Ctx:
+            def __init__(self, names):
+                self.names = names
+
+            def cookies(self):
+                return [{"name": n, "value": "x"} for n in self.names]
+
+        @property
+        def context(self):
+            return self._Ctx(self.cookie_names)
+
+    def test_new_dialog_is_expired_when_sessionid_present(self):
+        lg = douyin_im.check_login(self._Page({"loginNew": True}), None)
+        self.assertEqual(lg["state"], "EXPIRED")
+        self.assertTrue(lg["login_box"])
+
+    def test_new_dialog_without_cookie_is_not_logged_in(self):
+        page = self._Page({"loginNew": True}, cookie_names=())
+        self.assertEqual(douyin_im.check_login(page, None)["state"], "NOT_LOGGED_IN")
+
+    def test_js_expression_knows_the_new_dialog(self):
+        js = douyin_im.JS_LOGIN_DOM
+        for token in ("douyin_login_new_class", "douyin_login_comp_mobile_code",
+                      "loginNew", "loginWords"):
+            self.assertIn(token, js)
 
 
 if __name__ == "__main__":
