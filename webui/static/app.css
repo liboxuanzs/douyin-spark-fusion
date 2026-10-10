@@ -88,6 +88,18 @@ html[data-theme="light"] {
   box-sizing: border-box;
 }
 
+/* `hidden` 属性必须永远赢过任何 `display:` 规则。
+   浏览器的 UA 样式表里 `[hidden] { display: none }` 的优先级**低于**任何作者样式，
+   所以只要有人给同一个类写了 `display: grid/flex`，那个「隐藏」就当场失效 ——
+   面板上「这个账号需要二次验证」那块 (`webui/static/app.css` 的 `.code-box`) 就是这样：
+   没会话、没扫码，它照样亮着，服务端 `need_code=false`、JS 也把 `hidden` 置上了，全都没用
+   （2026-10-10 用户报的「还是显示需要二次验证」）。
+   `.segment-panel[hidden]` / `.login-qr-image[hidden]` 那两条是同一个坑的补丁；
+   这条兜底规则让以后新写的 `display:` 不会再踩一遍。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   min-height: 100%;

@@ -2106,6 +2106,32 @@ class StaticAssetWebUITestCase(WebUITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("no-cache", response.headers.get("cache-control", "").lower())
 
+    def test_hidden_属性必须压得住_display_规则(self) -> None:
+        """兜底规则不能丢：`[hidden]` 必须赢过任何 `display:`。
+
+        2026-10-10 用户报「没扫码也一直显示这个账号需要二次验证」：`.code-box { display: grid }`
+        把 `hidden` 顶掉了（UA 的 `[hidden] { display: none }` 优先级低于任何作者样式），
+        服务端 `need_code=false`、JS 也把 `hidden` 置上了，那一块照样亮着。
+        """
+        css = (webui_app.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        self.assertRegex(
+            css,
+            r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important",
+            "app.css 缺少 `[hidden] { display: none !important; }` 兜底规则",
+        )
+
+    def test_二次验证框默认是收起的(self) -> None:
+        """没有会话（更没扫码）时，那块「这个账号需要二次验证」必须带 hidden。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            page = client.get("/")
+        self.assertRegex(
+            page.text,
+            r'class="code-box"[^>]*\bhidden\b',
+            "默认收起：服务端渲染时 need_code=false，那一段必须带 hidden",
+        )
+
 
 class ProfileContentionWebUITestCase(WebUITestCase):
     """同一个 Chromium 资料目录一次只能开一个实例。
