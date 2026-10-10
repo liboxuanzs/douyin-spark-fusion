@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import types
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,6 +147,29 @@ class ConstantsTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertNotIn(state, qr_login.ACTIVE_STATES)
                 self.assertIn(state, qr_login.STATE_LABELS, "每个状态都要有中文标签给面板显示")
+
+    def test_checking_has_its_own_label_and_counts_as_active(self):
+        """步骤①不许再借「已扫码，正在确认登录态」那个状态。
+
+        用户 2026-10-10 的反馈：点「重新登录」后扫码页直接显示"已扫码"——
+        因为那一步用的就是 verifying。它现在有自己的标签。
+        """
+        self.assertIn(qr_login.STATE_CHECKING, qr_login.ACTIVE_STATES,
+                      "确认已有登录态期间浏览器还开着，不能算结束")
+        checking = qr_login.STATE_LABELS[qr_login.STATE_CHECKING]
+        verifying = qr_login.STATE_LABELS[qr_login.STATE_VERIFYING]
+        self.assertIn("已有登录态", checking)
+        self.assertNotIn("已扫码", checking, "这一步还没扫任何码")
+        self.assertIn("已扫码", verifying, "扫完码之后的确认才叫已扫码")
+        self.assertNotEqual(checking, verifying)
+
+    def test_login_page_markers_stay_populated(self):
+        """排除登录页的那几个特征表一旦被清空，登录页又会被当成身份验证页。"""
+        self.assertTrue(qr_login.LOGIN_PAGE_WORDS)
+        self.assertTrue(qr_login.PHONE_INPUT_HINTS)
+        self.assertTrue(qr_login.CODE_INPUT_FIELDS)
+        self.assertGreaterEqual(qr_login.LOGIN_PROBE_INTERVAL, qr_login.SHOT_INTERVAL_SECONDS)
+        self.assertGreater(qr_login.LOGIN_PROBE_SECONDS, 1)
 
     def test_scan_markers_are_mapped_to_human_text(self):
         self.assertTrue(qr_login.SCAN_MARKERS)
@@ -425,6 +451,44 @@ class CodeVerifyTests(unittest.TestCase):
         page.probe = {}
         self.assertEqual(session._detect_code_page(page), {}, "同一秒内不重复探测页面")
 
+    def test_detect_code_page_ignores_the_new_login_dialog(self):
+        """真机探针原样搬来（2026-10-10）：新版登录弹窗把「扫码登录 / 验证码登录 /
+        密码登录」三个 tab 渲染在同一页，于是登录页上也有一个可见的「请输入验证码」。
+
+        以前这份探针会被认成身份验证页 —— 面板亮出「需要短信验证码」，还会去点登录页
+        上的「获取验证码」（真给用户手机发短信）。这就是用户说的"无论如何都显示需要
+        二次验证"。
+        """
+        session = self.session()
+        page = _FakePage({
+            "text": "登录后免费畅享高清视频 扫码登录 验证码登录 密码登录 获取验证码 登录",
+            "hasQr": True,
+            "inputs": [{"placeholder": "搜索你感兴趣的内容"}, {"placeholder": ""},
+                       {"placeholder": "请输入手机号"}, {"placeholder": "请输入验证码"}],
+            "buttons": ["精选", "推荐", "AI抖音", "关注", "朋友", "我的", "直播", "放映厅"],
+        })
+        self.assertEqual(session._detect_code_page(page), {})
+        self.assertEqual(session.snapshot()["code_options"], [],
+                         "认错页面就别把它的按钮当成「要点的按钮」")
+
+    def test_detect_code_page_ignores_a_login_form_without_a_qr(self):
+        """二维码那一栏被折叠掉、只剩手机号输入框时，仍然是登录表单，不是验证码页。"""
+        session = self.session()
+        page = _FakePage({
+            "text": "验证码登录 请输入手机号 请输入验证码",
+            "hasQr": False,
+            "inputs": [{"placeholder": "请输入手机号"}, {"placeholder": "请输入验证码"}],
+            "buttons": ["登录"],
+        })
+        self.assertEqual(session._detect_code_page(page), {})
+
+    def test_detect_code_page_still_takes_the_real_identity_page(self):
+        """收紧判据不能把真的身份验证页一起挡掉（2026-10-07 真机见过的那一页）。"""
+        session = self.session()
+        page = self.code_page()
+        self.assertTrue(session._detect_code_page(page))
+        self.assertIn("接收短信验证码", session.snapshot()["code_options"])
+
     # ---- 走完流程 ----
     def test_solve_code_picks_receive_sms_then_fills_and_waits(self):
         session = self.session()
@@ -534,6 +598,154 @@ class CodeVerifyTests(unittest.TestCase):
         self.assertIn("if need_code and not self._solve_code(ctx, page):", source)
         self.assertIn("and not self._scanned", source,
                       "扫上码之后别再让停摆看门狗把验证码页重开掉")
+
+    def test_main_loop_never_confirms_login_on_the_qr_page(self):
+        """扫码循环里只能用**旁路**确认登录态。
+
+        真现场（2026-10-10）：码刚画出来 3 毫秒，就有人拿 `_verify()` 在扫码页上
+        做确认 —— 它会把页面导航去聊天页，用户扫的那张码当场作废（扫了也登不上）。
+        """
+        source = pathlib.Path(qr_login.__file__).read_text(encoding="utf-8")
+        loop = source.split("# ③ 等扫码")[1].split("# ③.5")[0]
+        self.assertIn("_probe_logged_in(", loop, "扫码循环必须走旁路确认")
+        self.assertNotIn("_verify(", loop,
+                         "在扫码页上确认会把二维码整页刷掉，用户扫的码就废了")
+
+
+class SideTabProbeTests(unittest.TestCase):
+    """「这个上下文算登录了吗」必须去**旁边的标签页**问服务端。
+
+    真现场（2026-10-10）：二维码刚画出来 3 毫秒，程序就判定"出现了登录 cookie"，
+    把扫码页导航去聊天页做确认 —— 用户扫的那张码当场作废（扫了也登不上）；
+    而且那份 cookie 是上一次登录留下的、服务端早就不认的旧货。
+    """
+
+    def session(self, **kwargs):
+        kwargs.setdefault("ttl", 60.0)
+        return qr_login.QrLoginSession("/tmp/does-not-matter", **kwargs)
+
+    def pin_check_login(self, verdict):
+        original = qr_login.douyin_im.check_login
+        qr_login.douyin_im.check_login = lambda page, mon: dict(verdict)
+        self.addCleanup(setattr, qr_login.douyin_im, "check_login", original)
+
+    def pin_probe_seconds(self, seconds):
+        original = qr_login.LOGIN_PROBE_SECONDS
+        qr_login.LOGIN_PROBE_SECONDS = seconds
+        self.addCleanup(setattr, qr_login, "LOGIN_PROBE_SECONDS", original)
+
+    def test_probe_confirms_in_a_side_tab_and_never_touches_the_qr_page(self):
+        session = self.session()
+        self.pin_check_login({"state": "LOGGED_IN", "user_id": "1"})
+        ctx = _ProbeCtx()
+        self.assertTrue(session._probe_logged_in(ctx))
+        self.assertEqual(len(ctx.opened), 1, "只开一个临时标签页")
+        self.assertEqual(ctx.opened[0].goto_urls, [qr_login.douyin_im.CHAT_URL])
+        self.assertTrue(ctx.opened[0].closed, "用完就关")
+        self.assertEqual(session._verdict.get("user_id"), "1", "结论要留给 ④ 复用")
+
+    def test_probe_says_no_when_the_server_still_rejects_the_session(self):
+        session = self.session()
+        self.pin_check_login({"state": "EXPIRED"})
+        self.pin_probe_seconds(0.05)
+        ctx = _ProbeCtx()
+        self.assertFalse(session._probe_logged_in(ctx))
+        self.assertTrue(ctx.opened[0].closed, "问不出结论也要把标签页关掉")
+
+    def test_probe_swallows_a_broken_page(self):
+        session = self.session()
+        self.pin_probe_seconds(0.05)
+        self.assertFalse(session._probe_logged_in(_ProbeCtx(fail=True)),
+                         "旁路确认失败不能把整个扫码会话带走")
+
+    def test_a_stale_login_cookie_is_not_taken_for_a_new_login(self):
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        session._cookie_sig = qr_login.cookie_utils.login_cookie_signature(stale)
+        ctx = _ProbeCtx(cookies=stale)
+        self.assertFalse(session._cookie_moved(ctx), "同一份旧 cookie 不算「换了一份」")
+        ctx.cookies_now = [{"name": "sessionid", "value": "new"}]
+        self.assertTrue(session._cookie_moved(ctx), "真扫上之后 cookie 值会换")
+        self.assertFalse(session._cookie_moved(ctx), "同一份指纹只报一次，别反复去开标签页")
+
+    def test_no_login_cookie_at_all_is_not_a_move(self):
+        session = self.session()
+        self.assertFalse(session._cookie_moved(_ProbeCtx(cookies=[{"name": "ttwid", "value": "1"}])))
+
+
+class CloseTests(unittest.TestCase):
+    def test_close_uses_the_browser_module_it_imports(self):
+        """`_close` 里那个局部 import 漏掉的后果（2026-10-10 实测）：
+
+        `NameError: name 'browser_mod' is not defined` —— 浏览器不关、资料目录不搬，
+        会话线程带着 traceback 死掉。这里用桩把这条路径钉住。
+        """
+        stub = types.ModuleType("core.browser")
+        stub.close_context = lambda ctx: False            # 假装关的时候报错
+        had = sys.modules.get("core.browser")
+        sys.modules["core.browser"] = stub
+        self.addCleanup(_restore_module, "core.browser", had)
+        import core.browser as real_browser
+        real_attr = real_browser.close_context
+        real_browser.close_context = stub.close_context
+        self.addCleanup(setattr, real_browser, "close_context", real_attr)
+
+        root = tempfile.mkdtemp(prefix="qr-close-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        lock = os.path.join(root, "SingletonLock")
+        pathlib.Path(lock).write_text("x", encoding="utf-8")
+        session = qr_login.QrLoginSession(root)
+        self.assertFalse(session._close(object()),
+                         "关不干净 + 资料目录里还有 SingletonLock → 不能当关掉了")
+        os.remove(lock)
+        self.assertTrue(session._close(object()),
+                        "Playwright 常有的假报错：目录里没有锁就当关掉了")
+        self.assertTrue(session._close(None), "没有上下文时直接算关干净")
+
+
+def _restore_module(name, old):
+    if old is None:
+        sys.modules.pop(name, None)
+    else:
+        sys.modules[name] = old
+
+
+class _ProbePage:
+    """旁路确认用的假标签页。"""
+
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.goto_urls = []
+        self.closed = False
+        self.waits = 0
+
+    def goto(self, url, **_kwargs):
+        if self.fail:
+            raise RuntimeError("net down")
+        self.goto_urls.append(url)
+
+    def wait_for_timeout(self, _ms):
+        self.waits += 1
+
+    def close(self):
+        self.closed = True
+
+
+class _ProbeCtx:
+    """够 `_probe_logged_in` / `_cookie_moved` 用：记得住开过哪些标签页、cookie 现在是什么。"""
+
+    def __init__(self, *, cookies=None, fail=False):
+        self.cookies_now = list(cookies or [])
+        self.fail = fail
+        self.opened = []
+
+    def cookies(self):
+        return list(self.cookies_now)
+
+    def new_page(self):
+        page = _ProbePage(fail=self.fail)
+        self.opened.append(page)
+        return page
 
 
 class _FakeKeyboard:

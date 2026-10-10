@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 
@@ -126,6 +127,27 @@ def parse_cookies(text: str):
 def has_login_cookie(cookies) -> bool:
     """本地这份 cookie 里有没有登录态条目（决定存下来有没有用）。"""
     return any(str((c or {}).get("name") or "") in LOGIN_COOKIE_NAMES for c in (cookies or []))
+
+
+def login_cookie_signature(cookies) -> tuple:
+    """登录 cookie 的指纹（名字 + 值摘要，与顺序无关）。
+
+    只看名字不够：同一个资料目录反复登录时，上一次留下的 `sessionid` 会被服务端
+    作废、**名字却还在**。于是"有登录 cookie"这条判据会把一个已经 EXPIRED 的上下文
+    当成"刚刚登录上了" —— 2026-10-10 现场：二维码才出来 3 毫秒就被判成"出现了登录
+    cookie"，扫码页当场被导航走，用户扫的那张码直接作废。带上值才能分辨"还是那一份
+    旧的"和"换了一份新的"。
+    """
+    marks = []
+    for item in cookies or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if name not in LOGIN_COOKIE_NAMES:
+            continue
+        value = str(item.get("value") or "")
+        marks.append((name, hashlib.sha1(value.encode("utf-8", "replace")).hexdigest()[:12]))
+    return tuple(sorted(marks))
 
 
 def cookie_names(cookies) -> list:

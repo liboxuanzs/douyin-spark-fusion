@@ -174,6 +174,32 @@ class SmallHelpersTests(unittest.TestCase):
         self.assertFalse(cu.has_login_cookie([cookie(name="ttwid")]))
         self.assertFalse(cu.has_login_cookie([]))
 
+    def test_login_cookie_signature_changes_when_the_value_changes(self):
+        """名字一样、值换了 = 换了一份新的登录态（扫码成功就是这个样子）。
+
+        只按名字判"已经有了登录 cookie"会把上次登录留下的、服务端已作废的那份
+        当成"刚登录上"——2026-10-10 就是这么把扫码页整页刷掉的。
+        """
+        old = cu.login_cookie_signature([cookie(name="sessionid", value="old")])
+        new = cu.login_cookie_signature([cookie(name="sessionid", value="new")])
+        self.assertTrue(old, "有登录 cookie 就该有指纹")
+        self.assertNotEqual(old, new, "值变了指纹必须变")
+        self.assertEqual(new,
+                         cu.login_cookie_signature([cookie(name="sessionid", value="new")]),
+                         "同一份 cookie 的指纹要稳定")
+
+    def test_login_cookie_signature_ignores_order_and_other_cookies(self):
+        a = cu.login_cookie_signature([cookie(name="sid_tt", value="1"),
+                                       cookie(name="sessionid", value="2")])
+        b = cu.login_cookie_signature([cookie(name="ttwid", value="9"),
+                                       cookie(name="sessionid", value="2"),
+                                       cookie(name="sid_tt", value="1")])
+        self.assertEqual(a, b, "只看登录 cookie、不看顺序")
+        self.assertEqual(cu.login_cookie_signature([cookie(name="ttwid")]), (),
+                         "没有登录 cookie 时指纹为空 —— 空指纹不算「换了一份」")
+        self.assertEqual(cu.login_cookie_signature([None, {"name": ""}, "x"]), (),
+                         "脏输入不抛异常")
+
     def test_cookie_names_dedupes_and_keeps_order(self):
         names = cu.cookie_names([cookie(name="ttwid"), cookie(name="sessionid"), cookie(name="ttwid")])
         self.assertEqual(names, ["ttwid", "sessionid"])

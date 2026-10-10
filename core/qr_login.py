@@ -74,6 +74,10 @@ CODE_VERIFY_SECONDS = 60.0
 CODE_MAX_ATTEMPTS = 3
 #: 面板截图 / 页面探测的最小间隔（秒）：验证码页要让人看得见，但别把 CPU 拍满。
 SHOT_INTERVAL_SECONDS = 2.0
+#: 两次"旁路确认登录态"之间的最小间隔（秒）。
+LOGIN_PROBE_INTERVAL = 10.0
+#: 一次旁路确认最多等多久（秒）。它只开一个临时标签页，问不出结论就当"还没登录"。
+LOGIN_PROBE_SECONDS = 10.0
 
 # 浏览器里已经存着登录态时，直接用它（不再要求扫码）
 STATE_STARTING = "starting"
@@ -88,13 +92,20 @@ STATE_CANCELLED = "cancelled"
 # 这个状态 —— 会话停在这里，等用户在面板里把手机上收到的验证码填进来。
 STATE_WAITING_CODE = "waiting_code"
 
+# 步骤①「这个资料目录里好像已经有登录态，去服务端问一声」用的状态。
+# 以前这一步直接借用 STATE_VERIFYING，而它的标签是「已扫码，正在确认登录态」——
+# 用户明明还没扫任何码，面板却告诉他"已经扫上了"（2026-10-10 的反馈）。
+# 扫码之后的确认才叫 verifying，两者别混。
+STATE_CHECKING = "checking"
+
 ACTIVE_STATES = (STATE_STARTING, STATE_WAITING_QR, STATE_WAITING_SCAN,
-                 STATE_VERIFYING, STATE_WAITING_CODE)
+                 STATE_VERIFYING, STATE_WAITING_CODE, STATE_CHECKING)
 
 STATE_LABELS = {
     STATE_STARTING: "正在启动浏览器",
     STATE_WAITING_QR: "正在获取二维码",
     STATE_WAITING_SCAN: "等待扫码",
+    STATE_CHECKING: "正在确认已有登录态",
     STATE_VERIFYING: "已扫码，正在确认登录态",
     STATE_WAITING_CODE: "需要短信验证码",
     STATE_DONE: "登录成功",
@@ -124,9 +135,20 @@ CONFIRMING_HINTS = ("已扫码，请在手机上点一下确认",)
 # ---- 二次验证页的判据与按钮文案 ----
 # 「这是验证码页」最硬的信号：可见输入框自己的 placeholder / name / id 里带这些词。
 CODE_INPUT_HINTS = ("验证码", "校验码", "动态码")
+# 输入框上要看的字段。
+CODE_INPUT_FIELDS = ("placeholder", "name", "id", "label")
 # 兜底信号：页面正文里出现这些词，且页面上至少有输入框。
 CODE_PAGE_WORDS = ("身份验证", "安全验证", "接收短信验证码", "短信验证码",
                    "获取验证码", "请输入验证码", "验证码已发送")
+# **登录页本身**的特征。2026-10-10 起抖音把「扫码登录 / 验证码登录 / 密码登录」
+# 三个 tab 渲染在同一个弹窗里，于是登录页也端着一个可见的「请输入验证码」输入框，
+# 跟扫完码之后的身份验证页长得几乎一样。判据不排除它，就会在**还没扫码**的时候
+# 把登录页当成二次验证页：面板无缘无故要短信验证码，还会去点登录页上的
+# 「获取验证码」（真给用户手机发短信）。
+LOGIN_PAGE_WORDS = ("验证码登录", "密码登录", "扫码登录", "扫一扫", "抖音App",
+                    "打开抖音", "请使用抖音App", "登录后免费")
+# 手机号输入框 = 这是登录表单，不是身份验证页。
+PHONE_INPUT_HINTS = ("手机号", "手机号码", "phone")
 # 「收验证码」这条路要点的按钮（顺序有意义：先精确、后宽松）。
 CODE_RECEIVE_TEXTS = ("接收短信验证码", "接收验证码", "收验证码", "短信验证码",
                       "获取验证码", "点击获取", "获取短信")
@@ -327,6 +349,31 @@ FILL_CODE_JS = r"""
 """
 
 
+def _code_inputs(inputs) -> list:
+    """可见输入框里 placeholder / name / id / label 带「验证码」的那些（最硬的信号）。"""
+    return [
+        item for item in inputs
+        if any(word in " ".join(str(item.get(field) or "") for field in CODE_INPUT_FIELDS)
+               for word in CODE_INPUT_HINTS)
+    ]
+
+
+def _looks_like_login_form(probe, inputs, text) -> bool:
+    """这一页是不是抖音的**登录页本身**（而不是扫完码之后的身份验证页）。
+
+    真机实测（2026-10-10）：登录弹窗里「扫码登录 / 验证码登录 / 密码登录」同时渲染，
+    探针看到的是 `输入框=['搜索你感兴趣的内容', '', '请输入手机号', '请输入验证码']`，
+    正文里带着「获取验证码」—— 光看"有没有验证码输入框"必然误判。
+    """
+    if probe.get("hasQr"):
+        return True                                     # 还端着二维码 = 还在等扫码
+    for item in inputs:
+        joined = " ".join(str(item.get(field) or "") for field in ("placeholder", "name", "id"))
+        if any(word in joined for word in PHONE_INPUT_HINTS):
+            return True                                 # 有手机号输入框 = 登录表单
+    return any(word in text for word in LOGIN_PAGE_WORDS)
+
+
 def _launch_context(profile_dir, *, args, proxy):
     """启动**持久化**上下文（实现在 `core.browser.launch_persistent_context`）。
 
@@ -375,6 +422,9 @@ class QrLoginSession(threading.Thread):
         # ---- 二次验证（风控账号：扫码后还要填短信验证码）----
         self._scanned = False       # 页面上出现过「已扫码」类提示
         self._scanned_at = 0.0
+        # ---- 「这个上下文算登录了吗」的旁路确认 ----
+        self._cookie_sig = ()       # 扫码页就绪时那份登录 cookie 的指纹（见 login_cookie_signature）
+        self._last_login_probe = 0.0
         self._code_value = ""       # 面板送进来的验证码（会话线程取走就清空）
         self._code_event = threading.Event()
         self._code_tries = 0        # 已经提交过几次
@@ -528,7 +578,7 @@ class QrLoginSession(threading.Thread):
 
             # ① 浏览器里可能已经存着登录态（同一个 profile 反复扫码时），先探一次
             if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
-                self._set(STATE_VERIFYING, "浏览器里已有登录态，正在确认…")
+                self._set(STATE_CHECKING, "浏览器里已有登录态，正在确认…")
                 if self._verify(page, mon):
                     return self._finish(ctx, page, mon)
                 self.message = "本地那份登录态服务端不认了，请重新扫码"
@@ -551,6 +601,9 @@ class QrLoginSession(threading.Thread):
             self._set_qr(qr)
             logger.info(f"[QR] 二维码已就绪 profile={self.profile_dir} bytes={len(qr)}")
             self._set(STATE_WAITING_SCAN, "请用抖音 App 扫描二维码，并在手机上确认登录")
+            # 记下"此刻的登录 cookie 长什么样"。下面判"是不是真登录上了"要拿它做基准：
+            # 同一个资料目录里可能躺着上一次登录留下的、已被服务端作废的 cookie。
+            self._cookie_sig = self._cookie_signature(ctx)
 
             # ③ 等扫码：同时盯着二维码刷新与登录态
             #
@@ -582,9 +635,20 @@ class QrLoginSession(threading.Thread):
                     self._scanned_at = time.time()
                     last_qr_at = time.time()
                     logger.info("[QR] 手机上已确认扫码，等页面进入下一步")
-                if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
-                    logger.info("[QR] 浏览器里出现了登录 cookie，去服务端确认")
-                    break
+                # 登录态只信服务端。以前这里一看 cookie 名字里有 sessionid 就跳出扫码
+                # 循环交给 `_verify` —— 而 `_verify` 会把页面导航到聊天页，等于当着用户
+                # 的面把二维码整页刷掉。2026-10-10 的现场：码刚画出来 3 毫秒，页面就被
+                # 导航走了，用户扫的那张码再也回不来（扫了也登不上）；而且那个资料目录里
+                # 本来就躺着上一次登录留下的、已被服务端作废的 cookie，名字判据一开场
+                # 就为真。现在：只在登录 cookie **换了一份新的**之后，到旁边的标签页问
+                # 一次服务端 —— 扫码页一个字节都不动，问不出结论就接着等。
+                if self._cookie_moved(ctx) or self._scanned:
+                    if time.time() - self._last_login_probe >= LOGIN_PROBE_INTERVAL:
+                        self._last_login_probe = time.time()
+                        if self._probe_logged_in(ctx):
+                            logger.info("[QR] 旁路确认：服务端认了这份登录态，去收尾")
+                            break
+                        logger.info("[QR] 浏览器里有登录 cookie，但服务端还没认 —— 继续等扫码")
                 # hint 是「已扫码」那类话术时说明手机上正在确认，重开页面会打断用户。
                 # 注意判据只看这一类，不看「二维码已过期」—— 那个恰恰是停摆现场。
                 if (hint not in CONFIRMING_HINTS and not self._scanned
@@ -707,6 +771,55 @@ class QrLoginSession(threading.Thread):
         except Exception:                                        # noqa: BLE001
             return []
 
+    def _cookie_signature(self, ctx) -> tuple:
+        return cookie_utils.login_cookie_signature(self._cookies_raw(ctx))
+
+    def _cookie_moved(self, ctx) -> bool:
+        """登录 cookie 是不是**换了一份新的**（只看名字不算数，见 signature 的注释）。
+
+        每轮都刷新基准：同一份指纹只报一次"动了"，免得反复去开旁路标签页。
+        """
+        sig = self._cookie_signature(ctx)
+        if not sig or sig == self._cookie_sig:
+            return False
+        self._cookie_sig = sig
+        return True
+
+    def _probe_logged_in(self, ctx) -> bool:
+        """在**旁边的标签页**上问服务端：这份登录态算数吗？
+
+        这是本轮修复的关键。`_verify()` 会把页面导航到聊天页 —— 在扫码页上做这件事
+        等于当着用户的面把二维码整页刷掉（2026-10-10 现场：码出来 3 毫秒后被导航走，
+        用户扫的那张码再也回不来）。旁路确认另开一个标签页，扫码页一个字节都不动，
+        用完就关。
+
+        只读、只认服务端：拿不到结论一律当"还没登录"，真正的收尾判定仍然交给 ④ 的
+        `_verify()`（那时页面已经可以放弃了）。
+        """
+        probe_page = None
+        try:
+            probe_page = ctx.new_page()
+            probe_page.goto(douyin_im.CHAT_URL, wait_until="domcontentloaded",
+                            timeout=GOTO_TIMEOUT_MS)
+            deadline = time.time() + LOGIN_PROBE_SECONDS
+            while time.time() < deadline and not self._cancel.is_set():
+                verdict = douyin_im.check_login(probe_page, None) or {}
+                if verdict.get("state") == "LOGGED_IN":
+                    self._verdict = verdict
+                    return True
+                probe_page.wait_for_timeout(POLL_INTERVAL_MS)
+            return False
+        except Exception as exc:                                 # noqa: BLE001
+            logger.debug(f"[QR] 旁路确认登录态没问出结论（不影响扫码）："
+                         f"{type(exc).__name__}: {' '.join(str(exc).split())[:120]}")
+            return False
+        finally:
+            if probe_page is not None:
+                try:
+                    probe_page.close()
+                except Exception:                                # noqa: BLE001
+                    pass
+
     def _read_qr(self, page):
         try:
             got = page.evaluate(PICK_QR_JS)
@@ -813,10 +926,14 @@ class QrLoginSession(threading.Thread):
     def _detect_code_page(self, page) -> dict:
         """瞄一眼当前页面是不是抖音的「身份验证」页。是就返回页面探针，否则 {}。
 
-        判据（按硬度排序）：①有可见输入框，且它的 placeholder / name / id /
-        aria-label 里带「验证码」这类词 —— 这是最硬的信号；②页面正文里出现
-        「身份验证」「安全验证」这类词，且页面上至少有输入框。
-        还端着一张二维码、又没有任何"验证码"输入框时不算 —— 那是登录页本身。
+        判据：**有可见的"验证码"输入框**（placeholder / name / id / aria-label 里带
+        「验证码」这类词），并且**这一页不是登录页本身**。
+
+        为什么要专门排除登录页：2026-10-10 起抖音把「扫码登录 / 验证码登录 / 密码登录」
+        三个 tab 渲染进同一个弹窗，登录页因此也带着一个可见的「请输入验证码」输入框。
+        只看"有没有验证码输入框"的话，会在**还没扫码**的时候就把登录页认成身份验证页：
+        面板无缘无故亮出「需要短信验证码」，还会去点登录页上的「获取验证码」——
+        真给用户手机发短信。排除特征：还端着二维码 / 有手机号输入框 / 出现登录页话术。
         """
         now = time.time()
         if now - self._last_probe_at < SHOT_INTERVAL_SECONDS:
@@ -830,15 +947,14 @@ class QrLoginSession(threading.Thread):
             return {}
         inputs = [item for item in (probe.get("inputs") or []) if isinstance(item, dict)]
         buttons = [str(x) for x in (probe.get("buttons") or [])]
-        wants = [
-            item for item in inputs
-            if any(word in " ".join(str(item.get(field) or "")
-                                    for field in ("placeholder", "name", "id", "label"))
-                   for word in CODE_INPUT_HINTS)
-        ]
         text = str(probe.get("text") or "")
-        hit = bool(wants) or (bool(inputs) and any(word in text for word in CODE_PAGE_WORDS))
-        if not hit or (probe.get("hasQr") and not wants):
+        wants = _code_inputs(inputs)
+        if not wants:
+            return {}
+        if _looks_like_login_form(probe, inputs, text):
+            logger.debug("[QR] 看到了「验证码」输入框，但这一页是登录页本身"
+                         f"（hasQr={bool(probe.get('hasQr'))} 输入框="
+                         f"{[i.get('placeholder') for i in inputs][:4]}）—— 不当二次验证处理")
             return {}
         with self._lock:
             self._code_options = buttons[:12]
@@ -1116,9 +1232,16 @@ class QrLoginSession(threading.Thread):
         用 `core.browser.close_context()` 而不是光 `ctx.close()`：它顺手把这个
         上下文自己的 playwright 句柄 `stop()` 掉。回落路径每开一次浏览器要起一个
         driver 子进程（node），以前那些句柄只往 `_KEEPALIVE` 里塞、从不回收。
+
+        这里的 `import` 必须是**函数内**的：`tests/test_qr_login.py` 有一条
+        「import 期不许拉进浏览器依赖」的测试（面板进程 import 本模块要安全）。
+        漏掉它的后果不是"少关一次浏览器"——是每次会话都在收尾时抛
+        `NameError: name 'browser_mod' is not defined`：浏览器不关、资料目录不搬，
+        线程带着 traceback 死掉（2026-10-10 实测）。
         """
         if ctx is None:
             return True
+        import core.browser as browser_mod
         if browser_mod.close_context(ctx):
             return True
         # 关的时候报错，未必等于"浏览器还活着"：目标已经死了的话 Playwright 也会
