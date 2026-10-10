@@ -579,7 +579,7 @@ class QrLoginSession(threading.Thread):
             # ① 浏览器里可能已经存着登录态（同一个 profile 反复扫码时），先探一次
             if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
                 self._set(STATE_CHECKING, "浏览器里已有登录态，正在确认…")
-                if self._verify(page, mon):
+                if self._verify(page, mon, conclusive_exit=True):
                     return self._finish(ctx, page, mon)
                 self.message = "本地那份登录态服务端不认了，请重新扫码"
 
@@ -878,8 +878,15 @@ class QrLoginSession(threading.Thread):
                     return text
         return ""
 
-    def _verify(self, page, mon) -> bool:
-        """把聊天页打开，用主程序那套门禁判定登录态（服务端说了算）。"""
+    def _verify(self, page, mon, *, conclusive_exit: bool = False) -> bool:
+        """把聊天页打开，用主程序那套门禁判定登录态（服务端说了算）。
+
+        `conclusive_exit=True` 是**扫码之前**那一步（① 资料目录里已有旧登录态）用的：
+        服务端已经明说「没登录 / 这份 sessionid 不认」就别再等满 `VERIFY_TIMEOUT_SECONDS`
+        —— 实测旧 profile 真机上要干等 60 秒才看到二维码，用户对着
+        「正在确认已有登录态」等一分钟毫无道理。扫完码之后（④）不加这个开关：
+        刚扫上那几秒服务端有可能还在认 cookie，早退会把刚到手的登录态误判成失败。
+        """
         try:
             page.goto(douyin_im.CHAT_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
         except Exception as exc:                                 # noqa: BLE001
@@ -891,9 +898,13 @@ class QrLoginSession(threading.Thread):
                 verdict = douyin_im.check_login(page, mon) or {}
             except Exception as exc:                             # noqa: BLE001
                 verdict = {"state": f"ERROR: {type(exc).__name__}: {exc}"}
-            if verdict.get("state") == "LOGGED_IN":
+            state = str(verdict.get("state") or "")
+            if state == "LOGGED_IN":
                 self._verdict = verdict
                 return True
+            if conclusive_exit and state in ("NOT_LOGGED_IN", "EXPIRED"):
+                self._verdict = verdict
+                return False
             page.wait_for_timeout(POLL_INTERVAL_MS)
         self._verdict = verdict
         return False

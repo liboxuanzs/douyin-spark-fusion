@@ -673,6 +673,61 @@ class SideTabProbeTests(unittest.TestCase):
         self.assertFalse(session._cookie_moved(_ProbeCtx(cookies=[{"name": "ttwid", "value": "1"}])))
 
 
+class VerifyExitTests(unittest.TestCase):
+    """扫码之前那一步（① 资料目录里已有旧登录态）不许干等一整分钟。
+
+    真机实测（2026-10-10，拿用户那份旧 profile 的副本）：新代码把状态从
+    「已扫码，正在确认登录态」改成了「正在确认已有登录态」，但面板上要等满
+    `VERIFY_TIMEOUT_SECONDS`（60 秒）才出现二维码 —— 用户对着那句话空等一分钟。
+    """
+
+    def session(self):
+        return qr_login.QrLoginSession("/tmp/does-not-matter", ttl=60.0)
+
+    def pin_check_login(self, states):
+        seq = list(states)
+        calls = {"n": 0}
+
+        def fake(page, mon):                                     # noqa: ARG001
+            index = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            item = seq[index]
+            return dict(item) if isinstance(item, dict) else {"state": item}
+
+        original = qr_login.douyin_im.check_login
+        qr_login.douyin_im.check_login = fake
+        self.addCleanup(setattr, qr_login.douyin_im, "check_login", original)
+        return calls
+
+    def test_a_dead_session_stops_the_pre_check_right_away(self):
+        session = self.session()
+        calls = self.pin_check_login(["EXPIRED"])                # 服务端明说不认
+        started = time.time()
+        self.assertFalse(session._verify(_FakePage({}), None, conclusive_exit=True))
+        self.assertLess(time.time() - started, 5.0, "别等满 VERIFY_TIMEOUT_SECONDS 才给二维码")
+        self.assertEqual(calls["n"], 1, "服务端已经给了结论，一次判定就够")
+        self.assertEqual(session._verdict.get("state"), "EXPIRED", "判决要留给 ④ 复用")
+
+    def test_no_cookies_at_all_is_also_conclusive(self):
+        session = self.session()
+        self.pin_check_login(["NOT_LOGGED_IN"])
+        self.assertFalse(session._verify(_FakePage({}), None, conclusive_exit=True))
+
+    def test_the_post_scan_check_still_gives_the_cookie_time_to_land(self):
+        """扫码之后（④）不许早退：刚扫上那几秒服务端可能还在认 cookie。"""
+        session = self.session()
+        calls = self.pin_check_login(["NOT_LOGGED_IN", "LOGGED_IN"])
+        self.assertTrue(session._verify(_FakePage({}), None), "默认口径必须等出登录态")
+        self.assertEqual(calls["n"], 2)
+
+    def test_only_the_pre_check_asks_for_the_conclusive_exit(self):
+        source = pathlib.Path(qr_login.__file__).read_text(encoding="utf-8")
+        pre = source.split("# ① 浏览器里可能已经存着登录态")[1].split("# ② 打开登录页")[0]
+        post = source.split("# ④ 服务端确认")[1].split("# ---- 收尾")[0]
+        self.assertIn("conclusive_exit=True", pre, "① 那一步要早退，不然旧 profile 上要空等 60 秒")
+        self.assertNotIn("conclusive_exit=True", post, "④ 早退会把刚到手的登录态误判成失败")
+
+
 class CloseTests(unittest.TestCase):
     def test_close_uses_the_browser_module_it_imports(self):
         """`_close` 里那个局部 import 漏掉的后果（2026-10-10 实测）：
