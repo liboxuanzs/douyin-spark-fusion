@@ -243,6 +243,21 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
                 "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
             )
+        elif (dry_run == DRY_RUN_OFF and sent_ok == 0 and sent_fail > 0
+              and not out.get("abort_run")):
+            # **一条都没送达**：每个目标都"选中 strong、输入 63/63、点了发送"，
+            # 抖音那边却一条都不收（`[SEND] ❌ 失败 code=None`，或响应体干脆是空的）。
+            # 2026-10-09 wheat、2026-10-10 🌈LBX🌈 都是这个形状 —— 页面仍然长得
+            # 像登录着（`check_login` 也这么说），服务端却已经把会话作废 / 拦下了。
+            # 记成 ok 的代价：时间表认定"今天已发"、面板显示一切正常，用户第二天
+            # 才发现朋友根本没收到。这里按"没干成活"记账，面板计入「需要处理」，
+            # 重新登录后当天自动补发。
+            out["status"] = "error"
+            out["error"] = (
+                f"nothing_sent: 本轮 {sent_fail} 个目标一条都没送达"
+                "（全部没拿到可信回执）—— 通常是登录被服务端作废或风控拦截；"
+                "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+            )
 
         scan = im.last_scan or {}
         out.update({

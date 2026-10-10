@@ -848,8 +848,14 @@ class RuntimeLoginLostTests(_TasksCase):
         self.assertEqual(state["accounts"]["111"]["status"], "error")
         self.assertIn("login_lost", state["accounts"]["111"]["note"])
 
-    def test_send_failure_without_login_lost_still_retries(self):
-        """对照：普通发送失败（登录还在）保持原来的"重试一次"，结果仍是 ok。"""
+    def test_all_sends_failing_is_not_recorded_as_success(self):
+        """**一条都没送达**绝不能记成 ok。
+
+        2026-10-10 🌈LBX🌈：门禁 READY、选中 strong、输入 63/63 都对，三个目标
+        全部拿不到回执 —— 账本却记 `status=ok`，时间表当成"今天已发"，
+        面板显示一切正常，用户第二天才发现朋友根本没收到。
+        重试行为不变（每个目标仍试两次），但账号级结论必须是 error。
+        """
         from core import schedule
         self._set_users(self.users)
         _FakeIM.result = {"ok": False, "via": None, "message_id": None,
@@ -859,12 +865,55 @@ class RuntimeLoginLostTests(_TasksCase):
                           "rate_limited": False, "limit": None}
         rec = tasks_mod.runTasks(dry_run="off", source="test")
         acct = rec["accounts"][0]
-        self.assertEqual(acct["status"], "ok")
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("nothing_sent", acct["error"])
+        self.assertIn("重新登录", acct["error"])
+        self.assertEqual(acct["sent_ok"], 0)
         self.assertEqual(acct["sent_fail"], 2)          # 两个目标各失败一次
         # 每个目标都重试了一次：4 次调用（2 目标 × 2 次）
         self.assertEqual(len(_FakeIM.instances[0].messages), 4)
         state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "error")
+        self.assertIn("nothing_sent", state["accounts"]["111"]["note"])
+
+    def test_partial_success_is_still_ok(self):
+        """对照：只要有一条真送达，就还是"跑过了"（个别好友失败不该整天报废）。"""
+        from core import schedule
+        self._set_users(self.users)
+
+        class _HalfIM(_FakeIM):
+            def type_and_send(self, friend, message, dry_run="off", **kw):
+                self.calls.append((friend["display"], dry_run))
+                self.messages.append(message)
+                if friend["display"] == "甲同学":
+                    return {"ok": False, "via": None, "message_id": None,
+                            "code": None, "status": None, "conv_id": "0:1:2",
+                            "display": "甲同学", "reason": "no_receipt",
+                            "level": "none", "dry_run": dry_run,
+                            "rate_limited": False, "limit": None}
+                return _ok_result(dry_run)
+
+        with mock.patch.object(tasks_mod, "DouyinIM", _HalfIM):
+            rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "ok")
+        self.assertEqual(acct["sent_ok"], 1)
+        self.assertEqual(acct["error"], None)
+        state = schedule.load_state(path=self.schedule_file)
         self.assertEqual(state["accounts"]["111"]["status"], schedule.STATUS_OK)
+
+    def test_dry_run_never_marks_error_for_send_failures(self):
+        """空跑本来就不该"发出去"，它的失败不能把账号判成 error。"""
+        self._set_users(self.users)
+        _FakeIM.result = {"ok": False, "via": None, "message_id": None,
+                          "code": None, "status": None, "conv_id": "0:1:2",
+                          "display": "甲同学", "reason": "no_receipt",
+                          "level": "none", "dry_run": "full",
+                          "rate_limited": False, "limit": None}
+        rec = tasks_mod.runTasks(dry_run="full", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "ok")
+        self.assertNotIn("nothing_sent", str(acct.get("error")))
 
 
 if __name__ == "__main__":

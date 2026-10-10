@@ -1211,8 +1211,9 @@ class ImMonitor:
         if not body:
             # 空响应体以前是**静默丢弃**的：2026-10-09 wheat 掉登录那一轮，4 条发送
             # 请求里有 3 条的响应体是空的，日志上一行痕迹都没有，事后只能靠"没有回执"
-            # 反推。至少留一条 debug 说清是哪条路由、哪个 URL。
-            logger.debug(f"[NET] {route} 响应体为空  url={url}")
+            # 反推。发送路由的空响应是**失败信号本身**，按 warning 记；其它路由 debug。
+            (logger.warning if route == "send" else logger.debug)(
+                f"[NET] {route} 响应体为空  url={url}")
             return
 
         self.hits[route] = self.hits.get(route, 0) + 1
@@ -1246,6 +1247,15 @@ class ImMonitor:
         _msg = (f"[SEND] {'✅ 成功' if r['ok'] else '❌ 失败'}  code={r['code']}  "
                 f'status="{r["status"]}"'
                 + (f"  message_id={r['message_id']}" if r["message_id"] else ""))
+        if not r["ok"]:
+            # 解不出来的时候把**原始响应体**（截断）打出来：只剩 `code=None status=""`
+            # 一行，事后完全无从判断对面到底说了什么、还是压根没说话
+            # （2026-10-09 wheat / 2026-10-10 🌈LBX🌈 的发送失败就卡在这里）。
+            try:
+                raw = bytes(body or b"").decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                raw = repr(body)
+            _msg += f"  raw={raw[:240]!r}"
         (logger.info if r["ok"] else logger.warning)(_msg)
 
     def _handle_init(self, body):

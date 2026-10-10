@@ -540,12 +540,15 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     gate = _text(data.get("gate")).upper()
     status = _text(data.get("status")).lower()
     orphan = bool(data.get("orphan"))
-    # 「运行期掉登录」只写在账本的账号结果里（`core/tasks.py` 的 `out["error"]`），
-    # 配置快照 `data` 上没有这个字段 —— 必须从 `account` 上取。
-    login_lost = str(_get(account, "error") or "").startswith("login_lost")
+    # 「运行期掉登录」/「一条都没送达」只写在账本的账号结果里
+    # （`core/tasks.py` 的 `out["error"]`），配置快照 `data` 上没有这个字段
+    # —— 必须从 `account` 上取。
+    account_error = str(_get(account, "error") or "")
+    login_lost = account_error.startswith("login_lost")
+    nothing_sent = account_error.startswith("nothing_sent")
     state = _account_state_for(
         data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed,
-        login_lost=login_lost,
+        login_lost=login_lost or nothing_sent,
     )
 
     issues: List[Dict[str, str]] = []
@@ -574,6 +577,16 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             "text": "上一轮登录已失效（服务端不认这个 sessionid），一条都没发出去 —— "
                     "到下面「扫码登录」用这个账号重新扫一次即可；"
                     "重新登录成功后，当天会自动补发（不用手点「立即运行」）",
+        })
+    elif nothing_sent:
+        # 更隐蔽的一档：门禁当时还是 READY、校验全 strong、输入也对，抖音那边
+        # 一条都不收（响应体是空的，或者解不出 code）—— 页面看着一切正常。
+        # 2026-10-10 🌈LBX🌈 就是这样：账本里 sent_ok=0 / sent_fail=3。
+        issues.append({
+            "level": "danger",
+            "text": "上一轮**一条都没送达**（每个目标都没拿到回执；门禁当时还是通过的）—— "
+                    "通常是登录已被服务端作废或风控拦截；"
+                    "到下面「扫码登录」重新扫一次，登录成功后当天会自动补发",
         })
     if status == "skipped":
         issues.append({"level": "warning", "text": "上一轮该账号被跳过"})

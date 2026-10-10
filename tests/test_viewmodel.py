@@ -921,6 +921,23 @@ class LoginLostCardTests(unittest.TestCase):
         self.assertTrue(any("扫码" in t for t in texts), texts)
         self.assertTrue(any(issue["level"] == "danger" for issue in card["issues"]))
 
+    def test_nothing_sent_is_blocked_and_explains_itself(self):
+        """门禁通过、校验全 strong，却**一条都没送达** —— 卡片必须点名这件事。
+
+        2026-10-10 🌈LBX🌈：账本 `sent_ok=0 / sent_fail=3`、`error="nothing_sent: …"`。
+        修复前它记的是 `status=ok`，卡片显示"需处理 3"，用户根本看不出
+        "不是三个好友失败，是这条会话被服务端作废了"。
+        """
+        account = _account(status="error", sent_fail=3,
+                           error="nothing_sent: 本轮 3 个目标一条都没送达…"
+                                 "请到面板「扫码登录」重新登录该账号",
+                           entries=[_entry(ok=False, level="none", reason="")])
+        card = viewmodel.build_account(_snapshot(), _record(accounts=[account]))
+        self.assertEqual(card["state"], "blocked")
+        texts = [issue["text"] for issue in card["issues"]]
+        self.assertTrue(any("一条都没送达" in t for t in texts), texts)
+        self.assertTrue(any("扫码" in t for t in texts), texts)
+
     def test_gate_expired_points_at_scanning_again(self):
         """门禁就判出登录失效（EXPIRED）时，卡片也要说清下一步是重新扫码。"""
         account = _account(status="skipped", sent_ok=0, sent_fail=0, entries=[],
