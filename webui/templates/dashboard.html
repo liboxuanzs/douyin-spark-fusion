@@ -63,12 +63,15 @@
       <strong><i data-lucide="alarm-clock-off"></i>不会自动跑</strong>
       <ul>
         <li>
-          {% if view.schedule.timer.state == "missing" %}
+          {% if view.schedule.timerStallText %}
+          {{ view.schedule.timerStallText }}。要恢复：<code>sudo systemctl start douyin-spark-fusion-daily.timer</code>（顺手看一眼 <code>systemctl status douyin-spark-fusion-daily.timer</code> 报什么）。
+          {% elif view.schedule.timer.state == "missing" %}
           这台机器上没装 <code>douyin-spark-fusion-daily.timer</code>，
+          到点不会自动发。要装：<code>systemctl enable --now douyin-spark-fusion-daily.timer</code>。
           {% else %}
           <code>douyin-spark-fusion-daily.timer</code> 现在是 <b>disabled</b>，
-          {% endif %}
           到点不会自动发。要开：<code>systemctl enable --now douyin-spark-fusion-daily.timer</code>。
+          {% endif %}
         </li>
         {% if view.schedule.times %}
         <li>`.env` 里写的 <code>TASK_SCHEDULE_TIMES={{ view.schedule.times|join('、') }}</code> 只是"打算几点跑"，真正说了算的是 systemd 定时器。</li>
@@ -142,7 +145,9 @@
       </div>
       <div class="overview-help" data-overview-value="scheduleLabel">{{ view.schedule.label or "-" }}</div>
       <div class="overview-help" data-overview-value="nextTriggerHint">
-        {%- if not view.schedule.armed -%}
+        {%- if view.schedule.timerStallText -%}
+        {{ view.schedule.timerStallText }}
+        {%- elif not view.schedule.armed -%}
         只能手动点「立即运行」
         {%- elif view.schedule.dispatcher -%}
         {# 派发器模式：各账号按自己的发送时间分开跑，'下次触发还剩几个目标'是上一轮的账 #}

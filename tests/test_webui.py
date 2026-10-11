@@ -3473,7 +3473,7 @@ class TimerStateTests(unittest.TestCase):
 class ScheduleTimerWebUITestCase(WebUITestCase):
     """面板不能画一个不会发生的"下次自动触发"（真机上就抓到过：timer 是 disabled 的）。"""
 
-    def _page_with_timer(self, state: str, on_calendar=(), dispatch=0) -> str:
+    def _page_with_timer(self, state: str, on_calendar=(), dispatch=0, active="") -> str:
         original = webui_app.store.timer_state
         webui_app.store.timer_state = lambda *a, **kw: {
             "dispatchMinutes": dispatch,
@@ -3481,6 +3481,7 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
             "installed": state != "missing",
             "enabled": state == "enabled",
             "state": state,
+            "activeState": active,
             "onCalendar": list(on_calendar),
         }
         try:
@@ -3516,6 +3517,40 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
     def test_定时器启用时不出现报警(self) -> None:
         page = self._page_with_timer("enabled")
         self.assertNotIn("data-schedule-warning", page)
+
+    def test_启用但没在跑时明说到点不会触发(self) -> None:
+        """`systemctl stop` 过的 timer 仍然 enabled —— 面板不能只画"已启用"。"""
+        page = self._page_with_timer("enabled", ["20:30"], active="inactive")
+        self.assertIn("data-schedule-warning", page)
+        self.assertIn("当前是 inactive", page)
+        self.assertIn("systemctl start douyin-spark-fusion-daily.timer", page)
+        # 概览格里的"下次自动触发"也要改成不会自动跑（stalled → armed=False）
+        self.assertIn("定时器未启用", page)
+
+    def test_运行态查询本身失败也不抛(self) -> None:
+        """没有 systemctl（容器/开发机）时 helper 必须返回空串，绝不冒泡。"""
+        store = webui_app.store
+        store._ACTIVE_CACHE.update({"unit": "", "at": 0.0, "state": ""})
+        with mock.patch("webui.store.subprocess.run", side_effect=OSError("no systemctl")):
+            self.assertEqual(store.timer_active_state("does-not-exist.timer"), "")
+
+    def test_运行态只认白名单里的值(self) -> None:
+        """systemctl 打印别的怪话（或报错）时按"不知道"处理，不要显示到面板上。"""
+        store = webui_app.store
+        store._ACTIVE_CACHE.update({"unit": "", "at": 0.0, "state": ""})
+        done = mock.Mock(stdout="Unit foo.timer could not be found.\n", stderr="")
+        with mock.patch("webui.store.subprocess.run", return_value=done):
+            self.assertEqual(store.timer_active_state("foo.timer"), "")
+        store._ACTIVE_CACHE.update({"unit": "", "at": 0.0, "state": ""})
+        done = mock.Mock(stdout="failed\n", stderr="")
+        with mock.patch("webui.store.subprocess.run", return_value=done):
+            self.assertEqual(store.timer_active_state("foo.timer"), "failed")
+
+    def test_运行态拿不到时不吓人(self) -> None:
+        """查不到 `systemctl is-active`（开发机/容器）时按原来那样渲染。"""
+        page = self._page_with_timer("enabled", ["20:30"], active="")
+        self.assertNotIn("data-schedule-warning", page)
+        self.assertNotIn("当前是", page)
 
     def test_没装定时器单元也说清楚(self) -> None:
         page = self._page_with_timer("missing")

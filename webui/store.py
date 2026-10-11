@@ -17,6 +17,8 @@ import errno
 import json
 import os
 import re
+import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -1232,6 +1234,49 @@ def _parse_delay(text: str) -> str:
     return value
 
 
+# `systemctl is-active` 的结果缓存：面板每次轮询都调一次子进程没必要，
+# 30 秒的滞后对"定时器有没有在跑"这件事完全够用。
+ACTIVE_CACHE_SECONDS = 30
+_ACTIVE_CACHE: Dict[str, Any] = {"unit": "", "at": 0.0, "state": ""}
+
+
+def timer_active_state(
+    name: str = "douyin-spark-fusion-daily.timer",
+    *,
+    timeout: float = 1.5,
+) -> str:
+    """timer 在 systemd 里的**运行态**（active/inactive/failed/…），拿不到就 ""。
+
+    ``timer_state()`` 只看文件系统（`timers.target.wants/` 的软链接），所以
+    "enabled 但被 stop 过 / failed" 在面板上跟正常一样。这里补一次只读查询：
+
+    * 只用 ``systemctl is-active``（任何用户都能查，不需要 root/dbus 权限）；
+    * 超时 1.5 秒、任何异常都咽掉返回 ""（开发机、容器里没有 systemd 时
+      面板照常渲染，只是不显示这一条）；
+    * 结果缓存 ``ACTIVE_CACHE_SECONDS`` 秒，避免首页轮询反复 fork。
+    """
+    unit = _text(name) or "douyin-spark-fusion-daily.timer"
+    now = time.monotonic()
+    if _ACTIVE_CACHE["unit"] == unit and now - _ACTIVE_CACHE["at"] < ACTIVE_CACHE_SECONDS:
+        return _ACTIVE_CACHE["state"]
+    state = ""
+    try:
+        done = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        candidate = (done.stdout or "").strip() or (done.stderr or "").strip()
+        if candidate in ("active", "activating", "deactivating", "inactive", "failed"):
+            state = candidate
+    except (OSError, subprocess.SubprocessError):        # pragma: no cover - 平台差异
+        state = ""
+    _ACTIVE_CACHE.update({"unit": unit, "at": now, "state": state})
+    return state
+
+
 def timer_state(
     name: str = "douyin-spark-fusion-daily.timer",
     *,
@@ -1243,9 +1288,11 @@ def timer_state(
     面板也画着"下次自动触发 10/02 12:30"，可 `douyin-spark-fusion-daily.timer`
     **是 disabled 的** —— 到点什么都不会发生。
 
-    只读文件系统、不调 systemctl（面板进程不一定是 root，也不该依赖 dbus）：
+    只读文件系统、不调 systemctl 之外的东西（面板进程不一定是 root，也不该依赖 dbus）：
     systemd 的"启用"就是在 `timers.target.wants/` 下建一个软链接；真正几点跑
     写在单元文件的 ``OnCalendar`` 里，所以这里把它也读出来，好和 `.env` 对账。
+    "启用 ≠ 正在跑"（被 ``systemctl stop`` 过、或者 failed）：那次只读的
+    ``systemctl is-active`` 交给 ``timer_active_state()``，写进 ``activeState``。
     """
     unit = _text(name) or "douyin-spark-fusion-daily.timer"
     info: Dict[str, Any] = {
@@ -1253,6 +1300,7 @@ def timer_state(
         "installed": False,
         "enabled": False,
         "state": "unknown",
+        "activeState": "",
         "onCalendar": [],
         "jitterText": "",
         # `OnCalendar=*:0/5`（每 5 分钟敲一次门的**派发器**）→ 5；认不出来是 0。
@@ -1286,6 +1334,10 @@ def timer_state(
             info["state"] = "missing"
     except OSError:                                              # pragma: no cover - 平台差异
         return info
+    # 运行态只对**真机上的真单元**查：测试/预览里 unit_root 指向临时目录时，
+    # 机器上同名单元跟眼前这份配置不是一回事，查了反而误导。
+    if info["installed"] and str(unit_root) == "/etc/systemd/system":
+        info["activeState"] = timer_active_state(unit)
     return info
 
 

@@ -955,10 +955,15 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
     # 这时候不能再按 `.env` 的 TASK_SCHEDULE_TIMES 画一个"下次自动触发" ——
     # 那个值现在的含义只是"没单独配时间的账号用几点"。
     dispatch = _int(timer.get("dispatchMinutes"))
+    # "已启用"只说明开机自启；被 `systemctl stop` 过或者 failed 的 timer 仍然是
+    # enabled 的，到点一样不会跑 —— 所以运行态（`activeState`，由一次只读的
+    # `systemctl is-active` 得到；拿不到时是空串＝不知道，保持原有判断）也要看。
+    active_state = _text(timer.get("activeState"))
+    stalled = active_state not in ("", "active", "activating")
     # `.env` 里的 TASK_SCHEDULE_TIMES 只描述"打算几点跑"；真正会不会跑、几点跑
     # 由 systemd timer 说了算。timer 是 disabled 的时候，面板绝不能画一个不会
     # 发生的"下次自动触发"。
-    armed = _text(timer.get("state")) in ("enabled", "")
+    armed = _text(timer.get("state")) in ("enabled", "") and not stalled
     timer_times = [_text(item) for item in (timer.get("onCalendar") or []) if _text(item)]
     # 单元文件里的时间才是真的；`.env` 和它对不上就明说，别让两个地方各说各话。
     mismatch = bool(armed and timer_times and labels and timer_times != labels)
@@ -1010,6 +1015,15 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
             "disabled": "定时器未启用",
             "missing": "没装定时器单元",
         }.get(_text(timer.get("state")), "定时器状态未知"),
+        # 面板上说的"下次自动触发"会不会真发生：启用但没在跑（stop 过 / failed）
+        # 必须显式说出来，否则用户以为到点会发，实际不会。
+        "timerStallText": (
+            f"定时器已启用，但 systemd 里当前是 {active_state}"
+            "（可能被 stop 过或启动失败），到点不会触发"
+            if stalled and _text(timer.get("state")) == "enabled"
+            else ""
+        ),
+        "timerActiveState": active_state,
     }
 
 
