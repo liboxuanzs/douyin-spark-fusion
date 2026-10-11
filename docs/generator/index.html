@@ -206,9 +206,9 @@
                                     <el-input-number v-model="form.IM_MAX_STEPS" :step="50" :precision="0"
                                         :min="10" :max="2000" />
                                 </el-form-item>
-                                <el-form-item label="任务重试次数">
+                                <el-form-item label="任务重试次数（0 = 不重试）">
                                     <el-input-number v-model="form.TASK_RETRY_TIMES" :step="1" step-strictly
-                                        :precision="0" :min="1" :max="5" />
+                                        :precision="0" :min="0" :max="5" />
                                 </el-form-item>
                                 <el-form-item label="输出日志级别">
                                     <el-select v-model="form.LOG_LEVEL" :options="log_level_options" />

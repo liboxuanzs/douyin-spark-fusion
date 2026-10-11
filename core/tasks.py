@@ -19,7 +19,10 @@ from utils.logger import setup_logger
 from utils.config import get_config, get_userData
 from core.msg_builder import build_message
 from core.browser import close_context, get_browser
-from core.douyin_im import DouyinIM, STATUS_READY, target_name, target_refs
+from core.douyin_im import (
+    DouyinIM, STATUS_READY, STATUS_EXPIRED, STATUS_LOGGED_OUT, STATUS_LOGIN_LOST,
+    target_name, target_refs,
+)
 from core import limit_guard
 from core import quiet_window
 from core import run_ledger as ledger
@@ -45,6 +48,83 @@ def _gate_reason(status):
         "TIMEOUT": "等待超时",
         "ERROR": "内部错误",
     }.get(status, status)
+
+
+# 门禁判出「这个账号的登录态已经死了」的终态。
+#
+# 这类失败**重试没有任何意义**：页面再开一百次，服务端认的还是同一份作废的
+# sessionid；而每 5 分钟敲一次门的定时器（`deploy/douyin-spark-fusion-daily.timer`
+# 的 `OnCalendar=*:0/5`）真的会把它开一百次 —— 2026-10-10 wheat 实测：20:48 起
+# 每 5 分钟一次「开浏览器 → goto /chat → 判 EXPIRED」，一天最多 288 次，
+# 全部是同一个形状。对一个正在被风控盯着的账号，这些重复请求只有坏处。
+#
+# 所以这类失败按 `error` 记账（`_mark_status`）：占掉当天名额、当天不再重试；
+# 面板计入「需要处理」并提示重新扫码；用户重新登录成功后，webui 的扫码回调会
+# 撤掉当天记账，下一个门铃**自动补发**（见 webui/app.py 的扫码成功回调）。
+#
+# 只有这类「人不动手就不会好」的失败才配占掉当天名额；TIMEOUT / ERROR 这类
+# 可能是网络抖动的，仍然记 `skipped`，让门铃当天继续试。
+GATE_DEAD_STATUSES = (STATUS_EXPIRED, STATUS_LOGGED_OUT, STATUS_LOGIN_LOST)
+
+
+def _gate_death_confirmed(im, res, username) -> bool:
+    """门禁判出「登录态已死」之后再向服务端确认一次：真死了才认账。
+
+    为什么要多问一次：判死之后**当天就不再重试**，而一次页面抖动（慢加载、
+    风控弹窗、SSR 抽风都可能画成登录框）就会让这个账号白丢一整天。这份确认
+    的代价只是同一条页面上的再一次 `check_login` —— 相比"每 5 分钟重开一次
+    浏览器"的 288 次，几乎不要钱。
+
+    只有 EXPIRED 需要确认：它的判定是「带着 sessionid 却画着登录框」，最容易被
+    页面抖动骗到；LOGGED_OUT（连 sessionid 都没有）没有这种歧义。
+
+    确认本身炸了（页面已经关掉之类）时按"死"处理：宁可让用户去扫一次码，
+    也不要拿一份疑似失效的登录态继续跑。
+    """
+    if str(res.get("status") or "") != STATUS_EXPIRED:
+        return True
+    recheck = getattr(im, "recheck_login", None)
+    if not callable(recheck):
+        return True
+    try:
+        lg = recheck() or {}
+    except Exception as exc:                        # noqa: BLE001 —— 复检失败不该让整轮炸掉
+        logger.warning(f"账号 {username} 复检登录态时炸了：{type(exc).__name__}: {exc}")
+        return True
+    state = str(lg.get("state") or "")
+    if state == "LOGGED_IN":
+        logger.warning(
+            f"账号 {username} 门禁判了 {res.get('status')}，但复检又说登录还在"
+            f" —— 当成偶发抖动：本轮跳过，当天继续按时间表重试"
+        )
+        return False
+    logger.info(f"账号 {username} 复检确认登录态已失效（state={state or 'UNKNOWN'}）")
+    return True
+
+
+# 面板「任务重试次数」（`TASK_RETRY_TIMES`）的上限，与 `webui/settings.py` 的
+# `maximum=5` 对齐：`.env` 里手滑写成 999 也不会真的再合成 999 次发送。
+RETRY_TIMES_MAX = 5
+
+
+def _retry_budget(raw) -> int:
+    """把 `TASK_RETRY_TIMES` 收成一个安全的整数：0 = 不重试。
+
+    这个键 2026-10-11 之前在面板上可改、`core/` 里却 **0 处消费** —— 无论
+    写 1 还是 3，代码都只重试一次（写死的）。现在真按它执行：调用方拿返回值
+    当"每个目标失败后最多再试几次"。
+    """
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        logger.warning(f"TASK_RETRY_TIMES={raw!r} 不是数字 —— 按默认 1 次重试")
+        return 1
+    if n < 0:
+        return 0
+    if n > RETRY_TIMES_MAX:
+        logger.warning(f"TASK_RETRY_TIMES={n} 超过上限 {RETRY_TIMES_MAX} —— 按上限执行")
+        return RETRY_TIMES_MAX
+    return n
 
 
 def _entry(friend, r, dry_run):
@@ -121,8 +201,24 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
         res = im.wait_ready()
         out["gate"] = res.get("status")
         if res.get("status") != STATUS_READY:
-            out["status"] = "skipped"
-            logger.error(f"账号 {username} 操作前检查未通过：{_gate_reason(res.get('status'))}，跳过该账号")
+            if res.get("status") in GATE_DEAD_STATUSES and _gate_death_confirmed(im, res, username):
+                # 登录态已死：一条都发不出去，而且**人不动手就不会好**。
+                # 按 error 记账 = 占掉当天名额、当天不再重试（见 GATE_DEAD_STATUSES 注释）。
+                out["status"] = "error"
+                out["error"] = (
+                    f"login_dead: 登录已失效（{_gate_reason(res.get('status'))}），"
+                    "本轮一条都没发出去，当天也不会再重试"
+                    "（拿同一份失效 cookie 反复开浏览器对风控只有坏处）；"
+                    "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+                )
+                logger.error(
+                    f"账号 {username} 操作前检查未通过：{_gate_reason(res.get('status'))}"
+                    f" —— 登录态已死，当天不再重试；到面板「扫码登录」重新登录这个账号，"
+                    f"登录成功后当天会自动补发"
+                )
+            else:
+                out["status"] = "skipped"
+                logger.error(f"账号 {username} 操作前检查未通过：{_gate_reason(res.get('status'))}，跳过该账号")
             return out
 
         logger.info(
@@ -181,22 +277,66 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                     else:
                         out["entries_truncated"] = True
                     break
-                # 重试一次：用 conv_id 重新选中（列表可能已滚动，原来的下标失效）
-                logger.warning(
-                    f"账号 {username} → {friend['display']} 未拿到可信回执，重试一次"
-                )
-                try:
-                    if friend.get("reselect") and friend["reselect"]():
+                # 失败重试：次数由面板「任务重试次数」（`TASK_RETRY_TIMES`）决定，
+                # 每次都用 conv_id 重新选中（列表可能已滚动，原来的下标失效）。
+                #
+                # 两种情况**一次都不重试**：
+                #   * 上一发已经吃到风控信号 —— 面板把「限流熔断」写成"命中即停"，
+                #     再试一次就是在喂风控（旧代码正是在这里多合成了一次发送）；
+                #   * 重试时才发现掉登录 —— 重试没有意义，交给下面的账号级结论。
+                retries = _retry_budget(config.get("taskRetryTimes", 1))
+                if retries and r.get("rate_limited") and config.get("limitGuardEnabled", True):
+                    logger.warning(
+                        f"账号 {username} → {friend['display']} 已命中风控信号"
+                        f"（{r.get('limit', {}).get('keyword')}）—— 不重试，交给熔断"
+                    )
+                    retries = 0
+                for attempt in range(1, retries + 1):
+                    logger.warning(
+                        f"账号 {username} → {friend['display']} 未拿到可信回执，"
+                        f"重试 {attempt}/{retries}"
+                    )
+                    try:
+                        if not (friend.get("reselect") and friend["reselect"]()):
+                            logger.warning(
+                                f"账号 {username} → {friend['display']} 重选失败，不再重试"
+                            )
+                            break
                         r2 = im.type_and_send(friend, text, dry_run=dry_run)
                         r = r2
                         if r2["ok"]:
                             sent_ok += 1
                             sent_fail -= 1
                             logger.info(
-                                f"账号 {username} → {friend['display']} 重试成功"
+                                f"账号 {username} → {friend['display']} "
+                                f"重试 {attempt}/{retries} 成功"
                             )
-                except Exception:
-                    logger.warning(traceback.format_exc())
+                            break
+                        if r2.get("login_lost"):
+                            login_lost = True
+                            logger.error(
+                                f"账号 {username} → {friend['display']} 重试时发现登录已失效"
+                                f"（{r2.get('login_state') or 'UNKNOWN'}）：停止本轮发送，"
+                                f"请到面板「扫码登录」重新登录这个账号"
+                            )
+                            break
+                        if r2.get("rate_limited") and config.get("limitGuardEnabled", True):
+                            logger.warning(
+                                f"账号 {username} → {friend['display']} 重试命中风控信号"
+                                f"（{r2.get('limit', {}).get('keyword')}）—— 停止重试"
+                            )
+                            break
+                    except Exception:
+                        logger.warning(traceback.format_exc())
+                        break
+                if login_lost:
+                    # 重试时才发现掉登录：和"首发就掉登录"一样立刻收摊 ——
+                    # 剩下的目标每个都要白等一轮回执超时再复检，只会把风控喂大。
+                    if len(out["entries"]) < ENTRY_CAP:
+                        out["entries"].append(_entry(friend, r, dry_run))
+                    else:
+                        out["entries_truncated"] = True
+                    break
 
             if len(out["entries"]) < ENTRY_CAP:
                 out["entries"].append(_entry(friend, r, dry_run))
@@ -390,8 +530,9 @@ def _mark_status(result) -> str:
     """把账号级结果翻译成发送时间表里的状态。
 
     - ``ok``      → 真跑过（个别好友失败也算跑过）→ 记成今天已发
-    - ``error``   → 真跑过但炸了 → **同样记**：坏 cookie 不会因为多试几次就好，
-                    不记的话每 5 分钟一次的门铃会把它一天踹起来 288 次
+    - ``error``   → 真跑过但炸了 / 登录态已死（``login_dead``）→ **同样记**：
+                    坏 cookie 不会因为多试几次就好，不记的话每 5 分钟一次的
+                    门铃会把它一天踹起来 288 次
     - ``skipped`` → 门禁没过 / 命中风控提前中止，**一条都没发出去**。必须与
                     ``ok`` 区分：记成「已发」会让面板明晃晃写着已发、而当天的
                     名额就这么被吃掉，用户完全看不出来（见 core/schedule.select）

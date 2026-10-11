@@ -177,6 +177,11 @@ _LEVEL_MEDIUM = "medium"
 #: 门禁通过时的状态码（见 ``core.douyin_im`` 的 ``STATUS_*``）。
 _GATE_OK = "READY"
 
+#: "重新登录后会自动补发"的统一说法。补发由 ``webui/app.py::_requeue_after_relogin`` 做，
+#: 它**只对"今天一条都没成功发出去"的账号撤记账**（已经发过的账号不重复补发），
+#: 所以文案必须带上这个前提，否则用户会以为"重扫一次今天就会再发一遍"。
+_REQUEUE_NOTE = "（今天还没成功发出去的话，登录成功后会自动补发一次）"
+
 
 # ---------------------------------------------------------------- 小工具
 
@@ -546,9 +551,12 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     account_error = str(_get(account, "error") or "")
     login_lost = account_error.startswith("login_lost")
     nothing_sent = account_error.startswith("nothing_sent")
+    # 门禁阶段就判出「登录态已死」的那一档（core/tasks.py 的 GATE_DEAD_STATUSES）：
+    # 一条都没发出去、当天也不会再重试 —— 和 login_lost 一样是"根本上没法干活"。
+    login_dead = account_error.startswith("login_dead")
     state = _account_state_for(
         data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed,
-        login_lost=login_lost or nothing_sent,
+        login_lost=login_lost or nothing_sent or login_dead,
     )
 
     issues: List[Dict[str, str]] = []
@@ -566,7 +574,12 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         if gate in ("EXPIRED", "LOGGED_OUT"):
             # 登录失效是**唯一**能一眼看出该怎么办的门禁失败：重新扫码。
             # 只说"上次门禁：登录已失效"用户还得自己猜下一步做什么。
-            text += " —— 到下面「扫码登录」用这个账号重新扫一次即可（登录成功后当天会自动补发）"
+            text += " —— 到下面「扫码登录」用这个账号重新扫一次即可" + _REQUEUE_NOTE
+        if login_dead:
+            # 登录态已死时定时器**当天不会再拿这份 cookie 重开浏览器**
+            # （core/tasks.py 的 GATE_DEAD_STATUSES）。用户会看到"今天不再试了"，
+            # 得说清楚为什么、以及"重新登录后当天照样补发"，否则会以为整天报废了。
+            text += "；本轮一条都没发出去，今天不会再重试（拿失效的登录态反复开浏览器只会喂大风控）"
         issues.append({"level": "danger", "text": text})
     if login_lost:
         # 与"门禁没过"分开说：门禁是**操作前**就看出来的，这条是**发送时**才暴露的
@@ -576,7 +589,8 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             "level": "danger",
             "text": "上一轮登录已失效（服务端不认这个 sessionid），一条都没发出去 —— "
                     "到下面「扫码登录」用这个账号重新扫一次即可；"
-                    "重新登录成功后，当天会自动补发（不用手点「立即运行」）",
+                    "重新登录成功后会自动补发一次（不用手点「立即运行」，但只补"
+                    "今天还没成功发出去的账号）",
         })
     elif nothing_sent:
         # 更隐蔽的一档：门禁当时还是 READY、校验全 strong、输入也对，抖音那边
@@ -586,7 +600,8 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             "level": "danger",
             "text": "上一轮**一条都没送达**（每个目标都没拿到回执；门禁当时还是通过的）—— "
                     "通常是登录已被服务端作废或风控拦截；"
-                    "到下面「扫码登录」重新扫一次，登录成功后当天会自动补发",
+                    "到下面「扫码登录」重新扫一次，登录成功后会自动补发一次"
+                    + _REQUEUE_NOTE,
         })
     if status == "skipped":
         issues.append({"level": "warning", "text": "上一轮该账号被跳过"})

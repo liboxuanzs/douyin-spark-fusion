@@ -70,7 +70,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 日志默认落在 utils/logger.py 写的那一份（logs/app.log），这样仪表盘的"日志尾部"
 # 看到的就是任务真实输出。C 的 Docker 部署把这个目录挂到 /app/logs。
 DEFAULT_LOG_FILE = "logs/app.log"
-DEFAULT_SCHEDULE_TIMES = "09:00"
+# 与 core/schedule.py 的 DEFAULT_TIME 对齐：派发器模式下账号没写 time 时按 20:30 发，
+# 面板的"下次定时"预览若还按 09:00 算，用户会看到一个永远不会发生的时刻。
+DEFAULT_SCHEDULE_TIMES = "20:30"
 
 
 class ConfigError(RuntimeError):

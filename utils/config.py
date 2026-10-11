@@ -122,7 +122,11 @@ def get_config():
         "imMaxSteps": _env_int(
             "IM_MAX_STEPS", 200, minimum=1
         ),  # 滚动步数硬上限
-        "taskRetryTimes": _env_int("TASK_RETRY_TIMES", 3, minimum=0),  # 任务重试次数
+        # 每个目标"没拿到可信回执"后最多再试几次。**默认 1**：重试要重新选中并再
+        # 合成一次发送（还可能等满一轮回执超时），线上一直就是这个节奏 ——
+        # 2026-10-11 之前这个键在面板上可改、`core/` 里却 0 处消费，写几都只重试
+        # 一次；现在真按它执行（见 core/tasks.py::_retry_budget）。
+        "taskRetryTimes": _env_int("TASK_RETRY_TIMES", 1, minimum=0),
         "logLevel": os.getenv("LOG_LEVEL", "Debug"),  # 日志级别
 
         # ---- 空跑与限流熔断（融合新增，见 FUSION-DESIGN.md §5/§6）----------

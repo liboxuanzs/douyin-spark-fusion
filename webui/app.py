@@ -1005,6 +1005,15 @@ def _split_targets(text: str) -> Optional[List[str]]:
     return items or None
 
 
+def _target_labels(unique_id: str) -> List[str]:
+    """TASKS 里这个账号当前的目标名（保存前记一份，用来对比"这次删掉了哪些"）。"""
+    try:
+        task = envfile.task_for(unique_id) or {}
+    except Exception:  # noqa: BLE001
+        return []
+    return [store.target_label(item) for item in (task.get("targets") or [])]
+
+
 def login_view() -> Dict[str, Any]:
     """面板「账号与扫码登录」那一段要的全部数据（只读）。"""
     session = _latest_session()
@@ -1960,6 +1969,10 @@ def create_app() -> FastAPI:
                 return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
             return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
 
+        # 勾选列表是**整表覆盖**：这次没勾上的旧目标会被删掉。先记下原来有哪些，
+        # 保存后把"删掉了谁"一并写进提示 —— 否则用户只看到"已保存 N 个"，
+        # 少掉的目标要到下一轮发送时才发现（2026-10-11 wheat 就是这样少过 2 个）。
+        before = _target_labels(unique_id)
         # 两种来源：勾选列表（每个 value 是一小段 JSON）优先，其次是旧的手填文本。
         items = parse_picked(picked)
         if not items:
@@ -1973,11 +1986,17 @@ def create_app() -> FastAPI:
                 pass
         if as_html:
             if result.get("ok"):
-                count = len(result.get("targets") or [])
+                saved_targets = result.get("targets") or []
+                count = len(saved_targets)
                 with_identity = sum(
-                    1 for item in (result.get("targets") or []) if isinstance(item, dict)
+                    1 for item in saved_targets if isinstance(item, dict)
                 )
                 note = f"，其中 {with_identity} 个带身份（只按 id 匹配）" if with_identity else ""
+                after = [store.target_label(item) for item in saved_targets]
+                removed = [name for name in before if name and name not in after]
+                if removed:
+                    shown = "、".join(removed[:3]) + ("…" if len(removed) > 3 else "")
+                    note += f"；这次没勾选、已移除 {len(removed)} 个：{shown}"
                 return redirect_with(
                     request, path="/",
                     warn=f"{unique_id} 的目标好友已保存（{count} 个{note}）",

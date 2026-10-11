@@ -209,10 +209,10 @@ SETTINGS: Tuple[Setting, ...] = (
         "TASK_RETRY_TIMES",
         "任务重试次数",
         KIND_INT,
-        minimum=1,
+        minimum=0,
         maximum=5,
-        default="3",
-        hint="每个目标失败后的重试次数",
+        default="1",
+        hint="每个目标没拿到可信回执后最多再试几次（0 = 不重试）；命中风控信号或掉登录时一次都不重试",
     ),
     Setting(
         "LOG_LEVEL",
@@ -228,7 +228,9 @@ SETTINGS: Tuple[Setting, ...] = (
         "显示时区",
         KIND_TEXT,
         default="Asia/Shanghai",
-        hint="面板上的时间戳按它渲染（IANA 名字，如 Asia/Shanghai）；任务本身跟随系统时区",
+        hint="面板上的时间戳按它渲染（IANA 名字，如 Asia/Shanghai）。它只管显示："
+             "调度与日志时钟走 .env 里的 TZ（面板改不了，改它要重启服务）——"
+             "两边填不一样时，面板显示的时间会和实际触发时间差几个小时",
     ),
 )
 

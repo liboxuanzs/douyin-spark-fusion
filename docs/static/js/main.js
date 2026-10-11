@@ -39,7 +39,7 @@ const app = createApp({
       IM_READY_TIMEOUT: 120,
       FRIEND_LIST_WAIT_TIME: 3,
       IM_MAX_STEPS: 200,
-      TASK_RETRY_TIMES: 3,
+      TASK_RETRY_TIMES: 1,
       LOG_LEVEL: "Debug",
       ACCOUNTS: [
         {

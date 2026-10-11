@@ -1459,6 +1459,44 @@ class FriendPickerWebUITestCase(WebUITestCase):
         self.assertIn("# 这一行注释必须原样保留", self.env_text())
         self.assertEqual(self.tasks()[0]["fingerprint"], 12345, "指纹不能被改掉")
 
+    def test_保存时点名这次少掉了哪些目标(self) -> None:
+        """整表覆盖式保存会把这次没勾上的旧目标删掉，提示里必须报出删了谁。
+
+        2026-10-11 wheat 的目标从 4 个变成 2 个，面板当时只说"已保存 2 个"，
+        少掉的两个要到下一轮发送时才发现 —— 不能让这种删除继续静默。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            response = client.post(
+                "/ops/account/targets", headers={"Accept": "text/html"},
+                follow_redirects=False,
+                data={"unique_id": UID,
+                      "picked": [self.pick_value("验收好友乙", uid="2002")]},
+            )
+        self.assertEqual(response.status_code, 303, response.text)
+        warn = unquote(response.headers["location"])
+        self.assertIn("已保存（1 个", warn)
+        self.assertIn("已移除 1 个", warn)
+        self.assertIn(FRIEND_MAIN, warn)
+        # 提示归提示，写进去的就是勾上的那一个
+        self.assertEqual(self.tasks()[0]["targets"], [{"name": "验收好友乙", "uid": "2002"}])
+
+    def test_没少目标时不多嘴(self) -> None:
+        """对照：勾上原来那个目标时提示里不该出现"移除了"。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            response = client.post(
+                "/ops/account/targets", headers={"Accept": "text/html"},
+                follow_redirects=False,
+                data={"unique_id": UID, "picked": [self.pick_value(FRIEND_MAIN)]},
+            )
+        self.assertEqual(response.status_code, 303, response.text)
+        warn = unquote(response.headers["location"])
+        self.assertIn("已保存（1 个", warn)
+        self.assertNotIn("移除", warn)
+
     def test_手填文本仍然能用(self) -> None:
         """老用法（直接写名字）不能因为改了界面就失效。"""
         os.environ["WEBUI_PASSWORD"] = PASSWORD

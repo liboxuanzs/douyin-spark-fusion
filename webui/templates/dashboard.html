@@ -80,7 +80,8 @@
       <strong><i data-lucide="alarm-clock"></i>定时时间对不上</strong>
       <ul>
         <li>系统定时器是 <code>{{ view.schedule.timerTimes|join('、') }}</code>，`.env` 里写的是 <code>{{ view.schedule.times|join('、') }}</code>。</li>
-        <li>真正会跑的是系统定时器那个时间；`.env` 里的 <code>TASK_SCHEDULE_TIMES</code> 只影响面板上算的"下次触发"。</li>
+        <li>定时器决定"门铃什么时候响"，`.env` 的 <code>TASK_SCHEDULE_TIMES</code> 决定每个账号"该发"的时刻；两边对不上时，账号可能到点也发不出去。</li>
+        <li>要一致：把定时器改成 <code>*:0/5</code> 这种派发器写法（每 5 分钟敲门、各账号按自己的时间发），或者把两边的时间改成一样。</li>
       </ul>
     </div>
     {% endif %}

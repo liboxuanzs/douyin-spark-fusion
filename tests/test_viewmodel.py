@@ -949,6 +949,29 @@ class LoginLostCardTests(unittest.TestCase):
         self.assertTrue(any("上次门禁" in t and "扫码" in t for t in texts), texts)
         self.assertEqual(card["state"], "blocked")
 
+    def test_gate_dead_session_says_the_day_will_not_be_retried(self):
+        """门禁判死（core/tasks.py 的 GATE_DEAD_STATUSES）时，卡片要说清两件事。
+
+        2026-10-10 wheat 起的新记账口径：门禁 EXPIRED 记 `error`（`login_dead`），
+        当天不再重试 —— 免得每 5 分钟重开一次浏览器去喂风控。但用户会看到
+        "今天不试了"，所以必须同时说清「重新登录成功后当天照样补发」，
+        否则会以为一整天就这么报废了。
+        """
+        account = _account(
+            status="error", sent_ok=0, sent_fail=0, entries=[], gate="EXPIRED",
+            error="login_dead: 登录已失效（登录已失效（有 sessionid 但服务端不认）），"
+                  "本轮一条都没发出去，当天也不会再重试（拿同一份失效 cookie 反复开"
+                  "浏览器对风控只有坏处）；请到面板「扫码登录」重新登录该账号，"
+                  "登录成功后当天会自动补发")
+        snapshot = _snapshot(gate="EXPIRED", gate_text="登录已失效",
+                             status="error", status_text="出错")
+        card = viewmodel.build_account(snapshot, _record(accounts=[account]))
+        self.assertEqual(card["state"], "blocked")
+        texts = [issue["text"] for issue in card["issues"]]
+        self.assertTrue(any("今天不会再重试" in t for t in texts), texts)
+        self.assertTrue(any("扫码" in t for t in texts), texts)
+        self.assertTrue(any("自动补发" in t for t in texts), texts)
+
     def test_plain_send_failure_stays_attention(self):
         """对照：普通发送失败（登录还在）仍然是 attention，不该被这条规则吞掉。"""
         account = _account(sent_fail=4, status="ok", error=None,

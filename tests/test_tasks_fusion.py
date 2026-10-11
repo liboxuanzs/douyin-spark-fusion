@@ -100,6 +100,8 @@ class _FakeIM:
     result = None            # 由各用例设置（None → 用 _ok_result）
     pre_limit = None         # 门禁后 check_limit 的返回值
     raise_on_ready = None
+    recheck = {"state": "EXPIRED"}   # recheck_login() 的结论（门禁判死后的复检）
+    recheck_raises = None
 
     def __init__(self, page, **kw):
         self.page = page
@@ -117,6 +119,12 @@ class _FakeIM:
         if _FakeIM.raise_on_ready:
             raise RuntimeError(_FakeIM.raise_on_ready)
         return dict(_FakeIM.ready)
+
+    def recheck_login(self):
+        self.rechecked = getattr(self, "rechecked", 0) + 1
+        if _FakeIM.recheck_raises:
+            raise RuntimeError(_FakeIM.recheck_raises)
+        return dict(_FakeIM.recheck)
 
     def iter_find_and_select(self, targets):
         self.targets_seen = list(targets)
@@ -189,6 +197,8 @@ class _TasksCase(unittest.TestCase):
         _FakeIM.result = None
         _FakeIM.pre_limit = None
         _FakeIM.raise_on_ready = None
+        _FakeIM.recheck = {"state": "EXPIRED"}
+        _FakeIM.recheck_raises = None
         self.browsers = []
 
         def _get_browser(fingerprint=None):
@@ -350,16 +360,80 @@ class AccountMessageTests(_TasksCase):
 
 
 class GateAndErrorTests(_TasksCase):
-    def test_gate_failure_is_skipped_not_error(self):
+    def test_dead_session_at_the_gate_is_error_not_skipped(self):
+        """门禁就判出「登录态已死」：记 error（占掉当天名额、当天不再重试）。
+
+        2026-10-10 wheat 的真实事故：sessionid 被服务端作废之后，每 5 分钟的
+        门铃仍然会把它敲门一次，每次都真的开一只浏览器 + goto /chat ——
+        一天 100 次实测（理论上限 288），全是同一个形状的 EXPIRED。
+        对一个正在被风控盯着的账号，这些重复请求只有坏处。
+        记 error 之后当天不再重试；重新扫码成功后 webui 会撤掉当天记账，
+        下一个门铃自动补发（不用等第二天）。
+        """
+        from core import schedule
         self._set_users(self.users)
         _FakeIM.ready = {"status": "EXPIRED", "user_id": None, "nickname": None}
-        rec = tasks_mod.runTasks(dry_run="full", source="test")
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
         acct = rec["accounts"][0]
-        self.assertEqual(acct["status"], "skipped")
+        self.assertEqual(acct["status"], "error")
         self.assertEqual(acct["gate"], "EXPIRED")
+        self.assertIn("login_dead", acct["error"])
+        self.assertIn("重新登录", acct["error"])
         self.assertEqual(acct["sent_ok"], 0)
         self.assertEqual(_FakeIM.instances[0].calls, [])
         self.assertTrue(_FakeIM.instances[0].detached)   # 跳过也要收尾
+        self.assertEqual(_FakeIM.instances[0].rechecked, 1)   # 判死前复检过一次
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "error")
+        self.assertIn("login_dead", state["accounts"]["111"]["note"])
+
+    def test_gate_expiry_the_recheck_denies_stays_skipped(self):
+        """门禁说 EXPIRED、复检说登录还在 → 当偶发抖动：仍然 skipped，当天继续试。
+
+        判死之后当天就不再重试，所以这**一**次复检买到的是"别把一整天丢掉"：
+        页面抖动（慢加载、风控弹窗、SSR 抽风）也会画成登录框，只看门禁那一票
+        就会误杀。
+        """
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.ready = {"status": "EXPIRED", "user_id": None, "nickname": None}
+        _FakeIM.recheck = {"state": "LOGGED_IN", "user_id": "100", "nickname": "测试号"}
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "skipped")
+        self.assertEqual(acct["gate"], "EXPIRED")
+        self.assertNotIn("login_dead", str(acct.get("error") or ""))
+        self.assertEqual(_FakeIM.instances[0].calls, [])
+        self.assertEqual(_FakeIM.instances[0].rechecked, 1)
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "skipped")
+
+    def test_recheck_that_blows_up_still_counts_as_dead(self):
+        """复检自己炸了（页面已经关掉之类）→ 按"死"处理，不能让整轮跟着炸。"""
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.ready = {"status": "EXPIRED", "user_id": None, "nickname": None}
+        _FakeIM.recheck_raises = "page closed"
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("login_dead", acct["error"])
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "error")
+
+    def test_transient_gate_failure_still_only_skips(self):
+        """对照：可能自己好的门禁失败（等待超时/内部错误）仍然记 skipped，当天继续试。"""
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.ready = {"status": "TIMEOUT", "user_id": None, "nickname": None}
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "skipped")
+        self.assertEqual(acct["gate"], "TIMEOUT")
+        self.assertEqual(_FakeIM.instances[0].calls, [])
+        self.assertTrue(_FakeIM.instances[0].detached)
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "skipped")
 
     def test_exception_becomes_error_entry_and_other_accounts_still_run(self):
         self._set_users([
@@ -914,6 +988,88 @@ class RuntimeLoginLostTests(_TasksCase):
         acct = rec["accounts"][0]
         self.assertEqual(acct["status"], "ok")
         self.assertNotIn("nothing_sent", str(acct.get("error")))
+
+
+class RetryBudgetTests(_TasksCase):
+    """「任务重试次数」（`TASK_RETRY_TIMES`）必须真的生效。
+
+    2026-10-11 之前：面板上这个键能改、`.env.example` 写着 3、线上 `.env` 也是 3，
+    而 `core/` 里 **0 处消费** —— 代码写死"重试一次"。用户以为设了 3 次，实际永远
+    是 1 次。这一组用例钉住：设几次就试几次，且命中风控/掉登录时一次都不试。
+    """
+
+    def _fail(self, dry_run="off", **extra):
+        r = {"ok": False, "via": None, "message_id": None, "code": None,
+             "status": None, "conv_id": "0:1:2", "display": "甲同学",
+             "reason": "no_receipt", "level": "none", "dry_run": dry_run,
+             "rate_limited": False, "limit": None}
+        r.update(extra)
+        return r
+
+    def test_budget_helper_clamps_and_survives_garbage(self):
+        self.assertEqual(tasks_mod._retry_budget(0), 0)
+        self.assertEqual(tasks_mod._retry_budget("2"), 2)
+        self.assertEqual(tasks_mod._retry_budget(-3), 0)
+        self.assertEqual(tasks_mod._retry_budget(999), tasks_mod.RETRY_TIMES_MAX)
+        self.assertEqual(tasks_mod._retry_budget("三次"), 1)    # 写错按默认 1 次
+        self.assertEqual(tasks_mod._retry_budget(None), 1)
+
+    def test_retry_times_decides_the_extra_attempts(self):
+        self._set_users(self.users)
+        _FakeIM.result = self._fail()
+        with mock.patch.dict(tasks_mod.config, {"taskRetryTimes": 2}):
+            rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        # 2 个目标 × (1 次首发 + 2 次重试) = 6
+        self.assertEqual(len(_FakeIM.instances[0].messages), 6)
+        # 每个目标只计一次失败（只有重试成功才会把 fail 挪回 ok）
+        self.assertEqual(acct["sent_fail"], 2)
+        self.assertEqual(acct["sent_ok"], 0)
+
+    def test_zero_mean_no_retry(self):
+        self._set_users(self.users)
+        _FakeIM.result = self._fail()
+        with mock.patch.dict(tasks_mod.config, {"taskRetryTimes": 0}):
+            tasks_mod.runTasks(dry_run="off", source="test")
+        self.assertEqual(len(_FakeIM.instances[0].messages), 2)     # 2 个目标各一次
+
+    def test_rate_limited_failure_is_not_retried(self):
+        """「限流熔断」写的是"命中即停"，那这一发失败之后就不该再合成一次发送。"""
+        self._set_users(self.users)
+        _FakeIM.result = self._fail(
+            rate_limited=True,
+            limit={"keyword": "操作频繁", "category": "rate_limit", "source": "http",
+                   "text": "code=1001 status='操作频繁'"})
+        with mock.patch.dict(tasks_mod.config, {"taskRetryTimes": 3}):
+            rec = tasks_mod.runTasks(dry_run="off", source="test")
+        self.assertTrue(rec["rate_limited"])
+        self.assertEqual(len(_FakeIM.instances[0].messages), 1)     # 首发即熔断，不重试
+
+    def test_login_lost_found_on_retry_marks_account_error(self):
+        """首发只是没拿到回执、重试才发现掉登录：账号级结论仍必须是 login_lost。"""
+        self._set_users(self.users)
+
+        class _RetryLostIM(_FakeIM):
+            def type_and_send(self, friend, message, dry_run="off", **kw):
+                self.calls.append((friend["display"], dry_run))
+                self.messages.append(message)
+                base = {"ok": False, "via": None, "message_id": None, "code": None,
+                        "status": None, "conv_id": "0:1:2",
+                        "display": friend["display"], "level": "none",
+                        "dry_run": dry_run, "rate_limited": False, "limit": None}
+                if len(self.messages) == 1:
+                    return dict(base, reason="no_receipt")
+                return dict(base, reason="login_lost", login_lost=True,
+                            login_state="EXPIRED")
+
+        with mock.patch.object(tasks_mod, "DouyinIM", _RetryLostIM):
+            rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("login_lost", acct["error"])
+        # 首发 + 一次重试（默认 1）就停：不再去试第二个目标
+        self.assertEqual(len(_RetryLostIM.instances[0].messages), 2)
+        self.assertEqual(acct["sent_fail"], 1)
 
 
 if __name__ == "__main__":
