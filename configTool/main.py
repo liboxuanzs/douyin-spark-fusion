@@ -476,7 +476,7 @@ class ConfigApp:
             font=FONT_UI,
         ).pack(fill="x")
 
-        label("任务重试次数")
+        label("任务重试次数", "0 = 不重试；命中风控信号或掉登录时一次都不重试")
         self.var_retry = tk.IntVar()
         ttk.Spinbox(
             form,

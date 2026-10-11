@@ -43,7 +43,7 @@ DEFAULT_IM_SCAN_TIMEOUT = 120
 DEFAULT_IM_READY_TIMEOUT = 120
 DEFAULT_FRIEND_LIST_WAIT_TIME = 3
 DEFAULT_IM_MAX_STEPS = 200
-DEFAULT_TASK_RETRY_TIMES = 3
+DEFAULT_TASK_RETRY_TIMES = 1
 # ⚠️ 大小写与 LOG_LEVEL_OPTIONS 保持一致（"Debug" 而非 "DEBUG"）：
 # tkinter Combobox 对不在 values 里的值不会高亮匹配项 → 框看着是空的。
 # utils.logger.resolve_log_level 内部 level.lower()，所以两种写法日志行为相同，
@@ -56,7 +56,7 @@ IM_SCAN_TIMEOUT_RANGE = (10, 1800)
 IM_READY_TIMEOUT_RANGE = (5, 300)
 FRIEND_LIST_WAIT_RANGE = (1, 120)
 IM_MAX_STEPS_RANGE = (10, 2000)
-RETRY_TIMES_RANGE = (1, 5)
+RETRY_TIMES_RANGE = (0, 5)   # 0 = 不重试（与面板 webui/settings.py 的 minimum=0 对齐）
 
 # 写进 .env 的键顺序：先基础变量，再按账户顺序追加 COOKIES_*
 BASE_ENV_KEYS = [
