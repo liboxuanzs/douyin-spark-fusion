@@ -2,9 +2,9 @@
 
 ![logo](images/cover-transparent.png ":size=440x220")
 
-# DouYinSparkFlow
+# 抖音续火花控制台
 
-> 抖音火花自动续火脚本 · 服务器 / 云函数 / 无头浏览器自动化
+> 自建服务器上的定时续火花 · 网页控制台 · 发送回执核验 · systemd 部署
 
 [开始阅读](README.md)
-[GitHub](https://github.com/2061360308/DouYinSparkFlow)
+[GitHub](https://github.com/liboxuanzs/douyin-spark-fusion)

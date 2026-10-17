@@ -1,25 +1,24 @@
-# DouYin Spark Flow
+# 抖音续火花控制台 · 文档
 
-![cover](images/cover-transparent.png ":size=640x320")
+自建服务器上的抖音「续火花」自动化：每 5 分钟敲一次门的派发器 + 一个网页控制台。
 
-抖音火花自动续火脚本，通过无头浏览器模拟人工操作，定时给好友发送消息来续火花。
+每个账号可以有自己的消息文本、发送时间和目标好友；发出去之后要拿抖音自己给出的回执核对收件人，核对不上就不算发过。
 
-## 特性
+## 从这里开始
 
-- 多账号、多目标，一个账号可同时给多个好友续火花
-- 支持按备注 / 昵称 / 抖音号匹配目标好友
-- 支持「每日一言」消息模板
-- 本地配置生成器（configTool）自动抓取登录态，无需手动导出 Cookie
+1. [项目介绍](intro/01-项目介绍.md) —— 它做什么、由哪几部分组成、和上游项目的关系
+2. [源码部署](deploy.md) —— systemd（web 常驻 + timer 每 5 分钟），含空跑验证与磁盘维护
+3. [网页控制台](webui.md) —— 每一页、每个按钮、每个状态的含义
+4. [常见问题](faq/faq.md) —— 登录态、限流、消息、账号
 
-## 快速开始
+## 其它
 
-1. 先看 [选择部署方式](guide/01-选择部署方式.md)，按自己的情况挑一种
-2. 用 [配置生成器](guide/03-配置生成器.md) 生成 `.env`
-3. 按对应的部署文档操作
-
-三种部署方式：**服务器 Docker（最推荐）**、云函数（少量付费、可用性待验证）、GitHub Action（已过时）。
+- [选择部署方式](guide/01-选择部署方式.md) · [Cookie 与出口 IP](guide/02-cookie与出口IP.md)
+- [仓库结构](dev/overview.md) · [工具与测试](dev/tools.md) · [本地代理调试](dev/local-proxy-debug.md)
+- [Docker 部署](deploy/docker.md) · [GitHub Action 部署（上游形态，本仓库不使用）](deploy/action.md)
 
 ## 链接
 
-- [GitHub 仓库](https://github.com/2061360308/DouYinSparkFlow)
-- [讨论区](https://github.com/2061360308/DouYinSparkFlow/discussions)
+- [GitHub 仓库](https://github.com/liboxuanzs/douyin-spark-fusion)
+- [设计取舍（FUSION-DESIGN.md）](https://github.com/liboxuanzs/douyin-spark-fusion/blob/master/FUSION-DESIGN.md)
+- [.env.example（全部配置键与默认值）](https://github.com/liboxuanzs/douyin-spark-fusion/blob/master/.env.example)

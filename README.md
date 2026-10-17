@@ -1,88 +1,147 @@
-# DouYin Spark Flow
+# 抖音续火花控制台
 
-![cover](docs/images/cover.png)
+自建服务器上的抖音「续火花」自动化：一个**每 5 分钟敲一次门的派发器**，加一个**网页控制台**。
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)
-![Playwright](https://img.shields.io/badge/Playwright-%E2%9C%94-green?logo=playwright)
-![chrome-headless-shell](https://img.shields.io/badge/chrome--headless--shell-%E2%9C%94-brightgreen?logo=googlechrome)
+每个账号可以有自己的消息文本、自己的发送时间、自己的目标好友；发出去之后要拿抖音自己给出的回执核对「这条到底发给了谁」，核对不上就不算发过。
 
-> 由于`抖音创作者更新后不能发送私信`项目已迁移到`https://www.douyin.com/chat` 加载更稳定，支持通过备注/昵称/抖音号等多种方式智能匹配。目前`https://www.douyin.com/chat`没经过长期测试
->
-> 反馈Github Action部署会被抖音检测到踢下线，暂时不确定消息可靠性。但已增加Docker部署方式，有条件的可以使用自己服务器部署。
+- 版本 `3.2.2` · Linux + Python 3.12 · 依赖全量钉版本（`requirements.txt`）
+- 浏览器：Playwright 驱动 cloakbrowser（可固定指纹）
+- 部署形态：systemd（web 常驻 + timer 每 5 分钟敲门），**不使用 GitHub Actions**
 
-## 🎁 限时公益服，先到先得
+## 特性
 
-不方便自行部署的用户，可以直接使用已部署的多用户 Web 控制台。
+### 发送这条链路
 
-这是由网友自建提供的公益服，自行评估风险后使用。详情见：
+- **账号独立配置**：`TASKS` 里每个账号有自己的 `message`（消息文本）和 `time`（发送时间）；没写时间的账号回落到 `TASK_SCHEDULE_TIMES` 的全局时间。
+- **5 分钟敲门派发器**：定时器不判断「今天发没发」，只负责敲门；`core/schedule.py` 决定谁到点、谁今天已经发过、谁要再试。当天没发出去的账号，下一个门铃会再试；试到上限（`SCHEDULE_SKIP_RETRY_MAX`）就停下等第二天。
+- **掉登录不再静默丢一天**：运行期发现登录失效，这一轮记成 `error`（而不是「今天已完成」）；重新扫码后当天自动补发，不用等到明天。
+- **强确认 / 弱证据**：只有「HTTP 回执 ok」**且**「发送后当前会话就是目标会话」才算强确认；拿不到收件人身份时降级成弱证据。账本里的 `ok` 表示「这条确实发出去了」，弱证据不会触发当天重发。
+- **可信输入**：抖音聊天页的编辑器是 EditorKit（Slate 系）。输入走「全选 + CDP `Input.insertText` 覆盖」，发送前逐行比对读回内容；落地不精确就先重试可信输入，再退回覆盖式重打，两条都不成**拒绝发送**——宁可漏发一条，也不发半条或叠发。
+- **dry-run 空跑**：`select` 只跑到「选中会话」，`full` 走完输入与校验但不点发送，适合第一次部署时验证全链路。
+- **限流熔断**：命中「操作频繁 / 安全验证」一类文案即中止本轮并进入冷却（`LIMIT_COOLDOWN_MINUTES`），避免火上浇油。
 
-[discussions76](https://github.com/2061360308/DouYinSparkFlow/discussions/76)
+### 运维
 
-**在线入口：[https://wangze.oilu.cn/admin](https://wangze.oilu.cn/admin)**
+- **磁盘维护**：登录资料目录等价于凭据，浏览器缓存会持续增长。`main.py prune` 盘点，面板四个按钮手动清，定时器每周自动清一次（`MAINTENANCE_AUTO_PRUNE_HOURS`，`0` 关闭）。三条安全线：只在自己家目录里动手、在册账号永不删、名单读不到就一个都不删。
+- **运行账本**：每轮结果写进 `logs/runs.jsonl`（谁、什么时候、发了几条、失败原因、谁触发的），面板「运行记录」读的就是它；「没有账号到点」这种常态不进账本。
+- **幂等安装**：`deploy/install.sh` 可以重复执行用于升级，不会覆盖已有 `.env`、不会重建 venv，装完会重启面板。定时器**不会**被自动 enable——那是「真的会发消息」的动作。
 
-> 邀请码显示无效通常表示已经被其他用户使用，请更换另一个邀请码。请勿向他人提供账号密码、短信验证码或抖音登录凭证，并合理控制任务数量与发送频率。
+### 界面
 
-## 贡献者
+- **网页控制台**：账号卡（今天发没发、下一次什么时候、卡在哪一步）、运行明细、日志尾部、手动运行、空跑触发、配置编辑（白名单键）、磁盘维护、扫码登录与二次验证。
+- **图形配置工具**：`configTool/`（tkinter）用来生成/修改 `.env`、抓取登录态，不写代码也能上手。
 
-感谢所有为本项目做出贡献的开发者：
+## 快速开始
 
-[![contributors](https://contrib.rocks/image?repo=2061360308/DouYinSparkFlow)](https://github.com/2061360308/DouYinSparkFlow/graphs/contributors)
+### 一键安装（Ubuntu 22.04 / 24.04）
 
-## 📌 项目介绍
+```bash
+git clone https://github.com/liboxuanzs/douyin-spark-fusion.git
+cd douyin-spark-fusion
+sudo bash deploy/install.sh --dry-run   # 先看它准备做什么：不写 /etc、不重启服务
+sudo bash deploy/install.sh             # 真装：venv → 依赖 → 浏览器 → .env → systemd 单元
+```
 
-**抖音火花自动续火脚本**一款轻量实用的抖音互动脚本，可自动为你和抖音好友续火花，无需手动操作。
+装完：
 
-> **本仓库是融合版**：在 [2061360308/DouYinSparkFlow](https://github.com/2061360308/DouYinSparkFlow) 基础上
-> ① 修好了"会话没选中也当成功"的乐观通过漏洞；② 去掉了 GitHub Actions 自动运行（改为自建机器上的 systemd timer）；
-> ③ 新增 dry-run 空跑（可先空跑验证全链路再真发）；④ 移植了限流关键词熔断（命中即中止本轮并冷却）；
-> ⑤ 融入了一个离线可用的 web 仪表盘。设计取舍见 `FUSION-DESIGN.md`，部署见 `docs/deploy.md`。
+```bash
+sudo systemctl start douyin-spark-fusion-web.service          # 起面板
+sudo systemctl enable --now douyin-spark-fusion-daily.timer   # 打开定时器（这一步之后才会真发消息）
+```
 
-✅ 源码部署至自有服务器（推荐：`systemd` 常驻 web 仪表盘 + 每日 timer，见 `docs/deploy.md`）
+面板默认在 `http://<机器>:8787`；健康检查 `GET /healthz` 不需要登录。第一次建议先空跑一轮，确认「选中会话 → 输入 → 读回校验」全绿再打开定时器。
 
-✅ 兼容青龙/白虎等任务管理面板，灵活适配个人使用场景
+### 手工跑一遍
 
-### 特性/优势
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
+.venv/bin/python main.py dry-run    # 空跑，不发送
+.venv/bin/python -m webui           # 起面板
+```
 
-- [x] 在线可视化配置工具，新手也能入门操作
-- [x] 会话身份严格校验：只有拿到"抖音自己算出来的会话 id"或对方 uid 才算选中，只看昵称不再算通过
-- [x] dry-run 空跑：`DRY_RUN=select|full` 时走完整链路但不点发送，返回结构化结果
-- [x] 限流熔断：命中"操作频繁/安全验证"等风控文案即中止本轮并冷却，避免火上浇油
-- [x] 自带 web 仪表盘：运行状态、限流冷却倒计时、最近运行明细、日志尾部、手动触发
-- [x] 多用户,同时批量支持多个账户
-- [x] 多目标,一个账户支持多个续火花目标
-- [x] 支持按照昵称和抖音号两种方式查找好友目标
-- [x] 一言支持,更丰富的消息文本
+容器化部署见 `docker-compose.yml`（容器内由 cron 每 5 分钟敲门）。
 
-使用`PlayWright`以及`chrome-headless-shell`自动化操作[抖音聊天网页版](https://www.douyin.com/chat)，进行定时发送抖音消息来续火花
+## 常用命令
 
-## 🚀 使用方法
+| 命令 | 作用 |
+| --- | --- |
+| `main.py` / `main.py task` | 跑一轮（cron / systemd timer 走这条） |
+| `main.py task --force` | 不看时间表，所有账号现在就发（面板「立即运行」同义） |
+| `main.py task --only <抖音号或昵称>` | 只处理这一个账号 |
+| `main.py dry-run [select\|full]` | 空跑一轮 |
+| `main.py prune [--apply] [--caches] [--older-than N] [--json]` | 盘点 / 清理磁盘（默认只预演，不动任何文件） |
+| `python -m webui` | 起网页控制台 |
 
-保姆级教程见 [项目文档-https://oilu.cn/DouYinSparkFlow](https://oilu.cn/DouYinSparkFlow)
+退出码：`0` 整轮跑完（「没有账号到点」也算跑完）、`1` 整轮被跳过或账号全部出错、`2` 参数错误。
 
-本融合版的自建机器部署（含 systemd 单元、`.env` 样例、空跑验证步骤）见 [`docs/deploy.md`](docs/deploy.md)。
+## 配置
 
-## 📢交流讨论
+`.env` 由程序自己按绝对路径读取——**不要**交给 systemd 的 `EnvironmentFile=`，那会吃掉消息模板里的字面 `\n`。常用键：
 
-已开放讨论区，有疑问或展示相关成果，发布话题需求的可以加入讨论
+| 键 | 说明 |
+| --- | --- |
+| `TASKS` | 账号与目标名单（JSON）：每个账号的 `unique_id`、`message`、`time`、目标列表 |
+| `COOKIES_<抖音号>` | 该账号的登录 cookie（面板扫码后自动写入） |
+| `TASK_SCHEDULE_TIMES` | 全局发送时间表，第一项是没单独配时间的账号的默认时间 |
+| `SCHEDULE_JITTER_MINUTES` | 每个账号在基准时间上的随机抖动上限 |
+| `DRY_RUN` | `off` / `select` / `full` |
+| `QUIET_WINDOW` | 禁跑时段（窗口结束后的第一个门铃才补发） |
+| `LIMIT_GUARD_ENABLED` / `LIMIT_COOLDOWN_MINUTES` | 限流熔断开关与冷却时长 |
+| `WEBUI_HOST` / `WEBUI_PORT` | 监听地址与端口（代码默认 `127.0.0.1:8787`，`.env.example` 给的是局域网 `0.0.0.0`） |
+| `WEBUI_PASSWORD` / `WEBUI_PASSWORD_HASH` | 面板访问口令（绑外部地址必须有口令） |
+| `WEBUI_SESSION_SECRET` / `WEBUI_SESSION_MAX_AGE` | 会话签名密钥与登录保持时长（默认 30 天） |
+| `LOGIN_PROFILE_DIR` | 登录资料目录根（等价于凭据，注意权限） |
+| `MAINTENANCE_AUTO_PRUNE_HOURS` | 定时器自动清理间隔，默认 168 小时，`0` 关闭 |
+| `PROXY_ADDRESS` | 出口代理，留空即直连（多账号共用出口 IP 是已知的风控面） |
 
-[跳转讨论区](https://github.com/2061360308/DouYinSparkFlow/discussions)
+完整清单、默认值与注释见 [`.env.example`](.env.example)；面板「配置」页能改其中的白名单键。
 
-此外创建了一个QQ群，主要用于作者收集反馈信息，愿意帮助测试的朋友可以加入
+## 目录结构
 
-[点此加入群聊](https://qun.qq.com/universal-share/share?ac=1&authKey=r6QyQAfAdjDnardyxro5kycsnF%2BdsLBTGUPWh7gFxqutzbbVF2shbgmqNJyCRdbZ&busi_data=eyJncm91cENvZGUiOiIxMDkxNjUxNDYyIiwidG9rZW4iOiJPdlB6dDU2Y2RxMzZ3L2ZWU01LNWtxM0ZWSW56QzlpSmZ5dnZVYWI3dzJWY2hVQmROeHZHN3QwdEpvUGJsc0JnIiwidWluIjoiMjA2MTM2MDMwOCJ9&data=L-_Gkg2cVrzDBW6FWJnD31g0RDbq67_YR0WK17hkRrMetritPsn3gvtBMXpTmY8Y8UZDlwY9qz5liHbbG3YDlg&svctype=4&tempid=h5_group_info
-)
-## ⭐Star 趋势
+```
+main.py              入口：task / dry-run / prune 三种模式
+core/                业务核心
+  schedule.py        5 分钟敲门派发器：谁到点、谁发过、谁要再试
+  tasks.py           一轮的编排：逐账号、逐目标、空跑、写账本
+  douyin_im.py       聊天页操作：选会话、可信输入、点发送、收回执
+  strict_verify.py   回执核验：强确认 / 弱证据分档
+  qr_login.py        扫码登录、登录态复检、资料目录接管
+  friend_scan.py     好友列表扫描
+  browser.py         浏览器启动 / 资料目录 / keepalive / 强杀
+  cookie_utils.py    cookie 清洗与过滤
+  maintenance.py     磁盘盘点与清理（手动 + 定时器自动）
+  limit_guard.py     限流熔断与冷却
+  run_ledger.py      运行账本与运行锁
+webui/               网页控制台（FastAPI + 原生前端）
+configTool/          图形配置工具（tkinter）
+deploy/              systemd 单元、安装脚本、logrotate 规则
+docker/ Dockerfile docker-compose.yml   容器化部署
+docs/                文档
+tests/               unittest 测试套件
+tools/               调试工具（浏览器探针、抓 HAR）
+```
 
-[![Star History Chart](https://api.star-history.com/svg?repos=2061360308/DouYinSparkFlow&type=Date)](https://www.star-history.com/#2061360308/DouYinSparkFlow&Date)
+## 文档
 
-## ⚠️ 免责声明
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/deploy.md`](docs/deploy.md) | 自建机器部署、systemd、空跑验证、磁盘与资料目录 |
+| [`docs/webui.md`](docs/webui.md) | 控制台每一页、每个按钮、每个状态的含义 |
+| [`docs/faq/faq.md`](docs/faq/faq.md) | 常见问题（登录态、限流、消息、账号） |
+| [`docs/dev/overview.md`](docs/dev/overview.md) | 代码结构与开发约定 |
+| [`docs/guide/`](docs/guide/) | 图文上手：部署方式选择、cookie 与出口 IP |
+| [`FUSION-DESIGN.md`](FUSION-DESIGN.md) | 本项目的设计取舍与决策记录 |
 
-1. 本项目为**开源学习用途**，仅用于技术研究和个人自用，严禁用于商业用途、恶意刷量或违反抖音平台规则的行为。
-2. 使用本脚本产生的一切风险（包括但不限于抖音账号限流、封禁、处罚等）均由使用者自行承担，项目开发者不承担任何责任。
-3. 本项目仅调用公开的接口/模拟人工操作，不涉及破解、入侵抖音系统，使用者需遵守《抖音用户服务协议》及相关法律法规。
-4. 请合理控制脚本运行频率，避免给抖音平台服务器造成压力，建议仅用于个人少量好友的火花维系。
-5. 若你使用本项目即表示已阅读并同意本免责声明，如不同意请立即停止使用。
+## 免责声明
 
-## 📄 开源协议
+- 本项目仅用于**技术学习与个人自用**，请勿用于商业用途、刷量或任何违反抖音平台规则的行为。
+- 自动化操作存在被平台限流、验证甚至封禁的风险，**使用风险由使用者自行承担**。
+- 请合理控制运行频率与目标数量，只用于维系个人少量好友的火花。
+- 使用本项目即表示你已阅读并同意以上内容。
 
-本项目基于 MIT 协议开源，你可以自由使用、修改和分发本项目代码，详见 [LICENSE](LICENSE) 文件。
+## 许可与来源
+
+本项目以 MIT 协议开源，详见 [`LICENSE`](LICENSE)。
+
+它是 MIT 项目 [2061360308/DouYinSparkFlow](https://github.com/2061360308/DouYinSparkFlow) 的二次开发版本，保留了上游的版权声明；在此基础上重做了调度与记账、收紧了发送与回执的判定、加入了可信输入与磁盘维护，并把部署形态改成自建机器上的 systemd。上游项目的文档、交流渠道与免责条款与本仓库无关。
