@@ -2873,7 +2873,8 @@ class DouyinIM:
         if not hit:
             raise ValueError("hit is None")
         if not text:
-            raise ValueError("text is empty")
+            raise ValueError("没有可发送的内容（模板渲染后为空："
+                             "可能是一言没取到，或模板只写了 [API] 占位符）")
 
         dry = norm_dry_run(dry_run)
         base = {"conv_id": hit.get("conv_id"), "display": hit.get("display"),

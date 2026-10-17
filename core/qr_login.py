@@ -40,6 +40,14 @@ LOGIN_URL = "https://www.douyin.com/"
 # 打开页面愿意等多久（毫秒）。机房链路抖动大，给宽一些。
 GOTO_TIMEOUT_MS = 180_000
 
+# 自愈重载时按剩余预算收缩超时的**下限**：预算再紧也不能把 goto 压到几百毫秒，
+# 那样只会立刻超时、白白把一次自愈用掉。
+# ★ 这个常量以前只在 `_goto_timeout_ms` 里被引用、却从来没定义过：一调用就抛
+#   NameError，而它唯一的调用点把异常吞进「自愈时重新载入登录页超时」的
+#   warning 里 —— 于是自愈（`_reload_login_page`）从来没有真正跑过，日志里
+#   只有一句看起来像网络抖动的「超时」。
+MIN_GOTO_TIMEOUT_MS = 10_000
+
 # 一次扫码会话的总预算（秒）。二维码本身也会过期，超时就让用户重开一次。
 DEFAULT_TTL_SECONDS = 300.0
 
@@ -979,8 +987,13 @@ class QrLoginSession(threading.Thread):
             page.goto(LOGIN_URL, wait_until="domcontentloaded",
                       timeout=_goto_timeout_ms(deadline))
         except Exception as exc:                                 # noqa: BLE001
-            # 超时 ≠ 导航失败：Playwright 只是不再等，请求仍在继续
-            logger.warning("[QR] 自愈时重新载入登录页超时，继续等页面就绪："
+            # 超时 ≠ 导航失败：Playwright 只是不再等，请求仍在继续。
+            # 但这里接的不止超时：`_goto_timeout_ms` 自己算错、参数写错抛的别的
+            # 异常也会掉进来 —— 必须把异常类型打出来，否则真 bug 会被「重载
+            # 超时」这个说法一直掩盖下去（MIN_GOTO_TIMEOUT_MS 漏定义就是这么
+            # 藏住的）。
+            logger.warning("[QR] 自愈时重新载入登录页失败"
+                           f"（{type(exc).__name__}），继续等页面就绪："
                            f"{' '.join(str(exc).split())[:160]}")
         fresh = self._wait_for_qr(page)
         if not fresh:

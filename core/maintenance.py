@@ -39,6 +39,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -612,21 +613,42 @@ def load_state(path: Any = None) -> Dict[str, Any]:
 
 
 def save_state(state: Dict[str, Any], path: Any = None) -> bool:
-    """原子写状态（临时文件 + ``os.replace``）。失败返回 False，绝不抛。"""
+    """原子写状态（临时文件 + ``os.replace``）。失败返回 False，绝不抛。
+
+    ★ 临时文件名必须**唯一**（交给 `tempfile` 生成），不能是
+      `target + ".tmp"` 这种固定名字：定时器里的自动清理与面板上的按钮
+      可能同时在写同一个状态文件，固定名字会让两个进程用 "w" 打开同一个
+      inode —— 谁先写完谁被截断，`os.replace` 只搬得走其中一个，另一个
+      可能把**半截 JSON** 搬成正式文件。`load_state` 解析失败会按「没清过」
+      处理（多清一遍，不致命），但没必要留这个坑；`core/schedule.py` 的
+      记账文件踩过同一个坑，那里的注释写得更细。
+    """
     target = Path(path) if path is not None else state_path()
-    tmp = target.with_name(target.name + ".tmp")
+    tmp = ""
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(tmp), "w", encoding="utf-8") as handle:
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=str(target.parent), delete=False,
+            prefix=target.name + ".", suffix=".tmp",
+        )
+        tmp = handle.name
+        with handle:
             json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.write("\n")
-        os.replace(str(tmp), str(target))
-        return True
-    except Exception:  # noqa: BLE001 —— 状态写不进去顶多下次多清一遍
         try:
-            os.remove(str(tmp))
+            # NamedTemporaryFile 建出来是 600；这个文件历来是 644（同 logs 目录
+            # 里的其它文件），保持一致，免得非 root 的排障脚本突然读不到。
+            os.chmod(tmp, 0o644)
         except OSError:
             pass
+        os.replace(tmp, target)
+        return True
+    except Exception:  # noqa: BLE001 —— 状态写不进去顶多下次多清一遍
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         return False
 
 

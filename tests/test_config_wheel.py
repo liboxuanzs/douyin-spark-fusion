@@ -5,8 +5,18 @@
 
 import unittest
 
-import tkinter as tk
-from tkinter import ttk
+# 解释器可能根本没编进 _tkinter（精简镜像、自编译的 CPython 就是这样）：那种环境下
+# `import tkinter` 抛的是 ModuleNotFoundError —— 属于**收集期**错误，会让整个 pytest
+# 会话直接中断（issue #3 的复现命令 `pytest tests` 就是这么连失败清单都打不出来）。
+# 文件头那句「没有真 Tk 时整体 skip」本来就该覆盖这种情况，所以把导入也圈进来：
+# 用 unittest.SkipTest 做模块级跳过，pytest 与 unittest discover 都认这个信号。
+# 注意 `import unittest` 必须在这之前（文件里本来就是这个顺序）。
+try:
+    import tkinter as tk
+    from tkinter import ttk
+except ImportError as exc:
+    raise unittest.SkipTest(
+        f"本机没有 tkinter（{exc}）：这套用例要真的建 Tk 窗口才测得了") from exc
 
 from configTool import widgets
 

@@ -401,6 +401,84 @@ class PerAccountRunTests(unittest.TestCase):
         summary = self._build(per_account=True)["summary"]
         self.assertEqual(summary["dry_run"], "off")
 
+    def test_轮询接口按同一口径说各账号各自最近一次(self) -> None:
+        """issue #2：首屏写「各账号各自最近一次（共 2 轮）」，轮询得能重画同一句话。
+
+        漏发 summary.mixedRuns 的后果不是报错：10 秒后同一位置变成「上一轮…」，
+        数字一个没变、口径被悄悄改错，用户没有任何办法看出来。
+        """
+        view = self._build(per_account=True)
+        payload = viewmodel.overview_payload(view)
+        self.assertTrue(payload["summary"]["mixedRuns"])
+        self.assertEqual(payload["summary"]["runCount"], view["summary"]["run_count"])
+        self.assertEqual(payload["summary"]["runCount"], 2)
+
+    def test_没混轮时轮询说的是上一轮(self) -> None:
+        payload = viewmodel.overview_payload(
+            self._build(per_account=False, selected=self._other_run())
+        )
+        self.assertFalse(payload["summary"]["mixedRuns"])
+
+
+class OverviewPayloadWiringTests(unittest.TestCase):
+    """issue #2/#4：轮询接口的字段必须真的来自服务端算好的那一份，别自己另算一套。"""
+
+    def test_定时器挂了的诊断原样发出(self) -> None:
+        """issue #2：首屏给的是「哪里坏了 + 怎么修」，轮询不能把它换成一句废话。"""
+        view = viewmodel.build(
+            records=[],
+            accounts=[_snapshot(targets=["甲"], target_count=1)],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            # 「已启用」只说明开机自启：systemctl stop 过 / failed 的 timer 照样是
+            # enabled，到点一样不会跑 —— 这正是首屏要解释的那种坏法。
+            timer={"name": "x.timer", "installed": True, "enabled": True,
+                   "state": "enabled", "activeState": "failed", "dispatchMinutes": 5},
+            default_dry_run="off",
+        )
+        schedule = view["schedule"]
+        self.assertIn("systemd 里当前是 failed", schedule["timerStallText"])
+        self.assertFalse(schedule["armed"], "挂了就不能算 armed，否则前端会画一个不会发生的点")
+        payload = viewmodel.overview_payload(view)
+        self.assertEqual(payload["schedule"]["timerStallText"], schedule["timerStallText"])
+        self.assertEqual(payload["schedule"]["timerActiveState"], "failed")
+
+    def test_账号卡那几个会变的字段原样发出(self) -> None:
+        cards = viewmodel.account_cards(
+            [_snapshot(targets=["甲"], target_count=1, send_time="12:30")], None
+        )
+        card = viewmodel.overview_payload({"accounts": cards})["accounts"][0]
+        for src, dst in (
+            ("state_label", "stateLabel"),
+            ("chip", "chip"),
+            ("run_missing", "runMissing"),
+            ("own_run_text", "ownRunText"),
+            ("send_window", "sendWindow"),
+            ("send_state", "sendState"),
+            ("send_state_text", "sendStateText"),
+            ("has_message", "hasMessage"),
+            ("message_lines", "messageLines"),
+        ):
+            with self.subTest(key=dst):
+                self.assertEqual(card[dst], cards[0][src], f"{dst} 必须与卡上的逐字一致")
+
+    def test_账号卡的默认值不会漏键(self) -> None:
+        """app.js 会直接读这些键：缺键等于 undefined，文案会变成 undefined 或空。"""
+        card = viewmodel.overview_payload({"accounts": [{"unique_id": "1"}]})["accounts"][0]
+        self.assertFalse(card["runMissing"])
+        self.assertFalse(card["hasMessage"])
+        self.assertEqual(card["stateLabel"], "")
+        self.assertEqual(card["chip"], "")
+        self.assertEqual(card["ownRunText"], "")
+        self.assertEqual(card["sendWindow"], "")
+        self.assertEqual(card["sendState"], "")
+        self.assertEqual(card["sendStateText"], "")
+        self.assertEqual(card["messageLines"], 0)
+
 
 class SummaryTests(unittest.TestCase):
     def test_汇总键与_B_的_JS_一致(self) -> None:

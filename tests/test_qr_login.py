@@ -335,11 +335,19 @@ class EnsureProfileDirTests(unittest.TestCase):
         self.root = self.tmp.name
 
     def test_new_dir_is_0700(self):
+        # Windows 的 `os.chmod` 只有"只读"这一位、`stat` 也不报 POSIX 权限位
+        # （实测 S_IMODE 恒为 0o777，于是断言变成 "511 != 448"）。生产代码里
+        # `webui/envfile.py::_lock_down` 那种 `os.name == "nt"` 早退说明权限本身
+        # 在那边不存在语义 —— 所以只校验"新建即 0700"，跳过非 POSIX。
+        if os.name != "posix":
+            self.skipTest("非 POSIX 不校验权限位（Windows 的 chmod 只有只读位）")
         path = os.path.join(self.root, "a", "b")
         self.assertEqual(qr_login._ensure_profile_dir(path), path)
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700)
 
     def test_existing_0755_dir_is_tightened(self):
+        if os.name != "posix":
+            self.skipTest("非 POSIX 不校验权限位（Windows 的 chmod 只有只读位）")
         path = os.path.join(self.root, "old")
         os.makedirs(path, exist_ok=True)
         os.chmod(path, 0o755)
@@ -1078,6 +1086,41 @@ class KillProfileProcessesTests(unittest.TestCase):
         from core.browser import kill_profile_processes
 
         self.assertEqual(kill_profile_processes(""), 0)
+
+
+class GotoTimeoutBudgetTests(unittest.TestCase):
+    """自愈重载的超时预算：常量必须存在，且按剩余预算收缩、不越过下限。
+
+    ★ 回归（GitHub issue #1）：`MIN_GOTO_TIMEOUT_MS` 曾经只被引用、没有定义，
+    `_goto_timeout_ms(deadline)` 一调用就抛 NameError，而调用点把异常吞进
+    「自愈时重新载入登录页超时」的 warning 里 ⇒ 自愈从来没真正跑过。
+    """
+
+    def test_下限常量有定义且是正数(self) -> None:
+        self.assertIsInstance(qr_login.MIN_GOTO_TIMEOUT_MS, int)
+        self.assertGreater(qr_login.MIN_GOTO_TIMEOUT_MS, 0)
+        self.assertLessEqual(qr_login.MIN_GOTO_TIMEOUT_MS, qr_login.GOTO_TIMEOUT_MS)
+
+    def test_没有截止时刻就用默认超时(self) -> None:
+        self.assertEqual(qr_login._goto_timeout_ms(None), qr_login.GOTO_TIMEOUT_MS)
+
+    def test_预算充足时用默认超时(self) -> None:
+        self.assertEqual(qr_login._goto_timeout_ms(time.time() + 3600),
+                         qr_login.GOTO_TIMEOUT_MS)
+
+    def test_预算不足时收缩到剩余(self) -> None:
+        got = qr_login._goto_timeout_ms(time.time() + 30)
+        self.assertLess(got, qr_login.GOTO_TIMEOUT_MS)
+        self.assertGreater(got, qr_login.MIN_GOTO_TIMEOUT_MS)
+
+    def test_预算耗尽也不低于下限(self) -> None:
+        self.assertEqual(qr_login._goto_timeout_ms(time.time() - 10),
+                         qr_login.MIN_GOTO_TIMEOUT_MS)
+
+    def test_源码里确实定义了常量(self) -> None:
+        """源码级守卫：光有引用没有定义也能过前几条（别处可能碰巧有同名变量）。"""
+        src = (pathlib.Path(ROOT) / "core" / "qr_login.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r"(?m)^MIN_GOTO_TIMEOUT_MS\s*=\s*\d")
 
 
 if __name__ == "__main__":

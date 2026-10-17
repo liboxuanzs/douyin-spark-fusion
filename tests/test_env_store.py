@@ -159,6 +159,11 @@ class TempFileModeTests(_TempEnv):
     """
 
     def test_intermediate_temp_file_is_not_world_readable(self):
+        # 生产代码 `configTool/env_store.py::_lock_down` 在 Windows 上是空操作
+        # （那边 os.chmod 只有只读位），"中间态继承到 0600"这个行为不存在于非 POSIX；
+        # 硬跑只会得到 "438 != 384"。同文件里另外两条权限用例本来就有这道闸，这里补齐。
+        if os.name != "posix":
+            self.skipTest("非 POSIX 不校验权限位")
         with open(self.env_path, "w", encoding="utf-8") as f:
             f.write("WEBUI_PORT=8787\n")
         os.chmod(self.env_path, 0o644)

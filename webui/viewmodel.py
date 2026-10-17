@@ -13,11 +13,20 @@
 键名契约（改动前先看 ``static/app.js`` 的 ``render()``）
 --------------------------------------------------------
 ``summary``   ``total, confirmed, pageEcho, receiptOnly, attention, pending,
-              unprocessed, remaining, sentTotal, progressPercent, lastConfirmedAt``
-``accounts[]`` ``uniqueId, state, total, confirmed, pageEcho, attention, pending``
+              unprocessed, remaining, sentTotal, progressPercent, lastConfirmedAt,
+              mixedRuns, runCount``
+              （``mixedRuns`` 是「各账号各自最近一次」那句话的开关：首屏按它选口径，
+              轮询就得跟着选同一句；``runCount`` 是那句话里的轮数）
+``accounts[]`` ``uniqueId, state, stateCss, stateLabel, chip, runMissing, ownRunText,
+              sendWindow, sendState, sendStateText, hasMessage, messageLines,
+              total, confirmed, pageEcho, attention, pending``
+              （``stateLabel``/``chip`` 不跟着发，账号从「已发送」翻成「已跳过/失败」时
+              卡片会变成红边框 + 旧文字；``send*``/``message*`` 是发送时间那一行与内容摘要）
 ``task``      ``running, stale, ageSeconds``
 ``schedule``  ``nextTriggerAt, nextTriggerText, label, remainingTargets,
-              hasWorkNextTrigger, dispatcher``
+              hasWorkNextTrigger, dispatcher, timerStallText, timerActiveState``
+              （``timerStallText`` 内含恢复用 ``systemctl`` 命令，轮询漏发它就会把
+              首屏给的诊断换成一句「只能手动点立即运行」）
 
 C 与 B 的口径差异（务必保持诚实，不许凑数）
 ------------------------------------------
@@ -833,7 +842,9 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
         "accounts_blocked": sum(1 for card in live if card.get("state") == "blocked"),
         "accounts_attention": sum(1 for card in live if card.get("state") == "attention"),
         "accounts_orphan": len(cards) - len(live),
-        # 这一格叫「最近强确认」，说明文字是"通过会话选择 + 回执双确认"。
+        # 这一格叫「最近强确认」，说明文字是"回执 ok 且能点名收件人（发送后就停在目标
+        # 会话）"—— 别写成"双确认"：收件人校验不过只会把证据降级成弱证据（ok 仍为
+        # True），说得比实际严就会误导用户判断这条到底算不算发出去。
         # 只有弱证据（只拿到页面回显）时不能点亮它，否则数字和说明互相打脸；
         # 那时由 lastWeakAt 单独承载，模板用一句"只有弱证据"来讲。
         "lastConfirmedAt": last_at if confirmed else "",
@@ -1422,6 +1433,11 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             "progressPercent": percent(summary.get("sentTotal"), summary.get("total")),
             "lastConfirmedAt": summary.get("lastConfirmedAt", ""),
             "lastWeakAt": summary.get("lastWeakAt", ""),
+            # 各账号各跑各的时候，首屏写的是"各账号各自最近一次的结果（共 N 轮）"，
+            # 这个口径由 mixed_runs / run_count 决定。轮询漏发它，前端只能无条件按
+            # "上一轮"重画 —— 数字一个没变，口径却被悄悄改错，用户无从察觉。
+            "mixedRuns": bool(summary.get("mixed_runs")),
+            "runCount": _int(summary.get("run_count")),
         },
         "task": {
             "running": bool(task.get("running")),
@@ -1446,6 +1462,11 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             "timerText": schedule.get("timerText", ""),
             "timerMismatch": bool(schedule.get("timerMismatch")),
             "timerTimes": list(schedule.get("timerTimes") or []),
+            # 定时器"启用着、但 systemd 里已经 failed/inactive"的完整诊断，模板把它
+            # 挂在 nextTriggerHint 上。它是唯一说明坏在哪的信号；漏发就等于 10 秒后
+            # 亲手把诊断擦掉，只留一句"只能手动点立即运行"。
+            "timerStallText": schedule.get("timerStallText", ""),
+            "timerActiveState": schedule.get("timerActiveState", ""),
         },
         "accounts": [
             {
@@ -1454,6 +1475,11 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
                 # 前端要按 state_css 上色（"orphan" 这种状态没有对应的配色规则），
                 # 也要知道上一轮是不是空跑 —— 否则轮询一刷新就把服务端写的标记抹掉。
                 "stateCss": card.get("state_css", ""),
+                # 状态那枚 chip 的文字与配色也必须能重画：只发 stateCss 的话，账号
+                # 从"已发送"翻成"已跳过/失败"时边框会变红、文字却还停在"已发送"
+                # —— 红边的卡上写着成功，是最容易骗人的一种。
+                "stateLabel": card.get("state_label", ""),
+                "chip": card.get("chip", ""),
                 "total": card.get("total", 0),
                 "confirmed": card.get("confirmed", 0),
                 "pageEcho": card.get("pageEcho", 0),
@@ -1461,6 +1487,18 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
                 "pending": card.get("pending", 0),
                 "dryRun": card.get("dry_run", "off"),
                 "dryRunText": card.get("dry_run_text", ""),
+                # 这一轮没有它时的说明块（"本轮没有它的记录"，含它最近一次是哪一轮）。
+                # 账号在不在某一轮里每轮都可能变，不给信号前端就没法让它出现/消失。
+                "runMissing": bool(card.get("run_missing")),
+                "ownRunText": card.get("own_run_text", ""),
+                # 发送时间那一行：send_state 会随时间与轮次变（等 17:20 → 该发了 →
+                # 已发送），不跟着轮询重画就会"卡上是已发送、时间那行还写着到点"。
+                "sendWindow": card.get("send_window", ""),
+                "sendState": card.get("send_state", ""),
+                "sendStateText": card.get("send_state_text", ""),
+                # 内容摘要（单独配了几行 / 用全局模板）。
+                "hasMessage": bool(card.get("has_message")),
+                "messageLines": _int(card.get("message_lines")),
             }
             for card in accounts
         ],

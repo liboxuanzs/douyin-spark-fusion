@@ -142,9 +142,15 @@ class ScheduleConsistencyTests(unittest.TestCase):
         from core import schedule
 
         raw = _env_value("SCHEDULE_STATE_FILE")
-        self.assertEqual(raw, schedule.DEFAULT_STATE_FILE)
-        # 写成绝对路径或跑出 logs/ 都会让 logrotate 与备份脚本漏掉它
-        self.assertTrue(raw.startswith("logs/"), "账本必须落在 logs/ 下：%r" % raw)
+        # `.env.example` 里是**文本** "logs/schedule_state.json"，而
+        # `schedule.DEFAULT_STATE_FILE` 是 `os.path.join("logs", ...)` —— 在 Windows 上
+        # 后者是反斜杠形式，拿字面量直接比会得到 "logs/x.json" != "logs\x.json"
+        # （issue #3 机制二）。两边都归一化再比：Linux 上 `normpath` 是空操作，
+        # 断言该抓的"换了目录/换了文件名"一个都跑不掉。
+        self.assertEqual(os.path.normpath(raw), os.path.normpath(schedule.DEFAULT_STATE_FILE))
+        # 写成绝对路径或跑出 logs/ 都会让 logrotate 与备份脚本漏掉它。
+        # 反斜杠在这里同样是分隔符，否则 Windows 上会把"在 logs/ 下"误判成不在。
+        self.assertTrue(raw.replace("\\", "/").startswith("logs/"), "账本必须落在 logs/ 下：%r" % raw)
 
     def test_timer_points_at_our_service_and_is_persistent(self):
         timer = _read(DEPLOY, "douyin-spark-fusion-daily.timer")

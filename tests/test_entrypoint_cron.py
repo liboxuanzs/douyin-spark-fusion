@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,8 +31,16 @@ from core import schedule as core_schedule  # noqa: E402
 
 HAVE_DOTENV = importlib.util.find_spec("dotenv") is not None
 
+#: 被测对象是**容器入口脚本**：`#!/bin/sh` + `sed` + `/etc/cron.d`，只在 POSIX 上存在。
+#: Windows 上 `subprocess` 找不到 `bash` 会直接 FileNotFoundError（issue #3 机制二：
+#: 本文件 8 条失败全是它）。这里同时要求 POSIX 与真 bash：Git-Bash 那种"有 bash 但路径
+#: 语义是 Windows"的环境也不行 —— setUp 把脚本里的 `/app/.env` 之类改写成宿主的
+#: `os.path.join(...)`（带盘符的 Windows 路径），喂给 bash 只会得到一堆错路径。
+HAVE_POSIX_BASH = os.name == "posix" and shutil.which("bash") is not None
+
 
 @unittest.skipIf(not HAVE_DOTENV, "本机没有 python-dotenv：脚本读不了 .env")
+@unittest.skipUnless(HAVE_POSIX_BASH, "本机没有 bash/不是 POSIX：容器入口脚本跑不起来")
 class EntrypointCronTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

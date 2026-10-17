@@ -9,6 +9,7 @@
 * 触发来源不能写死在 `.env` 里，否则面板就分不清谁跑的了。
 """
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -123,6 +124,11 @@ class EnvFilePrecedenceTests(unittest.TestCase):
         self.assertEqual(self.config_mod.drift_report({}), "")
         self.assertEqual(self.config_mod.drift_report(None), "")
 
+    # `time.tzset` 是 POSIX 专有（Windows 上连属性都没有，生产代码在那条分支上
+    # 也压根不调它，见 utils/config.py::_apply_tz）—— 没有 tzset 就没有可断言的时机，
+    # 硬跑只会让 `mock.patch.object(..., "tzset")` 抛 AttributeError（issue #3 机制二）。
+    @unittest.skipUnless(hasattr(time, "tzset"),
+                         "本机 time 模块没有 tzset（Windows）：这条断言的是 POSIX 上的落地")
     def test_loading_the_env_applies_tz(self):
         """`.env` 里的 TZ 必须让 libc 立刻认账。
 

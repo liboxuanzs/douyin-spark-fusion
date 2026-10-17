@@ -287,11 +287,17 @@ class StateFileTests(_StateCase):
         self.assertEqual(len(record["note"]), 200)
 
     def test_state_path_honours_the_env_var(self):
-        self.assertEqual(schedule.state_path("/tmp/x.json"), "/tmp/x.json")
+        # 绝对路径必须用"本机的绝对路径"来构造：写死的 "/tmp/x.json" 在 Windows 上
+        # `ntpath.isabs()` 是 False（那边要盘符），会被当相对路径锚到仓库根 ——
+        # 断言白红（issue #3 机制二：本文件 2 条失败之一就是它）。
+        # Linux 上 `tempfile.gettempdir()` 就是 /tmp，被测行为一字不变。
+        absolute = os.path.join(tempfile.gettempdir(), "x.json")
+        self.assertEqual(schedule.state_path(absolute), absolute)
         old = os.environ.get("SCHEDULE_STATE_FILE")
-        os.environ["SCHEDULE_STATE_FILE"] = "/tmp/from-env.json"
+        from_env = os.path.join(tempfile.gettempdir(), "from-env.json")
+        os.environ["SCHEDULE_STATE_FILE"] = from_env
         try:
-            self.assertEqual(schedule.state_path(), "/tmp/from-env.json")
+            self.assertEqual(schedule.state_path(), from_env)
         finally:
             if old is None:
                 os.environ.pop("SCHEDULE_STATE_FILE", None)
@@ -316,9 +322,12 @@ class StateFileTests(_StateCase):
         finally:
             os.chdir(old_cwd)
         # 相对路径（含 .env 里手写的相对值）同样落到仓库根下，绝对路径原样。
-        self.assertEqual(schedule.state_path("logs/other.json"),
+        # 相对那一侧用 `os.path.join` 拼：`.env` 里写的是 "logs/x.json"，但仓库根的
+        # 拼接结果在 Windows 上是 "logs\x.json"，拿字面量比会假红（同上，机制二）。
+        self.assertEqual(schedule.state_path(os.path.join("logs", "other.json")),
                          os.path.join(os.path.dirname(before), "other.json"))
-        self.assertEqual(schedule.state_path("/tmp/abs.json"), "/tmp/abs.json")
+        absolute = os.path.join(tempfile.gettempdir(), "abs.json")
+        self.assertEqual(schedule.state_path(absolute), absolute)
 
 
 class EntryAndPruneTests(_StateCase):

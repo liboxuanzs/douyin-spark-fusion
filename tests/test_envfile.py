@@ -625,6 +625,11 @@ class EnvTmpLeftoverTests(EnvFileTestCase):
     def test_permissions_are_tightened_before_unlink(self):
         from unittest import mock
 
+        # 被测的生产代码 `_lock_down()` 开头就是 `if os.name == "nt": return`
+        # （Windows 的 chmod 只有只读位），那边根本没有"收紧成 0600"这个行为可断言；
+        # 硬跑会得到 "438 != 384"（0o666 vs 0o600，issue #3 机制二）。
+        if os.name != "posix":
+            self.skipTest("非 POSIX 不校验权限位（Windows 的 chmod 只有只读位）")
         path = self._leftover(".env.tmp_lockme", envfile.ENV_TMP_STALE_SECONDS + 60, mode=0o644)
         seen = {}
         real_unlink = os.unlink

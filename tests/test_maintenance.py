@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -448,3 +449,40 @@ class ProfileRootTests(unittest.TestCase):
             self.assertEqual(mt.state_path(), repo / "logs" / mt.STATE_FILE_NAME)
         finally:
             os.chdir(cwd)
+class SaveStateConcurrencyTests(unittest.TestCase):
+    """状态文件原子写：临时文件名必须唯一（GitHub issue #8）。"""
+
+    def test_并发写不会留下半截_JSON(self) -> None:
+        """★ 回归：以前临时文件名是固定的 `target + ".tmp"`，两个写者
+        （定时器的自动清理 + 面板的按钮）会同时用 "w" 打开同一个 inode，
+        一个把另一个截断，`os.replace` 搬走的可能是半截 JSON ——
+        下次 load_state 解析失败按「没清过」处理，计时全部重置。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "maintenance_state.json")
+            errors = []
+
+            def writer(n):
+                try:
+                    for i in range(40):
+                        mt.save_state({"writer": n, "i": i}, path)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(n,))
+                       for n in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(errors, [])
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)          # 半截 JSON 会在这里抛
+            self.assertIn("writer", data)
+            leftovers = [n for n in os.listdir(tmp)
+                         if n != "maintenance_state.json"]
+            self.assertEqual(leftovers, [])       # 临时文件都搬走了
+
+
+if __name__ == "__main__":
+    unittest.main()

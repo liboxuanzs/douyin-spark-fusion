@@ -19,6 +19,7 @@ import builtins
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -27,6 +28,15 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from utils import config as config_mod  # noqa: E402
+
+#: `time.tzset()` 是 POSIX 专有：Windows 的 `time` 模块里根本没有这个属性。
+#: 生产代码那条 `os.name == "posix" and hasattr(time, "tzset")`（utils/config.py::_apply_tz）
+#: 就是为它写的 —— 所以下面一组"tzset 该在什么时机被调到"的用例只在有 tzset 的平台上
+#: 成立：硬跑的话 `mock.patch.object(config_mod.time, "tzset")` 会直接抛 AttributeError
+#: （issue #3 机制二：本文件 9 条失败里有 7 条是它）。Windows 上"不该调 tzset"那条分支
+#: 另有 `test_apply_tz_skips_tzset_on_windows` 专门覆盖，它在任何平台都跑。
+_HAS_TZSET = hasattr(time, "tzset")
+_SKIP_NO_TZSET = "本机 time 模块没有 tzset（Windows）：这里断言的是 POSIX 上的落地时机"
 
 
 class _EnvFileTests(unittest.TestCase):
@@ -61,6 +71,7 @@ class _EnvFileTests(unittest.TestCase):
 
 
 class ApplyTzTests(_EnvFileTests):
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_tzset_runs_when_env_file_missing(self):
         """`.env` 不存在也必须调 tzset（原来第一条 return 就把它跳过了）。"""
         os.environ["TZ"] = "Asia/Shanghai"
@@ -69,6 +80,7 @@ class ApplyTzTests(_EnvFileTests):
             self.assertIsNone(config_mod.load_env_file(missing))
         self.assertEqual(fake.call_count, 1, "没有 .env 时 tzset 必须被调到")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_tzset_runs_when_dotenv_missing(self):
         """本机没装 python-dotenv（精简镜像就是这样）也必须调 tzset。"""
         os.environ["TZ"] = "Asia/Shanghai"
@@ -86,6 +98,7 @@ class ApplyTzTests(_EnvFileTests):
                 self.assertIsNone(config_mod.load_env_file(self.env_path))
         self.assertEqual(fake.call_count, 1, "缺 python-dotenv 时 tzset 必须被调到")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_tzset_only_on_tz_change(self):
         """同一个 TZ 连续读两次只调一次 —— webui 每次保存配置都会 reload_env()。"""
         os.environ["TZ"] = "Asia/Shanghai"
@@ -98,6 +111,7 @@ class ApplyTzTests(_EnvFileTests):
             config_mod.load_env_file(missing)
             self.assertEqual(fake.call_count, 2, "TZ 变了必须重新落地")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_default_tz_used_when_unset(self):
         """TZ 没设时按 DEFAULT_TZ（Asia/Shanghai）落地，并且要**写回环境变量**。
 
@@ -116,6 +130,7 @@ class ApplyTzTests(_EnvFileTests):
         self.assertEqual(config_mod._TZ_APPLIED, config_mod.DEFAULT_TZ)
         self.assertEqual(config_mod.DEFAULT_TZ, "Asia/Shanghai")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_force_reapplies_even_when_tz_unchanged(self):
         """`force=True` 要能绕过"值没变就跳过"（读到 .env 之后走的就是这条）。"""
         os.environ["TZ"] = "Asia/Shanghai"
@@ -126,6 +141,7 @@ class ApplyTzTests(_EnvFileTests):
             config_mod._apply_tz(force=True)          # 强制：再落地一次
             self.assertEqual(fake.call_count, 2, "force 必须绕过缓存")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_reading_env_file_reapplies_tz(self):
         """★ 真的读到 `.env` 之后必须重新落地，哪怕缓存里的值看起来一样。
 
@@ -158,12 +174,16 @@ class ApplyTzTests(_EnvFileTests):
         """Windows 没有 tzset（os.name != posix）：跳过，不能 AttributeError。"""
         os.environ["TZ"] = "Asia/Shanghai"
         with mock.patch.object(os, "name", "nt"):
-            with mock.patch.object(config_mod.time, "tzset",
+            # create=True：Windows 的 time 模块没有 tzset，不凭空建一个假属性的话
+            # patch 自己就先抛 AttributeError —— 而这条用例恰恰要在**任何**平台上都跑
+            # （它测的是"非 POSIX 不该碰 tzset"这条分支）。
+            with mock.patch.object(config_mod.time, "tzset", create=True,
                                    side_effect=AssertionError("Windows 上不该调 tzset")) as fake:
                 config_mod._apply_tz()
         self.assertEqual(fake.call_count, 0)
         self.assertEqual(config_mod._TZ_APPLIED, "Asia/Shanghai")
 
+    @unittest.skipUnless(_HAS_TZSET, _SKIP_NO_TZSET)
     def test_apply_tz_survives_missing_tzdata(self):
         """极端环境 tzset() 抛异常也不能把启动拖垮（原来的 try/except 语义）。"""
         os.environ["TZ"] = "Asia/Shanghai"
@@ -182,7 +202,11 @@ class ResolvePathTests(unittest.TestCase):
         )
 
     def test_absolute_path_kept(self):
-        self.assertEqual(config_mod.resolve_path("/var/log/x.log"), "/var/log/x.log")
+        # 不写死 "/var/log/x.log"：Windows 的 `ntpath.isabs("/var/log/x.log")` 是 False
+        # （那边的"绝对"要求盘符），resolve_path 会把它当相对路径锚到仓库根，断言白红。
+        # 用本机的真绝对路径；Linux 上 gettempdir() 就是 /tmp，被测行为一字不变。
+        absolute = os.path.join(tempfile.gettempdir(), "x.log")
+        self.assertEqual(config_mod.resolve_path(absolute), absolute)
 
     def test_empty_kept(self):
         self.assertIsNone(config_mod.resolve_path(None))

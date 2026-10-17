@@ -5,7 +5,10 @@ core/msg_builder.py
 
 from utils.config import get_config
 from utils.hitokoto import request_hitokoto
+from utils.logger import setup_logger
 from datetime import date
+
+logger = setup_logger("msg_builder")
 
 
 def build_message_with_openai() -> str:
@@ -63,7 +66,21 @@ def render_message(template: str) -> str:
     message = message.replace("\\r\\n", "\\n").replace("\r\n", "\n")
     if "[API]" in message:
         api_content = request_hitokoto()
-        message = message.replace("[API]", api_content)
+        if api_content:
+            message = message.replace("[API]", api_content)
+        else:
+            # 一言没取到（网络不通 / 接口挂了 / 返回空正文）。以前这里会把
+            # "[error] 无法获取一言内容" 当正文发出去，对方真的收到这行字。
+            # 现在的口径：**整行**去掉 —— 只清占位符会留下一行空白，而模板里
+            # 只有 [API] 时剩下的就是一条空消息。去掉之后没内容可发就返回空串，
+            # 由 `core/douyin_im.type_and_send` 的空文本守卫拒绝发送，调用方记
+            # 一条 `input_failed` —— 宁可这一轮不发，也不发空白或占位符。
+            kept = [line for line in message.split("\n") if line.strip() != "[API]"]
+            message = "\n".join(kept)
+            if "[API]" in message:
+                # 占位符夹在别的文字中间（"打卡[API]哦"）：清掉它，保住这句话
+                message = message.replace("[API]", "")
+            logger.warning("[消息] 一言没取到，已去掉模板里的占位符行")
 
     return message.strip()
 

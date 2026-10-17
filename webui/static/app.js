@@ -237,12 +237,89 @@
     });
   };
 
+  // 服务端 viewmodel.STATE_CHIP 会发过来的四档配色类名（模板把它写进
+  // `class="status-chip {{ account.chip }}"`）。放在这里当一份可被测试对着看的词表：
+  // 服务端加了第五种配色、这里没跟上，就会出现"配色翻不过来"。
+  const CHIP_NAMES = ["success", "warning", "danger", "info"];
+
   const updateAccounts = (accounts) => {
     accounts.forEach((account) => {
       const selector = `[data-account-overview="${CSS.escape(account.uniqueId)}"]`;
       document.querySelectorAll(selector).forEach((row) => {
         // 配色按 stateCss 来（"orphan" 这类状态没有自己的配色规则，服务端也是这么渲染的）
         row.dataset.accountState = account.stateCss || account.state;
+        // 状态那枚 chip 的文字与配色一起换。只换边框颜色的话，账号从"已发送"翻成
+        // "已跳过/失败"时会出现红边卡上写着"已发送"—— 最容易骗人的一种。
+        row.querySelectorAll("[data-account-state-text]").forEach((node) => {
+          if (account.stateLabel) {
+            node.textContent = account.stateLabel;
+          }
+          if (account.chip) {
+            // 只留服务端刚发的那个类，别的配色规则照旧留给 .status-chip 默认值
+            CHIP_NAMES.forEach((name) => {
+              node.classList.toggle(name, name === account.chip);
+            });
+          }
+        });
+        // "这一轮没有它的记录"：这一块必须真的不在页面上（不是 hidden —— 页面上有它、
+        // 只是藏着，读源码/读屏都算"说了这句话"），所以只有它能被轮询显式增删。母版就是
+        // 模板里同一块（<template data-account-run-missing-tpl>），克隆过来用；在 JS 里
+        // 另写一遍文案，首屏和 10 秒后的轮询迟早各说各话。
+        let missing = row.querySelector("[data-account-run-missing]");
+        if (!account.runMissing) {
+          if (missing) {
+            missing.remove();
+          }
+        } else {
+          if (!missing) {
+            const tpl = document.querySelector("template[data-account-run-missing-tpl]");
+            if (tpl) {
+              missing = tpl.content.firstElementChild.cloneNode(true);
+              // 位置也照首屏来：模板块就排在卡头与后面的提示/统计之间，插错地方
+              // 等于同一句话在两次渲染里换了位置。
+              const head = row.querySelector(".account-card-head");
+              if (head) {
+                head.after(missing);
+              } else {
+                row.appendChild(missing);
+              }
+              renderIcons(); // 克隆来的 <i data-lucide> 也得点亮，不然这一行少个图标
+            }
+          }
+          if (missing) {
+            missing.querySelectorAll("[data-account-run-missing-own]").forEach((own) => {
+              own.hidden = !account.ownRunText;
+            });
+            missing
+              .querySelectorAll("[data-account-run-missing-never]")
+              .forEach((never) => {
+                never.hidden = Boolean(account.ownRunText);
+              });
+            missing
+              .querySelectorAll("[data-account-run-missing-own-text]")
+              .forEach((text) => {
+                text.textContent = account.ownRunText || "";
+              });
+          }
+        }
+        // 发送时间那一行：send_state 会随时间与轮次变（等 17:20 → 该发了 → 已发送），
+        // 不跟着轮询重画就会出现"卡上写着已发送、时间那行还写着等 17:20 到点"。
+        // 类名与文案按模板同一套拼法（time-state time-state-X + send_state_text）。
+        row.querySelectorAll("[data-time-state]").forEach((node) => {
+          const state = account.sendState || "";
+          node.dataset.timeState = state;
+          node.textContent = account.sendStateText || "";
+          node.className = `time-state time-state-${state}`;
+        });
+        row.querySelectorAll("[data-time-window]").forEach((node) => {
+          node.textContent = account.sendWindow || "";
+        });
+        // 内容摘要（"单独配了 N 行" / "用全局模板"）：与模板逐字一致。
+        row.querySelectorAll("[data-message-summary]").forEach((node) => {
+          node.textContent = account.hasMessage
+            ? `这个账号单独配了内容（${account.messageLines || 0} 行），下一轮就发它`
+            : "没单独配置，下一轮用全局模板";
+        });
         row.querySelectorAll("[data-account-confirmed]").forEach((node) => {
           node.textContent = account.confirmed;
         });
@@ -309,12 +386,7 @@
     updateTaskBanner(task);
     setText("[data-overview-value='total']", summary.total || 0);
     setText("[data-overview-value='confirmed']", summary.confirmed || 0);
-    setText(
-      "[data-overview-value='sentTotal']",
-      (summary.confirmed || 0) + (summary.pageEcho || 0),
-    );
     setText("[data-overview-value='pageEcho']", summary.pageEcho || 0);
-    setText("[data-overview-value='receiptOnly']", summary.receiptOnly || 0);
     setText("[data-overview-value='attention']", summary.attention || 0);
     setText(
       "[data-overview-value='pending']",
@@ -352,15 +424,30 @@
       "[data-overview-value='lastConfirmedAt']",
       formatTime(summary.lastConfirmedAt),
     );
-    // 这一格的说明必须跟着值一起换：值显示"-"却说"通过双确认的目标"，等于自己打脸。
+    // 这一格的说明必须跟着值一起换：值显示"-"却说一项核对通过的目标，等于自己打脸。
+    // 措辞还必须与服务端首屏逐字一致，且描述真实判据：判定里收件人校验不过只是把证据
+    // 降级成"弱证据"（core/strict_verify.py 里 ok 仍为 True），说成"双确认"听起来比
+    // 实际更严 —— 而这句话是用户判断"这条到底算不算发出去"的唯一依据。
+    const lastConfirmedScope = summary.mixedRuns ? "各账号各自最近一次合计，" : "上一轮";
     setText(
       "[data-overview-help='lastConfirmedAt']",
       summary.lastConfirmedAt
-        ? "上一轮通过会话选择 + 回执双确认的目标"
+        ? `${lastConfirmedScope}回执 ok 且能点名收件人（发送后就停在目标会话）的目标`
         : summary.lastWeakAt
-          ? "上一轮只有弱证据（拿到页面回显，没拿到回执），不算强确认"
-          : "上一轮没有确认成功的目标",
+          ? `${lastConfirmedScope}只有弱证据（拿到页面回显，没拿到回执），不算强确认`
+          : `${
+              summary.mixedRuns ? "最近这些轮次里" : "上一轮"
+            }没有确认成功的目标`,
     );
+    // "各账号各自最近一次的结果（共 N 轮）"这块说明，服务端是按 mixed_runs 决定渲染与否的
+    // （数字还可能停在首屏那一轮）。轮询只许切 hidden、不许增删 DOM，所以服务端必须发
+    // 这个布尔值 —— 否则多账号各自跑过之后，轮询一刷这块说明就永远消失了。
+    document.querySelectorAll("[data-overview-mixed-runs]").forEach((node) => {
+      node.hidden = !summary.mixedRuns;
+      node.querySelectorAll("[data-overview-mixed-runs-count]").forEach((count) => {
+        count.textContent = summary.runCount || 0;
+      });
+    });
     // 定时器没启用时，服务端渲染的是"不会自动跑"；轮询也必须说同一句话，
     // 不然页面每 2 秒就被前端改回一个骗人的时间点。
     const schedule = data.schedule || {};
@@ -392,20 +479,26 @@
       "[data-overview-value='scheduleLabel']",
       schedule.label || "-",
     );
-    const remainingForNext = schedule.remainingTargets || 0;
+    // 判断顺序必须与服务端首屏**逐字同序**：先"定时器启用着但 systemd 里已经挂了"
+    // 的完整诊断，再"定时器没启用"，再派发器那几种情况。定时器真挂了的时候首屏给的是
+    // 坏在哪，轮询要是跳过了第一个分支，10 秒后同样的位置就只剩一句废话。
     setText(
       "[data-overview-value='nextTriggerHint']",
-      !armed
-        ? "只能手动点「立即运行」"
-        : schedule.dispatcher
-          ? dueShort
-            ? "到点后的下一次门铃就会发它"
-            : dueText
-              ? "按各账号自己的时间发"
-              : "今天该发的都发完了"
-          : schedule.hasWorkNextTrigger
-            ? `仍有 ${remainingForNext} 个待发送目标`
-            : "当前没有待发送目标，下一次触发不会实际发送",
+      schedule.timerStallText
+        ? schedule.timerStallText
+        : !armed
+          ? "只能手动点「立即运行」"
+          : schedule.dispatcher
+            ? dueShort
+              ? "到点后的下一次门铃就会发它"
+              : dueText
+                ? "按各账号自己的时间发"
+                : "今天该发的都发完了"
+            // 末支必须与首屏同源：模板那一支写的就是 `timerText`（"定时器已启用"）。
+            // 这里以前自己编了一句"仍有 N 个待发送目标" —— 那个数字在
+            // `data-overview-value="pending"` 那格里已经有一份，10 秒后却把这句话
+            // 换掉，正是 issue #2 说的"首屏与轮询互相打脸"。
+            : schedule.timerText || "",
     );
     updateAccounts(data.accounts || []);
     updateActions(summary, Boolean(task.running));
@@ -540,11 +633,14 @@
 })();
 // B 把图标渲染放在 app.js 最末尾（原件 :1149-1153），而我们只搬了前 378 行，
 // 漏了这一句的结果是：页面上 26 个 <i data-lucide> 全是空的、一个图标都不显示。
-window.addEventListener("DOMContentLoaded", () => {
+// 轮询过后才插进页面的那些 <i data-lucide>（账号卡上克隆来的提示行）也要再点一次，
+// 所以提成一个函数，两处共用。
+const renderIcons = () => {
   if (window.lucide) {
     window.lucide.createIcons({ attrs: { "aria-hidden": "true" } });
   }
-});
+};
+window.addEventListener("DOMContentLoaded", renderIcons);
 
 // 扫码登录：每 2 秒问一次服务端"登录到哪一步了"，二维码变了就换图。
 // 登录成功（服务端写进 .env）之后整页重载一次 —— 那时账号表、Cookie 状态、
@@ -626,13 +722,20 @@ window.addEventListener("DOMContentLoaded", () => {
         codeStatus.hidden = true;
       }
     }
-    if (shot && session.has_shot) {
-      const shotSeq = String(session.shot_seq || "0");
-      if (shotSeq !== lastShotSeq) {
-        lastShotSeq = shotSeq;
-        shot.src = `/ops/login/shot.png?v=${shotSeq}`;
+    // 双向：会话结束时服务端不再给 has_shot，走不到刷新那段 —— 只写成单向的话
+    // shot.hidden 会保持上一轮的 false，旧二维码留在页面上，用户可能去扫一张已经
+    // 失效的码（而且 src 不清，浏览器还会拿缓存把它当新图显示）。
+    if (shot) {
+      shot.hidden = !session.has_shot;
+      if (session.has_shot) {
+        const shotSeq = String(session.shot_seq || "0");
+        if (shotSeq !== lastShotSeq) {
+          lastShotSeq = shotSeq;
+          shot.src = `/ops/login/shot.png?v=${shotSeq}`;
+        }
+      } else {
+        shot.removeAttribute("src");
       }
-      shot.hidden = false;
     }
     const active = Boolean(session.active);
     if (startBtn) startBtn.disabled = active;

@@ -23,6 +23,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core import msg_builder  # noqa: E402
+from utils import hitokoto  # noqa: E402
 
 GLOBAL = "[盖瑞]今日火花[加一]\\n—— [右边] 每日一言 [左边] ——\\n[API]"
 
@@ -99,6 +100,51 @@ class RenderMessageTests(_MsgBuilderCase):
     def test_多行内容原样保留(self) -> None:
         text = "第一行\n第二行\n\n第四行"
         self.assertEqual(msg_builder.render_message(text), text)
+
+
+class HitokotoFailureTests(_MsgBuilderCase):
+    """一言取不到时，绝不把错误文案当正文发出去（GitHub issue #5）。"""
+
+    def test_取不到一言时整行去掉(self) -> None:
+        with mock.patch.object(msg_builder, "request_hitokoto", lambda: ""):
+            got = msg_builder.render_message("今天也来啦\n[API]")
+        self.assertEqual(got, "今天也来啦")
+
+    def test_取不到一言且模板只有占位符时返回空(self) -> None:
+        """空串会撞上 `type_and_send` 的空文本守卫 ⇒ 记 input_failed，绝不发空白。"""
+        with mock.patch.object(msg_builder, "request_hitokoto", lambda: ""):
+            self.assertEqual(msg_builder.render_message("[API]"), "")
+
+    def test_占位符夹在文字中间时保住这句话(self) -> None:
+        with mock.patch.object(msg_builder, "request_hitokoto", lambda: ""):
+            self.assertEqual(msg_builder.render_message("打卡[API]哦"), "打卡哦")
+
+    def test_错误文案不会被当正文(self) -> None:
+        # 回归：老实现返回的是这个字符串，它会真的发出去。
+        with mock.patch.object(msg_builder, "request_hitokoto", lambda: ""):
+            got = msg_builder.render_message("每日一言：[API]")
+        self.assertNotIn("[error]", got)
+        self.assertEqual(got, "每日一言：")
+
+
+class RequestHitokotoEmptyTests(unittest.TestCase):
+    """`request_hitokoto()` 失败/返回空正文时一律返回空串。"""
+
+    def test_请求异常时返回空串(self) -> None:
+        with mock.patch.object(hitokoto, "get_config",
+                               lambda: {"hitokotoTypes": ""}), \
+             mock.patch.object(hitokoto.requests, "get",
+                               side_effect=RuntimeError("网络不通")):
+            self.assertEqual(hitokoto.request_hitokoto(), "")
+
+    def test_接口没给正文时返回空串(self) -> None:
+        resp = mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"hitokoto": None}
+        with mock.patch.object(hitokoto, "get_config",
+                               lambda: {"hitokotoTypes": ""}), \
+             mock.patch.object(hitokoto.requests, "get", lambda *a, **kw: resp):
+            self.assertEqual(hitokoto.request_hitokoto(), "")
 
 
 if __name__ == "__main__":

@@ -123,11 +123,13 @@
         · 弱证据 <b data-overview-value="weakSent">{{ summary.weak }}</b>
         · {{ summary.accounts }} 个账号，共 <b data-overview-value="total">{{ summary.total }}</b> 个目标
       </div>
-      {% if summary.mixed_runs %}
-      <div class="overview-help" data-overview-mixed-runs>
-        每个账号按自己的发送时间分开跑，上面是<strong>各账号各自最近一次</strong>的结果（共 {{ summary.run_count }} 轮）。
+      {# 这一块必须在轮询里能出现/消失：账号是不是各跑各的、跑了几轮，每一轮都可能变，
+         而 app.js 只许切 hidden、不许增删 DOM。所以元素常驻，按服务端发的 mixedRuns
+         决定露不露，轮数单独挂一个槽（2026-10-17 前端审计：原来由 {% if %} 决定存在
+         与否，多账号各自跑过之后轮询一刷这块就永远不见了）。 #}
+      <div class="overview-help" data-overview-mixed-runs {% if not summary.mixed_runs %}hidden{% endif %}>
+        每个账号按自己的发送时间分开跑，上面是<strong>各账号各自最近一次</strong>的结果（共 <span data-overview-mixed-runs-count>{{ summary.run_count }}</span> 轮）。
       </div>
-      {% endif %}
       {% if summary.dry_run == "mixed" %}
       <div class="overview-help" data-overview-dry-run-hint>
         各账号的档位不一致：有的真发、有的只是<strong>空跑</strong>排练 —— 每张账号卡上写着自己那一轮的档位。
@@ -177,7 +179,11 @@
         {{ summary.lastConfirmedAt or "-" }}
       </div>
       <div class="overview-help" data-overview-help="lastConfirmedAt">
-        {%- if summary.lastConfirmedAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}通过会话选择 + 回执双确认的目标
+        {# 措辞必须与 app.js 轮询时那句逐字一致，也必须描述真实判据：判定里收件人
+           校验不过只是把证据降级成"弱证据"（core/strict_verify.py 里 ok 仍为 True），
+           说成"双确认"听起来比实际更严 —— 而这句话是用户判断"这条到底算不算发出去"
+           的唯一依据。轮数挂一个槽，供轮询把"共 N 轮"重画出来。 #}
+        {%- if summary.lastConfirmedAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}回执 ok 且能点名收件人（发送后就停在目标会话）的目标
         {%- elif summary.lastWeakAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}只有弱证据（拿到页面回显，没拿到回执），不算强确认
         {%- else %}{{ '最近这些轮次里' if summary.mixed_runs else '上一轮' }}没有确认成功的目标{% endif -%}
       </div>
@@ -255,6 +261,21 @@
     </div>
     </div>
 
+    {# 「这一轮没有它的记录」这一行是 {% if account.run_missing %} 决定"在不在页面上"的：
+       它必须真的不在（不是 hidden —— 页面上有它、只是藏着，读源码/读屏都算"说了这句话"），
+       所以只有它可以被轮询显式增删。母版留在这里（<template> 里的内容不渲染、不布局），
+       app.js 需要时克隆进那张卡、不需要时把克隆体撤掉；文案只有这一份，首屏和 10 秒后的
+       轮询才不会各说各话（2026-10-17 前端审计）。 #}
+    {% macro run_missing_block(account) %}
+      <p class="notice-inline" data-account-run-missing>
+        <i data-lucide="calendar-clock"></i>
+        <span data-account-run-missing-own {% if not account.own_run_text %}hidden{% endif %}>这一轮没有轮到它 —— 每个账号按自己的发送时间分开跑，上面的数字是<strong>这一轮</strong>的。
+          它最近一次是 <strong data-account-run-missing-own-text>{{ account.own_run_text }}</strong> 那一轮。</span>
+        <span data-account-run-missing-never {% if account.own_run_text %}hidden{% endif %}>最近这些轮次里都没有它 —— 下面的数字只是 <code>TASKS</code> 里的目标，一次都还没试过。</span>
+      </p>
+    {% endmacro %}
+    <template data-account-run-missing-tpl>{{ run_missing_block({}) }}</template>
+
     {% for account in view.account_cards %}
     {% set picker = account.picker %}
     <article
@@ -280,7 +301,10 @@
             {%- if account.run_text and not account.run_missing %} · 数字来自 {{ account.run_text }} 那一轮{% endif %}
           </small>
         </div>
-        <span class="status-chip {{ account.chip }}">{{ account.state_label }}</span>
+        {# 文字和配色都要给轮询留挂点：只换 data-account-state（边框颜色）的话，账号从
+           "已发送"翻成"已跳过/失败"时会出现红边卡上写着"已发送"—— 最容易骗人的一种
+           （2026-10-17 前端审计）。 #}
+        <span class="status-chip {{ account.chip }}" data-account-state-text>{{ account.state_label }}</span>
         <div class="account-card-actions">
           <a class="button button-quiet" href="/ops/runs#account-{{ account.unique_id }}">
             <i data-lucide="list-tree"></i><span>明细</span>
@@ -309,17 +333,9 @@
         </div>
       </header>
 
-      {% if account.run_missing %}
-      <p class="notice-inline" data-account-run-missing>
-        <i data-lucide="calendar-clock"></i>
-        {% if account.own_run_text %}
-        <span>这一轮没有轮到它 —— 每个账号按自己的发送时间分开跑，上面的数字是<strong>这一轮</strong>的。
-          它最近一次是 <strong>{{ account.own_run_text }}</strong> 那一轮。</span>
-        {% else %}
-        <span>最近这些轮次里都没有它 —— 下面的数字只是 <code>TASKS</code> 里的目标，一次都还没试过。</span>
-        {% endif %}
-      </p>
-      {% endif %}
+      {# 服务端先把这一行渲染出来（首屏就得说清"这一轮没有轮到它"）；轮询要不要补上/撤掉
+         由上面的母版负责，两处是同一段宏，改一处就够。 #}
+      {% if account.run_missing %}{{ run_missing_block(account) }}{% endif %}
 
       {% if account.orphan %}
       <p class="notice-inline" data-account-orphan>

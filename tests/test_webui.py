@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests import _purity  # noqa: E402  跨进程的导入纯净性探针（为什么必须跨进程见该模块）
 from webui import app as webui_app  # noqa: E402
 from webui import auth, config, envfile, logtail, password, settings, store, viewmodel  # noqa: E402
 
@@ -100,6 +101,16 @@ class WebUITestCase(unittest.TestCase):
         # 免得真的往仓库 logs/ 里写一行
         self.addCleanup(self._noop_patch, webui_app, "_log")
 
+        # 口令失败记账是 webui.app 的**模块级全局状态**，而且是有意设计：60 秒窗口内
+        # 累计 30 次失败就对**所有来源**返回 429（防的是"换 IP 撞口令把单进程的 PBKDF2
+        # 打满"，窗口一滑过去自动恢复，见 webui/app.py 的 _note_login_fail）。
+        # 产品代码不该动 —— 错的是测试套件：同一个进程里一个接一个跑十几个类，每个类
+        # 都继承着那条 `test_错误口令不通过`，累到第 14 个类（MaintenanceWebUITestCase）
+        # 时窗口已经满了，于是连"正确口令"都被判 429（issue #3 里那 31 条）。
+        # 所以由夹具按"一个类一份干净起点"归零，口径与 LoginFailBudgetTests 完全一致。
+        self._reset_login_fail_budget()
+        self.addCleanup(self._reset_login_fail_budget)
+
     # ------------------------------------------------------------ 脚手架
 
     @staticmethod
@@ -111,6 +122,18 @@ class WebUITestCase(unittest.TestCase):
 
         setattr(target, name, lambda *args, **kwargs: None)
         restore()
+
+    @staticmethod
+    def _reset_login_fail_budget() -> None:
+        """归零口令失败记账：按来源的罚站表 + 那扇 60 秒的全局窗口。
+
+        用与产品代码**同一把锁**（不是裸操作字典）：用例里虽然是单线程，
+        但口径一致以后不容易被后人改坏；两张表都 `.clear()` 而不是重新赋值，
+        免得把 `webui_app` 里那份模块级对象换掉。
+        """
+        with webui_app._LOGIN_FAILS_LOCK:
+            webui_app._LOGIN_FAILS.clear()
+            webui_app._LOGIN_FAIL_TIMES.clear()
 
     def _restore_env(self) -> None:
         for key, value in self._saved_env.items():
@@ -262,11 +285,22 @@ class WebUITestCase(unittest.TestCase):
     # ============================================================ 1. 导入安全
 
     def test_导入_webui_app_不引入浏览器依赖(self) -> None:
-        """webui 是薄层：任何模块都不得 import playwright / cloakbrowser。"""
+        """webui 是薄层：任何模块都不得 import playwright / cloakbrowser。
+
+        回归（issue #3 机制一）：这两条断言原来直接查本进程的 `sys.modules`，
+        而它是**进程级**状态 —— 本文件里有一批"真把面板跑一遍"的用例会把浏览器依赖
+        留在里面（下面 `test_缺少浏览器依赖时返回_503_中文说明` 那句真的
+        `import cloakbrowser` 就会）。于是断言测到的是"这条用例排在第几个"：
+        pytest 对 unittest.TestCase 按方法名字典序跑，ASCII 名字排在中文名字之前，
+        `test_导入_…` 又排在把 cloakbrowser 拉进来那句 `test_缺少…` 之前，
+        所以同一个文件里"单跑 1 passed、整文件跑 60 failed"。
+        现在把断言搬进全新子进程（tests/_purity.py）：那里 `sys.modules` 只可能有
+        `import webui.app` 自己造成的变化 —— 断言重新能真失败、也真能通过。
+        """
         self.assertIn("webui.app", sys.modules, "import 阶段就应当已经把 webui.app 装进 sys.modules")
-        self.assertNotIn("cloakbrowser", sys.modules, "import webui.app 不应触发 cloakbrowser")
-        self.assertNotIn("playwright", sys.modules, "import webui.app 不应触发 playwright")
-        self.assertNotIn("core.tasks", sys.modules, "import 期不应触碰 core.tasks（它依赖 cloakbrowser）")
+        _purity.assert_imports_clean(
+            note="import webui.app 不应触发 cloakbrowser / playwright / core.tasks（它依赖 core.browser）"
+        )
 
     def test_webui_源码里没有浏览器依赖的导入(self) -> None:
         # 测试自身的问题（2026-10 修正）：这里原来用 `"playwright" in source` 这种**整文件子串**
@@ -889,8 +923,14 @@ class WebUITestCase(unittest.TestCase):
         self.assertEqual(calls, ["runTasks"])
         self.assertEqual(seen_kwargs, [{"dry_run": "select", "source": "webui"}],
                          "档位与来源要显式传给 runTasks（账本靠 source 区分触发者）")
-        self.assertNotIn("cloakbrowser", sys.modules)
-        self.assertNotIn("playwright", sys.modules)
+        # 这条纯净性同样只能跨进程看（本进程里别的用例早就把 cloakbrowser 拉进来了）。
+        # 子进程里注入同一个 stub core.tasks，再调一次 `load_run_tasks()` ——
+        # 那正是"立即运行"这条路径唯一的惰性导入点，见 tests/_purity.py。
+        _purity.assert_imports_clean(
+            trigger=True,
+            targets=_purity.TRIGGER_STACK,
+            note="触发路径应当只拿注入的 core.tasks，不该把浏览器依赖拉进来",
+        )
         self.assertIsNone(os.environ.get("DRY_RUN"), "跑完要把 DRY_RUN 恢复原状")
 
     # ---------------------------------------------- 6b. 禁跑时间窗（F6）与返回值（F10）
@@ -998,6 +1038,11 @@ class WebUITestCase(unittest.TestCase):
         # 残留没清干净时下面这行 import 会"成功"，这条测试就被推进 skip —— 整套的
         # passed/skipped 数字会跟着抖。先把它摘掉，让这里只看真实安装情况。
         sys.modules.pop("cloakbrowser", None)
+        # 下面那句 `import cloakbrowser` 成功时会把**真的**包留在 sys.modules 里，
+        # 而 skipTest 不会替你收拾 —— 本文件里"浏览器依赖不该被拉进来"的断言因此
+        # 全都开始看顺序（issue #3 机制一）。纯净性断言现在已经搬进子进程
+        # （tests/_purity.py），残留本身仍然是脏的：这里自己清掉再走。
+        self.addCleanup(sys.modules.pop, "cloakbrowser", None)
         # 仓库里没装 cloakbrowser，所以真实导入 core.tasks 必然失败
         try:
             import cloakbrowser  # noqa: F401,PLC0415
