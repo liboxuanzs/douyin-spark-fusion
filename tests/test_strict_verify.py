@@ -249,12 +249,101 @@ class ReceiptVerdictTests(unittest.TestCase):
         self.assertTrue(v.ok)
         self.assertEqual(v.level, LEVEL_MEDIUM)
 
-    def test_http_receipt_confirms(self):
+    def test_http_receipt_with_recipient_pinned_is_strong_without_bubble(self):
+        """回执 ok + 发送后当前会话就是目标会话 → 强证据，**不要求**气泡数上涨。
+
+        气泡数不涨在真实页面上是常态（虚拟列表不重渲染；生产 2026-10-01→10-13
+        的 81 条成功记录里 DOM 气泡证据一次都没出现过），拿它当必要条件会把每一次
+        发送都判成弱证据。能点名收件人（`recipient_ok is True`）+ 服务端回执 ok
+        才是可用的硬证据；气泡数仍然留在 evidence 里供排查。
+        """
         after = {"convId": CONV_A, "count": 10, "lastFromMe": False}
         v = verify_receipt(self.e, before=self.before, after=after,
                            receipts=[{"ok": True, "message_id": "mid-1"}])
         self.assertTrue(v.ok)
         self.assertEqual(v.level, LEVEL_STRONG)
+        self.assertEqual(v.reason, "")
+        # 气泡数照旧记下来（"没涨"是事实，只是不当作反证）
+        self.assertEqual(v.evidence["dom_count_before"], 10)
+        self.assertEqual(v.evidence["dom_count_after"], 10)
+        self.assertTrue(v.evidence["recipient_ok"])
+
+    def test_http_receipt_without_recipient_is_only_weak_evidence(self):
+        """回执 ok 但连收件人都点不出来（会话 id 读不到）→ 只能算弱证据。
+
+        回执里**没有**收件人字段（`decode_send_resp` 只解 code/status/message_id），
+        所以"服务端收下了一条消息"证明不了"收件人是甲同学"。这里以前给 strong，
+        面板就把一条"可能发给别人"的消息写成"强确认"，用户不会再多看一眼。
+        ok 仍然为 True：这里判的是证据够不够硬，不是发没发出去。
+        """
+        after = {"convId": None, "count": 10, "lastFromMe": False}
+        v = verify_receipt(self.e, before=self.before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}])
+        self.assertTrue(v.ok)
+        self.assertEqual(v.level, LEVEL_MEDIUM)
+        self.assertIn("无法确认收件人是目标", v.reason)
+        self.assertIn("回执本身不带收件人", v.reason)
+
+    def test_http_receipt_with_new_bubble_in_target_conv_is_strong(self):
+        """回执 ok + 目标会话里真的多了个自己发的气泡 → 也是强证据。"""
+        after = {"convId": CONV_A, "count": 11, "lastFromMe": True}
+        v = verify_receipt(self.e, before=self.before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}])
+        self.assertTrue(v.ok)
+        self.assertEqual(v.level, LEVEL_STRONG)
+        self.assertEqual(v.reason, "")
+
+    def test_http_receipt_with_other_conv_is_not_strong(self):
+        """发送后当前会话不是目标 → 不许给 strong，理由要写明"会话不匹配"。
+
+        只有扫描阶段没读到 conv_id 才走得到这里（读到了就走 `receipt_wrong_conv`
+        的 conflict 分支），期望的会话 id 靠 `self_uid + peer_uid` 反算，
+        所以 `self_uid` 必须传进来 —— 不传就核验不了收件人。
+        """
+        e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
+                              display="甲同学", matched_by="remark")
+        self.assertIsNone(e.conv_id)
+        before = {"convId": CONV_B, "count": 10, "lastFromMe": False}
+        after = {"convId": CONV_B, "count": 11, "lastFromMe": True}
+        v = verify_receipt(e, before=before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}], self_uid=ME)
+        self.assertTrue(v.ok)
+        self.assertIsNot(v.level, LEVEL_STRONG)
+        self.assertEqual(v.level, LEVEL_MEDIUM)
+        self.assertIn("会话不匹配", v.reason)
+
+    def test_http_receipt_with_derived_conv_id_matching_is_strong(self):
+        """同上但当前会话正是反算出来的那一个 → strong（证明上一条不是恒判 medium）。"""
+        e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
+                              display="甲同学", matched_by="remark")
+        before = {"convId": CONV_A, "count": 10, "lastFromMe": False}
+        after = {"convId": CONV_A, "count": 11, "lastFromMe": True}
+        v = verify_receipt(e, before=before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}], self_uid=ME)
+        self.assertEqual(v.level, LEVEL_STRONG)
+
+    def test_http_receipt_with_self_uid_unknown_still_checks_recipient(self):
+        """连 self_uid 都拿不到时退化成"目标 uid 在不在 conv_id 里"，仍能认出会话不匹配。"""
+        e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
+                              display="甲同学", matched_by="remark")
+        before = {"convId": CONV_B, "count": 10, "lastFromMe": False}
+        after = {"convId": CONV_B, "count": 11, "lastFromMe": True}
+        v = verify_receipt(e, before=before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}], self_uid=None)
+        self.assertEqual(v.level, LEVEL_MEDIUM)
+        self.assertIn("会话不匹配", v.reason)
+
+    def test_group_conv_id_is_not_strong_by_default(self):
+        """会话 id 不是单聊形状（群聊）→ 收件人核验不了，保守判弱证据。"""
+        e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
+                              display="甲同学", matched_by="remark")
+        group = "7000000000000000001"
+        before = {"convId": group, "count": 10, "lastFromMe": False}
+        after = {"convId": group, "count": 11, "lastFromMe": True}
+        v = verify_receipt(e, before=before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-1"}])
+        self.assertEqual(v.level, LEVEL_MEDIUM)
+        self.assertIn("无法确认收件人是目标", v.reason)
 
     def test_conv_switched_after_send_is_failure_even_with_receipt(self):
         """发完当前会话变成了另一个人 → 判"发错人"，比发失败更严重。"""
@@ -276,9 +365,12 @@ class ReceiptVerdictTests(unittest.TestCase):
         self.assertFalse(v.ok)
 
     def test_missing_dom_state_with_receipt_still_passes(self):
+        """DOM 状态一整块取不到时，回执只能算弱证据（ok 仍是 True，没发错人）。"""
         v = verify_receipt(self.e, before=None, after=None,
                            receipts=[{"ok": True, "message_id": "mid-2"}])
         self.assertTrue(v.ok)
+        self.assertEqual(v.level, LEVEL_MEDIUM)
+        self.assertIn("DOM 状态取不到", v.reason)
 
 
 if __name__ == "__main__":

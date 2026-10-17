@@ -32,11 +32,13 @@ C 与 B 的口径差异（务必保持诚实，不许凑数）
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import shutil
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from webui import store
-from core import schedule
+from core import maintenance, schedule
 
 __all__ = [
     "DRY_RUN_LEVELS",
@@ -45,10 +47,16 @@ __all__ = [
     "SEGMENTS",
     "STATE_LABELS",
     "STATE_CSS",
+    "DISK_DANGER_FREE_BYTES",
+    "DISK_WARN_FREE_BYTES",
     "account_cards",
     "age_seconds",
     "build",
     "config_rows",
+    "disk_usage_view",
+    "maintenance_view",
+    "profile_rows",
+    "prune_view",
     "entry_bucket",
     "human_left",
     "message_lines",
@@ -108,7 +116,7 @@ REASON_LABELS: Dict[str, str] = {
     "editor_text_mismatch": "输入框里的字与要发的内容对不上",
     "editor_not_cleared": "输入框里上一次的字没清干净，这条先不发（免得叠着发两遍）",
     "editor_residue": "输入框里发现上一条消息的残留，这条先不发",
-    # core/douyin_im.py 的登录态复检（2026-10-09 wheat 掉登录那次加的）：
+    # core/douyin_im.py 的登录态复检（2026-10-09 示例号 掉登录那次加的）：
     # 页面还长着 IM 的样子，回执却永远不来 —— 这不是"没发出去"，是"没登录"。
     "login_lost": "登录已失效（要重新扫码登录）",
 }
@@ -336,7 +344,7 @@ def _account_state(
 
     * ``blocked`` —— 根本没法干活：没 cookie、门禁没过（登录失效等）、
       上一轮被整账号跳过，或者失败了但**一条都没发出去**（浏览器没起来之类）。
-    * ``attention`` —— 干了活但有失败的目标。
+    * ``attention`` —— 干了活但有失败的目标，或者整轮异常结束（error）。
     * ``healthy`` —— 有成功（强确认或弱证据）。
     * ``idle`` —— 还没跑过。
     """
@@ -348,6 +356,13 @@ def _account_state(
         return "blocked"
     if status == "error" and attempted <= 0:
         return "blocked"
+    if status == "error":
+        # ★ 「整轮 error」不许算 healthy。error 是**这一轮异常结束**（浏览器崩了、
+        # 账号级异常），而 `core/schedule.py::select` 只把 `skipped` 当"当天名额还在"
+        # —— 已经记账的 error 意味着**剩余目标当天不会再重试**。
+        # 老判定只看 failed：一条失败都没有、发出去了几条，就画成绿色健康，
+        # 屏幕上和"整轮跑完"长得一模一样（2026-10-11 线上就这样骗过一次）。
+        return "attention"
     if failed > 0:
         return "attention"
     if attempted > 0:
@@ -390,7 +405,16 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None) -> Dict[s
             "send_due": "", "send_state": "unknown", "send_state_text": "没有抖音号，无法排期",
             "send_sent_at": "",
         }
-    plan = schedule.plan_for({"unique_id": uid, "time": _text(send_time)}, when=when)
+    # ★ jitter 必须跟派发器用同一个来源（`core/tasks.py` 传的是
+    # `config["scheduleJitterMinutes"]`，落盘就是 `SCHEDULE_JITTER_MINUTES`）。
+    # 不传的话 `plan_for` 吃默认 15 分钟，而 `core/schedule.py` 把 span 算进了
+    # 抖动哈希 —— 只要用户把抖动调成别的值，面板写的时刻就和真正发送的时刻
+    # 对不上（默认值恰好相等，所以这个 bug 平时隐身）。
+    plan = schedule.plan_for(
+        {"unique_id": uid, "time": _text(send_time)},
+        when=when,
+        jitter=schedule.jitter_minutes_env(),
+    )
     state = schedule.load_state()
     record = schedule.entry_for(state, uid, when)
     status = str((record or {}).get("status") or "")
@@ -398,9 +422,26 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None) -> Dict[s
         # 「跳过」= 门禁没过 / 命中风控，一条都没发出去，当天名额还在，
         # 下一次门铃会再试（见 core.schedule.select）。文案必须和「已发」区分开，
         # 否则用户以为今天已经发过了，其实一条都没有。
+        #
+        # ★ 但"下一次门铃会重试"只到**试满上限**为止（`SCHEDULE_SKIP_RETRY_MAX`，
+        #   默认 6 次）：到上限后 `select()` 当天不再踹它，面板再写"会重试"就是骗人。
+        #   判定一律复用 `schedule.skip_retry_exhausted()`（上限可能被 env 改，
+        #   别在这里比数字）；老记录没有 `attempts` 字段 → 它按"没到上限"处理，
+        #   文案与从前完全一致。
         clock = str(record.get("sent_at") or "")[11:16]
         state_key = "due"
-        state_text = f"今天 {clock} 试过但没发出去（跳过），下一次门铃会重试"
+        if schedule.skip_retry_exhausted(record, day=schedule.day_of(when)):
+            try:
+                tries = max(0, int(float(record.get("attempts") or 0)))
+            except (TypeError, ValueError, OverflowError):
+                # 计数写坏时显示上限值：能走到这个分支说明判定已经认为"到上限了"。
+                tries = schedule.skip_retry_max_env()
+            state_text = (
+                f"今天 {clock} 起已经试到上限（{tries} 次），今天不再自动重试；"
+                "明天自动再来，现在重新扫码登录可以立即补发"
+            )
+        else:
+            state_text = f"今天 {clock} 试过但没发出去（跳过），下一次门铃会重试"
     elif record:
         clock = str(record.get("sent_at") or "")[11:16]
         label = schedule.STATUS_LABELS.get(status, "已处理")
@@ -448,14 +489,26 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
         # ★ 口径必须与派发器一致（`core.schedule.select`）：`skipped` 是
         #   "门禁没过 / 命中风控，一条都没发出去"，当天名额还在、下一次门铃还会再试。
         #   把它算成"今天发过了"，面板就会一边显示该账号「下一次门铃会重试」、
-        #   一边在顶上写「今天该发的都发完了」（2026-10-09 wheat 掉登录时就是这样）。
+        #   一边在顶上写「今天该发的都发完了」（2026-10-09 示例号 掉登录时就是这样）。
         record = schedule.entry_for(state, uid, when)
-        if record is not None and _text(record.get("status")) != schedule.STATUS_SKIPPED:
-            continue
+        exhausted = False
+        if record is not None:
+            if _text(record.get("status")) != schedule.STATUS_SKIPPED:
+                continue
+            # ★ 试满上限的 `skipped` 当天**不再 due**（与 `select()` 同一判定）：它今天
+            #   不会再被门铃踹起来，所以"下一个"要落到**明天**。仍按今天算的话，面板
+            #   会写"等下一次敲门就发"——而那个敲门今天根本不会发生。
+            exhausted = schedule.skip_retry_exhausted(record, day=schedule.day_of(when))
+        # jitter 同 `schedule_fields`：面板的"下次自动触发"必须和派发器同一口径，
+        # 否则用户按面板的时间守着，实际却被抖到别的时刻。
         plan = schedule.plan_for(
             {"unique_id": uid, "username": _text(_get(item, "username")),
-             "time": _text(_get(item, "send_time"))}, when=when
+             "time": _text(_get(item, "send_time"))},
+            when=when + timedelta(days=1) if exhausted else when,
+            jitter=schedule.jitter_minutes_env(),
         )
+        if exhausted:
+            plan["exhausted"] = True
         if best is None or plan["due_at"] < best["due_at"]:
             best = plan
     if best is None:
@@ -463,14 +516,19 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
     name = _text(best.get("username")) or _text(best.get("unique_id"))
     due = best["due_at"]
     imminent = when >= due
+    exhausted = bool(best.get("exhausted"))
     return {
         "name": name,
         "at": due.isoformat(timespec="seconds"),
         "due_text": best["due_text"],
         "imminent": imminent,
+        # 明天才轮到的账号（今天试满上限了）不能沿用"今天 HH:MM"的文案。
+        "exhausted": exhausted,
         # 过点了还没发是常态（门铃每 5 分钟才响一次），文案要把这件事说清楚，
         # 否则用户会以为卡住了、去点"立即运行"。
         "text": (
+            f"下一个 {name}：今天已经试到上限，明天 {best['due_text']} 再试"
+            if exhausted else
             f"下一个 {name}：已过 {best['due_text']}，等下一次敲门就发"
             if imminent else
             f"下一个 {name}：今天 {best['due_text']}"
@@ -595,13 +653,25 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     elif nothing_sent:
         # 更隐蔽的一档：门禁当时还是 READY、校验全 strong、输入也对，抖音那边
         # 一条都不收（响应体是空的，或者解不出 code）—— 页面看着一切正常。
-        # 2026-10-10 🌈LBX🌈 就是这样：账本里 sent_ok=0 / sent_fail=3。
+        # 2026-10-10 🌈示例号🌈 就是这样：账本里 sent_ok=0 / sent_fail=3。
         issues.append({
             "level": "danger",
             "text": "上一轮**一条都没送达**（每个目标都没拿到回执；门禁当时还是通过的）—— "
                     "通常是登录已被服务端作废或风控拦截；"
                     "到下面「扫码登录」重新扫一次，登录成功后会自动补发一次"
                     + _REQUEUE_NOTE,
+        })
+    if status == "error" and not orphan and not (login_lost or nothing_sent or login_dead):
+        # 整轮异常结束（浏览器崩了 / 账号级异常）—— 和"被跳过""登录失效"分开说。
+        # 已经发出去的部分算数，剩下的目标**当天不会再重试**（`core/schedule.py::select`
+        # 只把 skipped 当"名额还在"，error 等同于"今天办过了"）。
+        # 文案要给出"发了几条、还剩几条+怎么办"，只说"本轮异常"用户既不知道
+        # 已经发出去多少、也不知道要不要手动补一轮。
+        failed_note = f"，其中 {failed} 条失败" if failed else ""
+        issues.append({
+            "level": "danger",
+            "text": f"本轮异常结束：已发 {sent}/{total}{failed_note}，剩余目标没有重试"
+                    " —— 确认账号状态后再点「立即运行」补一轮",
         })
     if status == "skipped":
         issues.append({"level": "warning", "text": "上一轮该账号被跳过"})
@@ -698,7 +768,7 @@ def account_cards(
     ``per_account=True``（总览页）：每张卡取**它自己最近参与过的那一轮**。每个账号
     可以有自己的发送时间（`core/schedule.py` 的派发器每 5 分钟只为当时到点的账号跑
     一轮），于是"全局最近一轮"里通常只有一两个账号。2026-10-07 线上就这么骗了用户
-    一回：wheat 17:35 已经 4/4 强确认，20:35 那一轮只跑了别的账号，它的卡立刻变成
+    一回：示例号 17:35 已经 4/4 强确认，20:35 那一轮只跑了别的账号，它的卡立刻变成
     「未尝试 4 / 还没跑过」。
 
     ``per_account=False``（运行记录页）：所有卡冻在 ``record`` 那一轮 —— 那一页讲的
@@ -955,6 +1025,10 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
     # 这时候不能再按 `.env` 的 TASK_SCHEDULE_TIMES 画一个"下次自动触发" ——
     # 那个值现在的含义只是"没单独配时间的账号用几点"。
     dispatch = _int(timer.get("dispatchMinutes"))
+    # 值槽（26px 大字）只放得下一行数字 —— 派发器模式下把"下一个是谁、几点"
+    # 压成短句（`示例号 · 已过 17:20`）给值槽用，整句话（`nextTriggerText`）
+    # 留给提示行。短句拼不出来时前端回落到整句话，只是字号小一号。
+    next_short = ""
     # "已启用"只说明开机自启；被 `systemctl stop` 过或者 failed 的 timer 仍然是
     # enabled 的，到点一样不会跑 —— 所以运行态（`activeState`，由一次只读的
     # `systemctl is-active` 得到；拿不到时是空串＝不知道，保持原有判断）也要看。
@@ -970,8 +1044,16 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
     if dispatch:
         label = f"每 {dispatch} 分钟敲一次门，各账号按自己的时间发"
         if next_due:
-            next_iso = _text(next_due.get("at"))
-            next_text = _text(next_due.get("text"))
+            next_iso = _text(_get(next_due, "at"))
+            next_text = _text(_get(next_due, "text"))
+            name = _text(_get(next_due, "name"))
+            due_text = _text(_get(next_due, "due_text"))
+            if name and due_text:
+                overdue = "已过 " if _get(next_due, "imminent") else ""
+                # 试满上限的账号今天不动了（`next_due` 给的是明天的计划），值槽里必须
+                # 带"明天"，否则一个大写的 "21:47" 看着就像今天还有一轮。
+                overdue = "明天 " if _get(next_due, "exhausted") else overdue
+                next_short = f"{name} · {overdue}{due_text}"
         else:
             next_iso = ""
             next_text = "今天该发的都发完了"
@@ -987,6 +1069,7 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
         label = "定时器未启用"
         next_text = ""
         next_iso = ""
+        next_short = ""
     elif timer_times:
         label = "系统定时器：" + "、".join(timer_times)
         if timer.get("jitterText"):
@@ -996,6 +1079,9 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
         "label": label,
         "nextTriggerAt": next_iso,
         "nextTriggerText": next_text,
+        # 值槽里那一行（"示例号 · 已过 17:20"）：面板的值槽是 26px 大字，塞整句话
+        # 会撑成两三行、把整条概览拉高；拼不出来时是空串，前端回落到上面那句。
+        "nextTriggerShort": next_short,
         "remainingTargets": pending,
         "hasWorkNextTrigger": pending > 0 and armed,
         # 派发器模式（timer 每 N 分钟敲一次门、各账号按自己的时间发）：上面那两个
@@ -1345,9 +1431,11 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
         "schedule": {
             "nextTriggerAt": schedule.get("nextTriggerAt", ""),
             "label": schedule.get("label", ""),
-            # 派发器模式下这句才是"下一次触发会干什么"的真话（"下一个 wheat：今天
+            # 派发器模式下这句才是"下一次触发会干什么"的真话（"下一个 示例号：今天
             # 17:20" / "今天该发的都发完了"），前端要拿它写 KPI 下面那行小字。
             "nextTriggerText": schedule.get("nextTriggerText", ""),
+            # 值槽那一行的短句（"示例号 · 已过 17:20"）；空串＝前端回落到整句话。
+            "nextTriggerShort": schedule.get("nextTriggerShort", ""),
             "remainingTargets": schedule.get("remainingTargets", 0),
             "hasWorkNextTrigger": bool(schedule.get("hasWorkNextTrigger")),
             # 派发器模式：前端不许拿"上一轮剩几个目标"当"下次触发还有活干"。
@@ -1376,4 +1464,308 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             }
             for card in accounts
         ],
+    }
+
+
+# ---------------------------------------------------------------- 磁盘与资料目录
+#
+# 这一块是 `core.maintenance` 的**展示层**：清理规则、安全线（读不到名单一个都不删、
+# 在册账号永不删、默认只预演）全在那边，这里只把它的结果翻成面板要的形状 ——
+# 逻辑留在一处，面板和 CLI（`python -m core.maintenance`）才不会各说各话。
+
+#: 磁盘剩余低于这个数就报红。这**不是**"性能提示"：磁盘满 = 起不了浏览器、
+#: 写不了账本 = 当天的火花直接断（2026-10-14 盘点时只剩 25G，`logs/` 已占 1.1G 还在涨）。
+DISK_DANGER_FREE_BYTES = 1 * 1024 ** 3
+
+#: 低于这个数报黄：还够跑，但该清一清了。
+DISK_WARN_FREE_BYTES = 5 * 1024 ** 3
+
+#: 孤儿目录的宽限期（天）。只用于文案，真正的判定在 `core.maintenance`。
+ORPHAN_GRACE_DAYS = maintenance.ORPHAN_GRACE_DAYS
+
+
+def disk_usage_view(path: Any = None) -> Dict[str, Any]:
+    """资料目录所在分区的剩余空间（``shutil.disk_usage``，标准库，不加依赖）。
+
+    路径不存在时**往上找最近的存在的祖先**再问：``disk_usage()`` 对不存在的路径
+    直接抛 OSError，而"还没登录过任何账号、资料目录还没建"恰恰是第一次打开面板的
+    常态 —— 不能因为少一个目录，就把整块打成错误。
+    """
+    target = Path(str(path)) if path else maintenance.profile_root()
+    probe = target
+    try:
+        # `Path.exists()` 对没有权限的父目录返回 False，循环会把 probe 一路推到根，
+        # 到根还不行就让它去 `disk_usage` 抛异常 —— 两条路都不会死循环。
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        usage = shutil.disk_usage(str(probe))
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": f"读不到磁盘剩余空间：{exc}",
+            "path": str(target),
+            "free_bytes": 0,
+            "total_bytes": 0,
+            "human_free": "",
+            "human_total": "",
+            "used_pct": 0,
+            "level": "unknown",
+            "text": "",
+            "tail": "磁盘剩余读不到",
+        }
+    free = int(getattr(usage, "free", 0) or 0)
+    total = int(getattr(usage, "total", 0) or 0)
+    used_pct = int(round((total - free) * 100 / total)) if total else 0
+    if free < DISK_DANGER_FREE_BYTES:
+        level = "danger"
+    elif free < DISK_WARN_FREE_BYTES:
+        level = "warning"
+    else:
+        level = "ok"
+    text = (
+        f"磁盘剩余 {maintenance.human_size(free)}"
+        f"（共 {maintenance.human_size(total)}，已用 {used_pct}%）"
+    )
+    if level == "danger":
+        text += " —— 空间不够了：磁盘满会让发送直接失败，先清缓存或孤儿目录"
+    elif level == "warning":
+        text += " —— 该清一清了"
+    return {
+        "ok": True,
+        "error": "",
+        "path": str(target),
+        "free_bytes": free,
+        "total_bytes": total,
+        "human_free": maintenance.human_size(free),
+        "human_total": maintenance.human_size(total),
+        "used_pct": used_pct,
+        "level": level,
+        "text": text,
+        # 折叠状态下 summary 那一行只放得下很短的一句：展开前也能看见"还剩多少"，
+        # 就不用为了看一眼空间把整块点开（点开要递归扫一遍资料目录）。
+        "tail": f"剩余 {maintenance.human_size(free)}",
+    }
+
+
+def profile_rows(
+    report: Any = None, names: Any = None, *, grace_days: Any = None
+) -> List[Dict[str, Any]]:
+    """``core.maintenance.profile_report()`` 的每个资料目录 → 面板的一行。
+
+    ``names`` 是 ``{unique_id: 昵称}``（可选）：资料目录名就是抖音号，配上昵称
+    才认得出是哪个账号。**这里不自己读配置** —— 名单的真源是 ``TASKS``
+    （清理判定用的也是它），展示层只接受调用方递进来的映射。
+    """
+    lookup = {str(key): str(value) for key, value in dict(names or {}).items()}
+    try:
+        grace = ORPHAN_GRACE_DAYS if grace_days is None else float(grace_days)
+    except (TypeError, ValueError):
+        grace = float(ORPHAN_GRACE_DAYS)
+    rows: List[Dict[str, Any]] = []
+    for item in (report or {}).get("profiles") or []:
+        item = dict(item or {})
+        name = _text(item.get("name"))
+        scratch = bool(item.get("is_scratch")) or name == maintenance.SCRATCH_PROFILE_NAME
+        orphan = bool(item.get("is_orphan")) and not scratch
+        in_use = bool(item.get("in_use"))
+        nickname = lookup.get(name, "")
+        if scratch:
+            label = "临时资料目录（扫码登录前的落脚点，不属于任何账号）"
+        elif nickname:
+            label = f"{nickname}（{name}）"
+        else:
+            label = name or "（目录名读不到）"
+        try:
+            idle_days = round(float(item.get("idle_days") or 0.0), 1)
+        except (TypeError, ValueError):
+            idle_days = 0.0
+        idle_text = "刚刚动过" if idle_days <= 0.05 else f"{idle_days:.1f} 天没动"
+        tags: List[str] = ["临时" if scratch else ("孤儿（不在账号名单里）" if orphan else "在册")]
+        if in_use:
+            tags.append("正在跑")
+        # 每行都提前说清"这一行能不能动"，否则用户只能靠点「执行」去试 ——
+        # 而"执行"是要删东西的，不该拿来当探针。
+        if in_use:
+            hint = "正在跑：本轮跳过（等它跑完再清）"
+        elif scratch:
+            hint = "临时目录：只清缓存，目录本身不删"
+        elif orphan:
+            left = grace - idle_days
+            hint = (
+                f"孤儿目录：闲置够 {grace:g} 天，可以删"
+                if left <= 0
+                else f"孤儿目录：还差 {left:.1f} 天才到 {grace:g} 天宽限期"
+            )
+        else:
+            hint = "在册账号：永不删除，只清可再生缓存"
+        rows.append(
+            {
+                "name": name,
+                "label": label,
+                "nickname": nickname,
+                "human_bytes": _text(item.get("human_bytes"), "0 B"),
+                "human_cache_bytes": _text(item.get("human_cache_bytes"), "0 B"),
+                "bytes": int(item.get("bytes") or 0),
+                "cache_bytes": int(item.get("cache_bytes") or 0),
+                "idle_days": idle_days,
+                "idle_text": idle_text,
+                "is_orphan": orphan,
+                "is_scratch": scratch,
+                "in_use": in_use,
+                "tags": tags,
+                "hint": hint,
+            }
+        )
+    return rows
+
+
+def _auto_prune_text(auto: Any) -> str:
+    """「自动清理」那一行的人话（面板与 CLI 同一套口径，见 core/maintenance.py）。
+
+    刻意把"关掉了"与"还没清过"分开说：前者是用户的决定，后者是刚上线还没到点 ——
+    混成一句会让人以为开关没生效。状态读不到也要说话，否则那一行会空着，
+    看着像功能坏了。
+    """
+    data = dict(auto or {})
+    if not data:
+        return "自动清理：状态读不到（不影响手动清理）"
+    if not data.get("enabled"):
+        return "自动清理：已关闭（MAINTENANCE_AUTO_PRUNE_HOURS=0）—— 需要时手动点下面的按钮"
+    try:
+        span = maintenance.human_duration(float(data.get("hours") or 0) * 3600.0)
+    except (TypeError, ValueError):
+        span = ""
+    head = f"自动清理：每 {span}一次" if span else "自动清理：已开启"
+    parts = [head]
+    if data.get("last_at"):
+        parts.append(f"上次 {_text(data.get('last_ago_text'))}"
+                     f"（回收 {_text(data.get('last_freed_text'), '0 B')}）")
+    else:
+        parts.append("还没清过")
+    next_text = _text(data.get("next_text"), "门铃一响就清")
+    if next_text.startswith("约"):
+        parts.append(f"下次 {next_text}")
+    elif "门铃" in next_text:
+        parts.append("下次门铃一响就清")
+    else:
+        parts.append(f"下次 {next_text}")
+    error = _text(data.get("last_error"))
+    if error:
+        parts.append(f"上次出错：{error}")
+    return " · ".join(parts)
+
+
+def maintenance_view(
+    root: Any = None,
+    ids: Any = None,
+    *,
+    names: Any = None,
+    report: Any = None,
+    disk: Any = None,
+    grace_days: Any = None,
+) -> Dict[str, Any]:
+    """「磁盘与资料目录」区块要显示的全部东西（**JSON 可序列化**）。
+
+    刻意做成"展开时才拉一次"的独立接口：``profile_report()`` 会把每个资料目录
+    递归走一遍（线上两个目录就一千多 MB、几万个缓存文件），并进首页渲染等于
+    每次翻页都白扫一遍盘。
+
+    ``ok`` = 账号名单读到了（``core.maintenance`` 的安全线 1）：为 False 时
+    面板**必须**把错误显示出来并禁用「执行」——名单读不到时它自己一个都不会删，
+    但按钮还亮着会让用户以为"点了没用"。
+    """
+    data = dict(report) if report is not None else maintenance.profile_report(root=root, ids=ids)
+    error = _text(data.get("error"))
+    rows = profile_rows(data, names, grace_days=grace_days)
+    exists = bool(data.get("exists"))
+    disk_payload = disk if disk is not None else disk_usage_view(data.get("root") or root)
+    notice = "" if exists else "资料目录还不存在：这台机器上还没有账号扫码登录过。"
+    if error:
+        # 名单读不到时，逐个目录的判定**整片是错的**：`core.maintenance` 是按
+        # "不在名单里"判孤儿的，名单为空等于把在册账号也标成"孤儿（可删）"。
+        # 安全线保证它一个都不会真删（见 core.maintenance 的三条安全线），但把错的
+        # 判定画出来只会诱导用户去点「执行」；宁可不显示，只显示错误。
+        # 同理，"孤儿有多少字节"这个数字这时也没有意义。
+        rows = []
+        data["orphan_bytes"] = 0
+        data["human_orphan"] = "0 B"
+    totals = {
+        "count": len(rows),
+        "total_bytes": int(data.get("total_bytes") or 0),
+        "cache_bytes": int(data.get("cache_bytes") or 0),
+        "orphan_bytes": int(data.get("orphan_bytes") or 0),
+        "human_total": _text(data.get("human_total"), "0 B"),
+        "human_cache": _text(data.get("human_cache"), "0 B"),
+        "human_orphan": _text(data.get("human_orphan"), "0 B"),
+    }
+    totals["text"] = (
+        f"资料目录合计 {totals['human_total']}"
+        f"（其中可再生缓存 {totals['human_cache']}，孤儿目录 {totals['human_orphan']}）"
+    )
+    try:
+        auto = maintenance.auto_prune_status()
+    except Exception:  # noqa: BLE001 —— 状态文件读不到不该让整块盘点结果跟着挂
+        auto = {}
+    return {
+        # 名单读不到 → ok=False：面板要显示 error，并且不许点「执行」。
+        "ok": not error,
+        "error": error,
+        # 自动清理（定时器顺带做的那一步）的状态：开着、上次清了什么、下次什么时候。
+        "auto": auto,
+        "auto_text": _auto_prune_text(auto),
+        "root": _text(data.get("root")),
+        "exists": exists,
+        "known_ids": [str(item) for item in data.get("known_ids") or []],
+        "rows": rows,
+        "totals": totals,
+        "disk": disk_payload,
+        "grace_days": ORPHAN_GRACE_DAYS if grace_days is None else float(grace_days),
+        "notice": notice,
+    }
+
+
+def prune_view(result: Any, *, what: str = "") -> Dict[str, Any]:
+    """``core.maintenance.prune_caches/prune_orphans`` 的结果 → 面板能画的东西。
+
+    两个函数的 ``removed`` 项目形状不一样（缓存是 ``profile`` + ``path``，孤儿是
+    ``name``），这里统一成 ``label``；"跳过了哪些、为什么跳过"也统一成四类键名，
+    前端只认一套。文案复用 ``core.maintenance.prune_lines()`` —— 面板和 CLI
+    说同样的话。
+    """
+    data = dict(result or {})
+    applied = bool(data.get("applied"))
+    removed: List[Dict[str, Any]] = []
+    for item in data.get("removed") or []:
+        item = dict(item or {})
+        path = _text(item.get("path"))
+        label = _text(item.get("name")) or f"{_text(item.get('profile'))}/{path.rsplit('/', 1)[-1]}"
+        removed.append({"label": label, "human_bytes": _text(item.get("human_bytes"), "0 B")})
+    lines = maintenance.prune_lines(data, what=what or "缓存")
+
+    def _names(key: str) -> List[str]:
+        return [str(value) for value in data.get(key) or []]
+
+    return {
+        "ok": bool(data.get("ok")),
+        "error": _text(data.get("error")),
+        "applied": applied,
+        "dry_run": not applied,
+        "what": what,
+        "removed": removed,
+        "removed_count": len(removed),
+        "freed_bytes": int(data.get("freed_bytes") or 0),
+        "human_freed": _text(data.get("human_freed"), "0 B"),
+        "kept": _names("kept"),
+        "skipped_recent": _names("skipped_recent"),
+        "skipped_in_use": _names("skipped_in_use"),
+        "skipped_symlink": _names("skipped_symlink"),
+        # `prune_caches()` 的返回里没有 grace_days（它不涉及宽限期），而前端只认
+        # 一套键名：缺了就补默认值，别让页面显示「还在 undefined 天宽限期内」。
+        "grace_days": (
+            data.get("grace_days")
+            if data.get("grace_days") is not None
+            else ORPHAN_GRACE_DAYS
+        ),
+        "headline": lines[0] if lines else "",
+        "lines": lines,
     }

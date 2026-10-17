@@ -140,8 +140,15 @@
     </div>
     <div class="overview-cell">
       <div class="overview-label">下次自动触发</div>
-      <div class="overview-value" data-overview-value="nextTriggerAt">
-        {{ view.schedule.nextTriggerText or "不会自动跑" }}
+      {# 值槽是给"0/5"这种一行数字准备的 26px 大字：派发器模式喂它的是「谁 · 几点」
+         短句，收一号字（--short）；只有整句话可用时才用 --prose。两个类名与
+         app.js 里轮询时的那套判断必须一致，否则每 10 秒刷一次字号会跳。 #}
+      {% set due_short = view.schedule.nextTriggerShort if view.schedule.armed else "" %}
+      <div
+        class="overview-value {% if due_short %}overview-value--short{% elif view.schedule.dispatcher and view.schedule.armed %}overview-value--prose{% endif %}"
+        data-overview-value="nextTriggerAt"
+      >
+        {{ due_short or view.schedule.nextTriggerText or "不会自动跑" }}
       </div>
       <div class="overview-help" data-overview-value="scheduleLabel">{{ view.schedule.label or "-" }}</div>
       <div class="overview-help" data-overview-value="nextTriggerHint">
@@ -150,9 +157,12 @@
         {%- elif not view.schedule.armed -%}
         只能手动点「立即运行」
         {%- elif view.schedule.dispatcher -%}
-        {# 派发器模式：各账号按自己的发送时间分开跑，'下次触发还剩几个目标'是上一轮的账 #}
-        {%- if view.schedule.nextTriggerText -%}
-        按各账号自己的时间发：{{ view.schedule.nextTriggerText }}
+        {# 值槽已经写了"谁、几点"（due_short）时，这行只说"到点之后会发生什么"；
+           没有短句时值槽放的是整句话，这里就只交代机制，别把同一句话抄两遍 #}
+        {%- if due_short -%}
+        到点后的下一次门铃就会发它
+        {%- elif view.schedule.nextTriggerText -%}
+        按各账号自己的时间发
         {%- else -%}
         今天该发的都发完了
         {%- endif -%}
@@ -187,7 +197,7 @@
       <div class="metric-label">确认成功</div>
       <div class="metric-value" data-overview-value="confirmed">{{ summary.confirmed }}</div>
       <div class="metric-help">
-        会话选中与会话回执两边都确认 · 另有
+        回执 ok 且能点名收件人（发送后就停在目标会话） · 另有
         <b data-overview-value="pageEcho">{{ summary.pageEcho }}</b> 个弱证据
       </div>
     </article>
@@ -251,7 +261,9 @@
       class="account-card"
       id="account-{{ account.unique_id }}"
       data-account-overview="{{ account.unique_id }}"
-      data-account-state="{{ account.state }}"
+      {# 必须用 state_css：app.js 轮询后写回的是 stateCss（blocked→paused），
+         两边用不同词表时，被阻断账号的红边会在第一次轮询后静默消失（2026-10-17 前端审计）。 #}
+      data-account-state="{{ account.state_css }}"
     >
       <header class="account-card-head">
         <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
@@ -326,7 +338,7 @@
             <i class="progress-strong" style="width:{{ account.strong_pct }}%" data-account-progress></i>
             <i class="progress-echo" style="width:{{ account.weak_pct }}%" data-account-progress-echo></i>
           </span>
-          <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }} · 强确认 {{ account.confirmed }}{% if account.dry_run and account.dry_run != "off" %} · 上一轮是空跑（{{ account.dry_run_text }}）{% endif %}</span>
+          <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }}{% if account.dry_run and account.dry_run != "off" %} · 上一轮是空跑（{{ account.dry_run_text }}）{% endif %}</span>
         </div>
       </div>
 
@@ -660,6 +672,91 @@
     </form>
   </section>
 
+  {# ---- 磁盘与资料目录：只盘点、手动清理，默认只预演（core/maintenance.py） ------- #}
+  <section class="dashboard-section section-flush" id="maintenance-panel">
+    <details class="collapsible-section section-collapse" data-maintenance-panel>
+      <summary>
+        <span class="summary-copy">
+          <i data-lucide="hard-drive"></i>
+          <span>
+            <strong>磁盘与资料目录</strong>
+            <small>扫码登录用的浏览器资料目录会一直长（缓存没有上限）。磁盘满 = 发送直接失败，所以这里能预演、能手动清。</small>
+          </span>
+        </span>
+        <span class="collapse-tail">
+          <span class="muted compact" data-maintenance-disk-tail>展开时盘点</span>
+          <i class="summary-chevron" data-lucide="chevron-down"></i>
+        </span>
+      </summary>
+      <div class="collapsible-body">
+        {# 展开后才去拉 /api/ops/maintenance：盘点要递归走每个资料目录，
+           并进首页渲染会把每一次翻页都拖慢（见 webui/viewmodel.py 的 maintenance_view）。 #}
+        <p class="muted compact" data-maintenance-status>展开后自动盘点一次。</p>
+
+        <div class="notice-inline" data-maintenance-disk hidden></div>
+
+        <div class="danger-box" data-maintenance-locked hidden>
+          <i data-lucide="alert-triangle"></i>
+          <div>
+            <strong>账号名单读不到，清理已锁住</strong>
+            <p class="compact" data-maintenance-locked-text></p>
+            <small class="muted">
+              名单读不到时一个文件都不会删（宁可不清，也不能把真账号的登录态删了）。
+              先到「运行配置」把 <code>TASKS</code> / <code>COOKIES_*</code> 修好，再回来展开这一块。
+            </small>
+          </div>
+        </div>
+
+        <div data-maintenance-body hidden>
+          <p class="muted compact" data-maintenance-totals></p>
+
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">资料目录</th>
+                  <th scope="col">占用</th>
+                  <th scope="col">其中缓存</th>
+                  <th scope="col">闲置</th>
+                  <th scope="col">状态</th>
+                </tr>
+              </thead>
+              <tbody data-maintenance-rows></tbody>
+            </table>
+          </div>
+          <p class="muted compact" data-maintenance-empty hidden>还没有任何资料目录：还没有账号扫码登录过。</p>
+
+          <div class="form-actions">
+            <button class="button button-soft" type="button" data-maintenance-action="caches" data-apply="0">
+              <i data-lucide="sparkles"></i><span>预演：清缓存</span>
+            </button>
+            <button class="button button-danger" type="button" data-maintenance-action="caches" data-apply="1">
+              <i data-lucide="trash-2"></i><span>执行：清缓存</span>
+            </button>
+            <button class="button button-soft" type="button" data-maintenance-action="orphans" data-apply="0">
+              <i data-lucide="search"></i><span>预演：清孤儿目录</span>
+            </button>
+            <button class="button button-danger" type="button" data-maintenance-action="orphans" data-apply="1">
+              <i data-lucide="trash-2"></i><span>执行：清孤儿目录</span>
+            </button>
+          </div>
+          <p class="muted compact">
+            「预演」只看不删、不改任何文件；「执行」会真删，点完还要再确认一次。
+            缓存只删 <code>Cache</code> / <code>Code Cache</code> / <code>GPUCache</code> 这类可再生的东西，
+            <code>Cookies</code> / <code>Local Storage</code> / <code>Local State</code> 一律不碰。
+          </p>
+        </div>
+
+        {# 结果框放在 body 外面：名单中途读不到时 body 会整块藏起来（连按钮一起），
+           而"一个文件都没删"这句话恰恰必须让人看见。 #}
+        <div class="maintenance-result" data-maintenance-result hidden>
+          <strong data-maintenance-result-head></strong>
+          <ul data-maintenance-result-list></ul>
+        </div>
+      </div>
+    </details>
+  </section>
+
   {# ---- 运行配置（可改：写回 .env，白名单见 webui/settings.py） ----------------- #}
   <section class="dashboard-section section-flush" id="config-panel">
     <details class="collapsible-section section-collapse" data-config-panel>
@@ -815,9 +912,9 @@
                 </td>
               </tr>
               <tr>
-                <th scope="row">会话有效期</th>
+                <th scope="row">登录保持</th>
                 <td>
-                  {{ view.password_panel.session_hours }} 小时（<code>WEBUI_SESSION_MAX_AGE</code>，改口令会立刻作废所有会话）
+                  {{ view.password_panel.session_text }}（<code>WEBUI_SESSION_MAX_AGE</code> = {{ view.password_panel.session_seconds }} 秒，改口令会立刻作废所有会话；超过 400 天会被夹到 400 天）
                   {% if not view.password_panel.secret_configured %}
                   <br><small class="muted">没设 <code>WEBUI_SESSION_SECRET</code>：签名密钥是每次启动随机生成的，重启服务就得重新登录。</small>
                   {% endif %}

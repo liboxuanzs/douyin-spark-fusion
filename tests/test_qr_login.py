@@ -4,7 +4,7 @@
   * 面板赖以显示的状态机（快照字段、二维码序号只在换图时递增、取消语义）；
   * `import` 这一层不许拖进浏览器依赖（面板进程 import 它是安全的）；
   * 页面脚本的挑选规则（纯字符串，确认选择器没被谁改跑偏）。
-真正"能不能扫出码"由 .172 上的真机验证负责。
+真正"能不能扫出码"由 本机 上的真机验证负责。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -250,27 +251,39 @@ class AdoptProfileTests(unittest.TestCase):
 
     def test_moves_the_profile_to_the_account_dir(self):
         session = self.make()
-        session.adopt_profile(os.path.join(self.root, "76998876121"))
+        session.adopt_profile(os.path.join(self.root, "12345678905"))
         session._adopt_profile()
-        self.assertTrue(os.path.isdir(os.path.join(self.root, "76998876121", "Default")))
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "12345678905", "Default")))
         self.assertFalse(os.path.isdir(os.path.join(self.root, "default")))
-        self.assertEqual(session.profile_dir, os.path.join(self.root, "76998876121"))
-        self.assertEqual(session.moved_to, os.path.join(self.root, "76998876121"))
+        self.assertEqual(session.profile_dir, os.path.join(self.root, "12345678905"))
+        self.assertEqual(session.moved_to, os.path.join(self.root, "12345678905"))
         self.assertTrue(session.persist["profile_moved"]["ok"])
 
-    def test_never_overwrites_an_existing_account_dir(self):
+    def test_an_existing_account_dir_is_moved_aside_not_overwritten(self):
+        """目标目录已存在时：旧的挪到 `<uid>.stale-<时间戳>`，新的搬进去。
+
+        ★ 2026-10-17 审计 S4：以前这里是"直接放弃"，后果很具体 —— 账号继续用旧的、
+        可能已经登出的那一份（用户看到"扫了码还是没登上"），而**新登录态留在源目录里
+        没人用**。旧的那一份必须保留（不许删、不许改），只是改个名，让
+        `core.maintenance.prune_orphans` 在 7 天宽限期之后收走。
+        """
         session = self.make()
-        target = os.path.join(self.root, "76998876121")
+        target = os.path.join(self.root, "12345678905")
         os.makedirs(os.path.join(target, "Default"), exist_ok=True)
         with open(os.path.join(target, "Default", "Cookies"), "w", encoding="utf-8") as fh:
             fh.write("原来的登录态")
         session.adopt_profile(target)
         session._adopt_profile()
         with open(os.path.join(target, "Default", "Cookies"), encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "原来的登录态", "已存在的目录一个字节都不许动")
-        self.assertTrue(os.path.isdir(os.path.join(self.root, "default")), "源目录留着")
-        self.assertFalse(session.persist["profile_moved"]["ok"])
-        self.assertIn("已存在", session.persist["profile_moved"]["error"])
+            self.assertEqual(fh.read(), "x", "新登录态应该搬进账号目录")
+        stale = sorted(n for n in os.listdir(self.root) if n.startswith("12345678905.stale-"))
+        self.assertEqual(len(stale), 1, f"旧目录应该被挪成一个 .stale- 目录：{stale}")
+        with open(os.path.join(self.root, stale[0], "Default", "Cookies"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "原来的登录态", "旧资料目录只能被挪走，不能删也不能改")
+        self.assertFalse(os.path.isdir(os.path.join(self.root, "default")), "源目录应该搬空了")
+        self.assertTrue(session.persist["profile_moved"]["ok"])
+        self.assertEqual(session.moved_to, target)
 
     def test_same_path_is_a_noop(self):
         session = self.make()
@@ -282,7 +295,7 @@ class AdoptProfileTests(unittest.TestCase):
     def test_missing_source_is_reported_not_raised(self):
         session = qr_login.QrLoginSession(
             os.path.join(self.root, "gone"), on_success=lambda result: {"ok": True})
-        session.adopt_profile(os.path.join(self.root, "76998876121"))
+        session.adopt_profile(os.path.join(self.root, "12345678905"))
         session._adopt_profile()          # 不该抛
         self.assertFalse(session.persist["profile_moved"]["ok"])
         self.assertIn("不存在", session.persist["profile_moved"]["error"])
@@ -292,21 +305,57 @@ class AdoptProfileTests(unittest.TestCase):
         session = self.make(
             on_success=lambda result: {
                 "ok": True, "profile_dir": result.get("profile_dir"),
-                "adopt_profile": os.path.join(self.root, "76998876121"),
+                "adopt_profile": os.path.join(self.root, "12345678905"),
             })
         session._finish(_Ctx(), _Page(), None)
-        self.assertEqual(session._adopt, os.path.join(self.root, "76998876121"))
+        self.assertEqual(session._adopt, os.path.join(self.root, "12345678905"))
 
     def test_keep_existing_persist_keys(self):
         session = self.make(
             on_success=lambda result: {
                 "ok": True, "key": "COOKIES_1",
-                "adopt_profile": os.path.join(self.root, "76998876121"),
+                "adopt_profile": os.path.join(self.root, "12345678905"),
             })
         session._finish(_Ctx(), _Page(), None)
         session._adopt_profile()
         self.assertEqual(session.persist["key"], "COOKIES_1", "原来写的键不能丢")
         self.assertTrue(session.persist["profile_moved"]["ok"])
+
+
+class EnsureProfileDirTests(unittest.TestCase):
+    """资料目录里是明文的 sessionid，权限不能跟着 umask 走（默认 0755 = 全机可读）。
+
+    `os.makedirs(..., exist_ok=True)` 不会去收紧**已经存在**的目录，所以这里两头都要钉：
+    新建时就是 0700，老目录（线上现存的那几个是 0755）也要被收紧。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def test_new_dir_is_0700(self):
+        path = os.path.join(self.root, "a", "b")
+        self.assertEqual(qr_login._ensure_profile_dir(path), path)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700)
+
+    def test_existing_0755_dir_is_tightened(self):
+        path = os.path.join(self.root, "old")
+        os.makedirs(path, exist_ok=True)
+        os.chmod(path, 0o755)
+        qr_login._ensure_profile_dir(path)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700,
+                         "已经存在的 0755 目录必须被收紧（makedirs 不会动它）")
+
+    def test_chmod_failure_never_raises(self):
+        """chmod 失败（比如目录在只读挂载上）只该记一条日志，不能把登录带走。"""
+        path = os.path.join(self.root, "cant")
+        os.makedirs(path, exist_ok=True)
+        original = os.chmod
+        os.chmod = lambda *a, **kw: (_ for _ in ()).throw(PermissionError("nope"))
+        self.addCleanup(setattr, os, "chmod", original)
+        self.assertEqual(qr_login._ensure_profile_dir(path), path, "不抛异常")
+        self.assertTrue(os.path.isdir(path), "目录仍然要建出来")
 
 
 class _Ctx:
@@ -362,16 +411,35 @@ class CodeVerifyTests(unittest.TestCase):
         kwargs.setdefault("ttl", 60.0)
         return qr_login.QrLoginSession("/tmp/does-not-matter", **kwargs)
 
-    def pin_logged_in(self, state):
-        """把 has_login_cookie 换成一个由 state[0] 驱动的开关。"""
-        original = qr_login.cookie_utils.has_login_cookie
-        qr_login.cookie_utils.has_login_cookie = lambda cookies: bool(state[0])
-        self.addCleanup(setattr, qr_login.cookie_utils, "has_login_cookie", original)
+    def pin_login_cookie_state(self, state):
+        """让「登录 cookie 换了一份新的没有」由 state[0] 驱动。
+
+        桩必须打在**指纹**上，不能打在 `has_login_cookie`（只看名字）上：2026-10-11
+        现场就是名字判据造成的假通过 —— 资料目录里躺着上一轮那份已被服务端作废的
+        `sessionid`，名字一模一样。现在进二次验证时抓一次基线，只认"值换没换"。
+
+        state[0] 为假时指纹是空的（"没有登录 cookie"），为真时是一份新指纹；这样
+        基线为空、后来有了，也算"换了一份新的"。
+        """
+        original = qr_login.QrLoginSession._cookie_signature
+        qr_login.QrLoginSession._cookie_signature = (
+            lambda self_, ctx: (("sessionid", "new") if state[0] else ()))
+        self.addCleanup(setattr, qr_login.QrLoginSession, "_cookie_signature", original)
 
     def pin_verify_seconds(self, seconds):
         original = qr_login.CODE_VERIFY_SECONDS
         qr_login.CODE_VERIFY_SECONDS = seconds
         self.addCleanup(setattr, qr_login, "CODE_VERIFY_SECONDS", original)
+
+    def pin_check_login(self, verdict):
+        original = qr_login.douyin_im.check_login
+        qr_login.douyin_im.check_login = lambda page, mon: dict(verdict)
+        self.addCleanup(setattr, qr_login.douyin_im, "check_login", original)
+
+    def pin_probe_seconds(self, seconds):
+        original = qr_login.LOGIN_PROBE_SECONDS
+        qr_login.LOGIN_PROBE_SECONDS = seconds
+        self.addCleanup(setattr, qr_login, "LOGIN_PROBE_SECONDS", original)
 
     def code_page(self):
         return _FakePage({
@@ -493,7 +561,7 @@ class CodeVerifyTests(unittest.TestCase):
     def test_solve_code_picks_receive_sms_then_fills_and_waits(self):
         session = self.session()
         state = [False]
-        self.pin_logged_in(state)
+        self.pin_login_cookie_state(state)
         page = self.code_page()
 
         def feed():
@@ -534,7 +602,7 @@ class CodeVerifyTests(unittest.TestCase):
 
     def test_solve_code_gives_up_after_max_attempts(self):
         session = self.session()
-        self.pin_logged_in([False])              # 永远不放行
+        self.pin_login_cookie_state([False])              # 永远不放行
         self.pin_verify_seconds(0.05)            # 别真等 60 秒
         page = self.code_page()
 
@@ -560,14 +628,78 @@ class CodeVerifyTests(unittest.TestCase):
 
     def test_wait_for_code_times_out_and_reports_cancel(self):
         session = self.session()
-        self.pin_logged_in([False])
+        self.pin_login_cookie_state([False])
         self.assertIsNone(session._wait_for_code(_FakeCtx(), self.code_page(), 0.05))
         session.cancel()
         self.assertIsNone(session._wait_for_code(_FakeCtx(), self.code_page(), 1.0))
 
+    # ---- 掉登录重扫：那份作废的 sessionid 不许冒充"已经放行" ----
+    def test_wait_for_code_keeps_waiting_with_a_stale_login_cookie(self):
+        """真现场（2026-10-11）：资料目录里躺着上一轮那份 sessionid，名字还在。
+
+        旧的判据 `has_login_cookie`（只看名字）让 `_wait_for_code` 一进这个页面就
+        返回 "" —— 面板上永远看不到输入框，可短信已经真发出去了，几十秒后以
+        `verify_failed` 收场。名字在、值没换，就必须接着等用户填码。
+        """
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        ctx = _ProbeCtx(cookies=stale)
+        session._code_base_sig = qr_login.cookie_utils.login_cookie_signature(stale)
+        self.assertIsNone(session._wait_for_code(ctx, self.code_page(), 0.05),
+                          "同一份旧 cookie 不算放行，要继续等验证码")
+
+    def test_wait_for_code_notices_a_brand_new_login_cookie(self):
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        ctx = _ProbeCtx(cookies=stale)
+        session._code_base_sig = qr_login.cookie_utils.login_cookie_signature(stale)
+        ctx.cookies_now = [{"name": "sessionid", "value": "new"}]
+        self.assertEqual(session._wait_for_code(ctx, self.code_page(), 1.0), "",
+                         "真换了一份新的 → 还没填码也算已经放行")
+
+    def test_await_login_needs_a_new_cookie_or_the_server(self):
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        ctx = _ProbeCtx(cookies=stale)
+        session._code_base_sig = qr_login.cookie_utils.login_cookie_signature(stale)
+        self.pin_check_login({"state": "EXPIRED"})
+        self.pin_probe_seconds(0.05)
+        self.assertFalse(session._await_login(ctx, self.code_page(), 0.05),
+                         "服务端没认、cookie 也没换 → 不能当通过")
+        ctx.cookies_now = [{"name": "sessionid", "value": "new"}]
+        self.assertTrue(session._await_login(ctx, self.code_page(), 1.0))
+
+    def test_await_login_trusts_the_server_when_the_value_stays_the_same(self):
+        """服务端可能就把这一份 cookie 标成已验证、值一个字节都不变。
+
+        那种情况下只有旁路问服务端才问得出来，不然用户明明过了验证码却要重来。
+        """
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        ctx = _ProbeCtx(cookies=stale)
+        session._code_base_sig = qr_login.cookie_utils.login_cookie_signature(stale)
+        self.pin_check_login({"state": "LOGGED_IN", "user_id": "9"})
+        self.assertTrue(session._await_login(ctx, self.code_page(), 1.0))
+
+    def test_solve_code_with_a_stale_cookie_still_asks_for_the_code(self):
+        """端到端：带一份作废的 sessionid 进二次验证，也必须先让用户把码填进来。"""
+        session = self.session()
+        stale = [{"name": "sessionid", "value": "old"}]
+        ctx = _ProbeCtx(cookies=stale)
+        self.pin_check_login({"state": "LOGGED_IN", "user_id": "7"})
+        page = self.code_page()
+
+        def feed():
+            time.sleep(0.05)
+            session.submit_code("4321")
+
+        threading.Thread(target=feed, daemon=True).start()
+        self.assertTrue(session._solve_code(ctx, page))
+        self.assertEqual(page.filled, ["4321"], "先把码填进去，而不是当场假通过")
+
     def test_solve_code_reports_a_timeout_instead_of_hanging(self):
         session = self.session()
-        self.pin_logged_in([False])
+        self.pin_login_cookie_state([False])
         original = qr_login.CODE_WAIT_SECONDS
         qr_login.CODE_WAIT_SECONDS = 0.05
         self.addCleanup(setattr, qr_login, "CODE_WAIT_SECONDS", original)
@@ -855,6 +987,97 @@ class _FakePage:
 class _FakeCtx:
     def cookies(self):
         return []
+
+
+class WatchdogTests(unittest.TestCase):
+    """守夜线程：卡死的会话必须有人收尾（2026-10-17 审计 S1）。
+
+    卡死的典型形态：浏览器停止响应，`page.evaluate` / `ctx.cookies()` 永远不返回
+    （这两个调用没有超时参数），`cancel()` 置的旗它收不到。以前面板只能把会话
+    记录摘掉，于是下一次登录又去抢同一个 user-data-dir（SingletonLock 冲突）。
+    """
+
+    def make(self, **kwargs):
+        kwargs.setdefault("ttl", 0.1)
+        return qr_login.QrLoginSession("/tmp/watchdog-profile", **kwargs)
+
+    def test_a_stuck_session_is_force_killed(self):
+        from unittest import mock
+
+        session = self.make()
+        # 早就过了 TTL + 守夜宽限（宽限本身是分钟级，测试里直接把起点往前挪）
+        session._started_at = time.time() - (qr_login.WATCHDOG_GRACE_SECONDS + 10)
+        killed = []
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=lambda path, **kw: (killed.append(path), 1)[1]):
+            session._start_watchdog()
+            deadline = time.time() + 8
+            while time.time() < deadline and not session._forced:
+                time.sleep(0.2)
+        self.assertTrue(session._forced, "守夜线程没有强制收尾")
+        self.assertEqual(killed, ["/tmp/watchdog-profile"])
+        snap = session.snapshot()
+        self.assertEqual(snap["state"], qr_login.STATE_ERROR)
+        self.assertFalse(snap["active"], "强制收尾之后不许再算进行中")
+        self.assertIn("卡住", snap["message"])
+
+    def test_a_finished_session_is_left_alone(self):
+        from unittest import mock
+
+        session = self.make()
+        session._started_at = time.time() - (qr_login.WATCHDOG_GRACE_SECONDS + 10)
+        session._finished_at = time.time()
+        killed = []
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=lambda path, **kw: killed.append(path)):
+            session._start_watchdog()
+            time.sleep(2.6)
+        self.assertEqual(killed, [], "已经结束的会话不该被强杀")
+        self.assertEqual(session._forced, "")
+
+    def test_cancel_shortens_the_budget(self):
+        """取消之后只等 CANCEL_GRACE_SECONDS，不必等到 TTL + 宽限。"""
+        from unittest import mock
+
+        session = self.make(ttl=3600.0)
+        session._started_at = time.time() - 1
+        session.cancel()
+        self.assertGreater(session._cancel_at, 0.0, "cancel() 要记下时刻")
+        session._cancel_at = time.time() - (qr_login.CANCEL_GRACE_SECONDS + 5)
+        killed = []
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=lambda path, **kw: (killed.append(path), 1)[1]):
+            session._start_watchdog()
+            deadline = time.time() + 8
+            while time.time() < deadline and not session._forced:
+                time.sleep(0.2)
+        self.assertTrue(session._forced)
+        self.assertIn("取消", session._forced)
+
+    def test_kill_failure_does_not_escape(self):
+        """守夜线程自己不许抛：杀进程失败也要把会话置成明确的错误态。"""
+        from unittest import mock
+
+        session = self.make()
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=RuntimeError("boom")):
+            session._force_kill("测试原因")            # 不许抛
+        self.assertEqual(session._forced, "测试原因")
+        self.assertEqual(session.snapshot()["state"], qr_login.STATE_ERROR)
+
+
+class KillProfileProcessesTests(unittest.TestCase):
+    """`core.browser.kill_profile_processes`：按 `--user-data-dir=` 找进程再杀。"""
+
+    def test_an_unknown_profile_is_a_noop(self):
+        from core.browser import kill_profile_processes
+
+        self.assertEqual(kill_profile_processes("/tmp/definitely-not-running-profile"), 0)
+
+    def test_empty_path_is_a_noop(self):
+        from core.browser import kill_profile_processes
+
+        self.assertEqual(kill_profile_processes(""), 0)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # 融合项目设计说明
 
 > 派生自 [2061360308/DouYinSparkFlow](https://github.com/2061360308/DouYinSparkFlow)（下称 **C**，MIT），
-> 叠加 **A** 的限流熔断思路与 **B** 的仪表盘形态，并按本机家庭网络环境（`.172`）做本地化部署改造。
+> 叠加 **A** 的限流熔断思路与 **B** 的仪表盘形态，并按本机家庭网络环境（`本机`）做本地化部署改造。
 
 ## 1. 需求
 
@@ -9,7 +9,7 @@
 
 > 现在请你基于C的基础上进行修改整合成一个融合型项目：在C的基础上解决其"乐观通过"的漏洞，去掉不用的Actions，
 > 添加dry-run，添加A类似的限流关键词熔断，将B的仪表盘融入此融合项目。整合好后检测漏洞并修复，
-> 确保不存在融合后兼容问题后，部署到.172并开启局域网监听。
+> 确保不存在融合后兼容问题后，部署到本机并开启局域网监听。
 
 拆成六项可验收的改动：
 
@@ -20,7 +20,7 @@
 | 3 | 添加 dry-run | 全链路可空跑：不点发送、不落盘、返回结构化结果 |
 | 4 | 添加 A 式限流关键词熔断 | 关键词命中 → 当轮中止 + 冷却 + 结构化上报 |
 | 5 | 融入 B 的仪表盘 | webui 可启动、可登录、能看到运行状态，且**不 import playwright** |
-| 6 | 部署到 `.172` 并开局域网监听 | `0.0.0.0` 监听 + systemd 常驻 + 从 `.224` 能打开页面 |
+| 6 | 部署到 `本机` 并开局域网监听 | `0.0.0.0` 监听 + systemd 常驻 + 从 `.224` 能打开页面 |
 
 ## 2. 基线（改动前实测）
 
@@ -127,7 +127,7 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 - 关键约束：**`webui/` 不得 import `playwright` / `cloakbrowser`**，也不得在 import 期读 `.env` 里的 `TASKS`
   （C 的 `core.tasks` 是模块级快照 `config = get_config()`，import 即求值 —— 仪表盘必须绕开它）。
 
-## 8. 部署形态（`.172`）
+## 8. 部署形态（`本机`）
 
 - 目录 `/opt/douyin-spark-fusion`；`.venv` 独立虚拟环境（不污染系统 Python）。
 - systemd 两个 unit：`douyin-spark-fusion-web.service`（webui 常驻，`0.0.0.0:8xxx`）+
@@ -139,12 +139,12 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 
 | # | 需求 | 状态 | 证据 |
 |---|---|---|---|
-| 1 | 修"乐观通过" | ✅ | 会话选择与登录态两处都改成 fail-closed；`tests/test_strict_verify.py`（31）与 `tests/test_douyin_im.py::SelectionFailClosedTests` / `LoginVerdictVetoTests`（8）钉住；`.172` 实测匿名访客 id 不再被判成"已登录"（整轮从 2 分 2 秒降到 3 秒） |
+| 1 | 修"乐观通过" | ✅ | 会话选择与登录态两处都改成 fail-closed；`tests/test_strict_verify.py`（31）与 `tests/test_douyin_im.py::SelectionFailClosedTests` / `LoginVerdictVetoTests`（8）钉住；`本机` 实测匿名访客 id 不再被判成"已登录"（整轮从 2 分 2 秒降到 3 秒） |
 | 2 | 去掉不用的 Actions | ✅ | `.github/workflows/` 只剩 `build-configtool.yml` 且只有 `workflow_dispatch`；`tests/test_deploy_units.py::WorkflowTriggerTests` 钉住"打 tag 不会自动发布" |
-| 3 | dry-run | ✅ | 三档 `off/select/full`；`.172` 上三档都真机跑过，账本里 `dry_run` 字段可查；`full` 会真输入并读回校验再清空编辑器 |
-| 4 | 限流关键词熔断 | ✅ | `core/limit_guard.py` + `core/quiet_window.py`；`.172` 真机演练过"命中 → 冷却 30 分钟 → 下一轮跳过 → 到期恢复"；空跑不落冷却 |
-| 5 | 融入 B 的仪表盘 | ✅ | `webui/`（FastAPI + 手写 CSS/JS，零外网资源）；48 条单测；`.224` 实测 `http://192.168.15.172:8787` 可登录、可手动触发、可看冷却与日志 |
-| 6 | 部署 `.172` + 局域网监听 | ✅ | `douyin-spark-fusion-web.service` enabled+active 监听 `0.0.0.0:8787`，与 8000 上的既有 `douyin-spark.service` 并存互不影响 |
+| 3 | dry-run | ✅ | 三档 `off/select/full`；`本机` 上三档都真机跑过，账本里 `dry_run` 字段可查；`full` 会真输入并读回校验再清空编辑器 |
+| 4 | 限流关键词熔断 | ✅ | `core/limit_guard.py` + `core/quiet_window.py`；`本机` 真机演练过"命中 → 冷却 30 分钟 → 下一轮跳过 → 到期恢复"；空跑不落冷却 |
+| 5 | 融入 B 的仪表盘 | ✅ | `webui/`（FastAPI + 手写 CSS/JS，零外网资源）；48 条单测；`.224` 实测 `http://192.168.1.100:8787` 可登录、可手动触发、可看冷却与日志 |
+| 6 | 部署 `本机` + 局域网监听 | ✅ | `douyin-spark-fusion-web.service` enabled+active 监听 `0.0.0.0:8787`，与 8000 上的既有 `douyin-spark.service` 并存互不影响 |
 
 自检方式：`netinv/review-report-fusion.md` 里的对抗式审查（F1–F13）。高危/中危已全部修完
 （空跑落冷却、冷却时长死配置、活进程被夺锁、Windows 判活、20:30–20:50 撞车、面板误报成功），
@@ -163,7 +163,7 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 扫码确认后再用 `core.douyin_im.check_login()` **验证服务端认不认这个登录态**
 （不是只看本地有没有 `sessionid` —— 那正是第 1 项要修的漏洞）。
 
-`.172` 实测：`POST /ops/login/start` → 约 7 秒后 `waiting_scan`、二维码 512×512 真 PNG
+`本机` 实测：`POST /ops/login/start` → 约 7 秒后 `waiting_scan`、二维码 512×512 真 PNG
 （`image/png` + `Cache-Control: no-store`），面板里肉眼可扫；取消后 `state=cancelled`，
 浏览器控制台零报错。写盘用 `webui/envfile.py`（与 `configTool/env_store.py` 同一口径），
 在 `.env` **副本**上实测：85 行注释一字未改、原有变量全在、只新增 `COOKIES_<抖音号>`、
@@ -229,7 +229,7 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 **覆盖 23/23，那句备注纯属吓人**。现改为数据驱动：容器数都为 0 → `note` 留空（面板不显示）；
 有值才写"主列表已读完；另有折叠组/陌生人组未包含（N 个分组）"；探不到（页面挂了）仍保守提示。
 
-**真机验收（2026-10-01）**：`netinv\friend_scan_check.py`（在 `.172` 上跑）——
+**真机验收（2026-10-01）**：`netinv\friend_scan_check.py`（在 `本机` 上跑）——
 `opening(0s) → ready(3s) → scanning(6s/9s) → done(12s)`，**读到 23 个会话、
 `scanned_all=True`、其中群聊 4 个、备注为空**；首页渲染 **23 个好友选项**、
 **0 个默认勾选**（还没保存过目标）、**23 个值都带 `uid`/`conv_id`**。
@@ -243,7 +243,7 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 |---|---|---|
 | 移除不生效 | 账号确实已从 `TASKS` 里删掉了（用户那次操作是成功的），但 `logs/runs.jsonl` 里还有它 → `store.account_snapshots()` 第 2 段把"上次运行里出现、配置里没有的账号"又变回一张卡；对着这张**幽灵卡**点移除，`envfile.remove_account()` 只会回 `TASKS 里没有 <uid>` | `AccountSnapshot.orphan`；幽灵卡标「已不在配置里」、不给「移除/重新登录」、不计入汇总；`remove_account` 的失败文案说明"它可能只是上一轮运行记录里的账号" |
 | 错位严重 | 服务端 `StaticFiles` 不发 `Cache-Control`，浏览器按启发式缓存策略**继续用 9 月 19 日的旧 `app.css` 配新 HTML**（新 HTML 用了 `.account-card` 这些新类）。8 种宽度实测 `scrollWidth` 全部等于视口宽、越界元素 0 —— 布局本身没问题 | 静态文件加 `Cache-Control: no-cache`；模板的 `?v=` 换成 `asset_version()`（`app.css`/`app.js` 的 mtime，必须写成 `{{ asset_version() }}`） |
-| 「下次自动触发 12:30」 | 这个数字读 `.env` 的 `TASK_SCHEDULE_TIMES`，而 `.172` 上 `douyin-spark-fusion-daily.timer` 是 **disabled**（`list-timers` 空、`NextElapseUSecRealtime` 空）—— 到点什么都不会发生 | `store.timer_state()` 读 `/etc/systemd/system/**`（启用与否看 `timers.target.wants/` 软链）与单元文件的真实 `OnCalendar`/`RandomizedDelaySec`；没启用画红框「不会自动跑」并给出 enable 命令；时间不一致以单元为准并注明 `.env` 的值 |
+| 「下次自动触发 12:30」 | 这个数字读 `.env` 的 `TASK_SCHEDULE_TIMES`，而 `本机` 上 `douyin-spark-fusion-daily.timer` 是 **disabled**（`list-timers` 空、`NextElapseUSecRealtime` 空）—— 到点什么都不会发生 | `store.timer_state()` 读 `/etc/systemd/system/**`（启用与否看 `timers.target.wants/` 软链）与单元文件的真实 `OnCalendar`/`RandomizedDelaySec`；没启用画红框「不会自动跑」并给出 enable 命令；时间不一致以单元为准并注明 `.env` 的值 |
 | 「本轮结论」数字会变 | 运行记录页复用了首页的 `data-overview-value` 挂点，前端总览轮询按该选择器**全局**覆盖，于是"选中的那一轮"被换成今天合计 | 运行记录页改用 `data-run-value`；`FrontendAgreementTests` 钉住"`data-overview-value` 只出现在首页" |
 | 空跑数字像真发 | `DRY_RUN=select/full` 也走选中/回执流程，"确认成功"照样涨 | 首页标"空跑"角标与说明、账号行追加"上一轮是空跑（…）"，前端文案同步 |
 
@@ -289,7 +289,7 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
 
 1. `inspect_ghost.sh`（只读）：它在 15 轮里的 10 轮、全部位于 `accounts[0]`，形态固定
    （`status=skipped`、`gate=EXPIRED`，07:18 那轮 `TIMEOUT`，`targets=["好友a","好友b"]`）；
-   `.env` 里只剩注释行提到它，没有生效配置；`.172` 上也没有它的资料目录。
+   `.env` 里只剩注释行提到它，没有生效配置；`本机` 上也没有它的资料目录。
 2. `drop_ghost.sh`：先 `cp -a` 备份，再逐行丢掉引用该 uid 的账号条目与 `missing`/`select_failed` 项，
    其余字段原样写回（15 行不动，10 条账号条目消失）。
 3. `annotate_cleaned_rows.sh`：以**清理前的备份**为准，只给当初真的带着它、且已经空掉、
@@ -303,7 +303,7 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
 | 跑完一轮却没有任何账号结果，页面显示绿色「成功」 | 轮次判决只看"有没有失败"，空账号列表既不是失败也不是跳过 | 新增判决「没有账号结果」（`status="empty"`，黄色 chip）；那条猜原因的兜底文案整条删掉 |
 | 每个账号都被门禁拦下（登录失效/掉登录/超时），页面还是绿色「成功」 | 账号级 `skipped` 不影响轮次判决 | 新增判决「账号全被跳过」（`status="blocked"`，要求 `totals["entries"] == 0`）；只要有一个账号真跑了就仍算「成功」 |
 
-真机复验（`.172`）：首页只剩 1 张账号卡（`76998876121`），`12345678905`/「已不在配置里」0 次；
+真机复验（`本机`）：首页只剩 1 张账号卡（`12345678905`），`12345678905`/「已不在配置里」0 次；
 运行记录页 10 行显示「没有账号结果」+ 那句真话，绿色「成功」只剩真正跑过的那一轮
 （15:48:27，`dry_run=select`，`source=webui`）。账本备份留在
 `logs/runs.jsonl.bak-20261001-155909`（原始）与 `.bak-20261001-160018`（删条目后、补注前）。

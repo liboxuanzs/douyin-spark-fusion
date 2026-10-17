@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from configTool import paths
@@ -71,7 +72,12 @@ def load() -> dict:
 
 
 def save(settings) -> None:
-    """整表写回（先写临时文件再替换，避免中途崩掉留下半个文件）。"""
+    """整表写回（先写临时文件再替换，避免中途崩掉留下半个文件）。
+
+    落盘后把权限收到 600（POSIX）：这份文件里有隧道地址、用户名和**明文口令**，
+    以默认 umask 写出来就是 644 —— 同机任何用户都能把它读走，备份/快照也会带上。
+    收紧失败只放过（Windows 上 os.chmod 基本是空操作），不影响保存本身。
+    """
     path = Path(SETTINGS_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -81,7 +87,16 @@ def save(settings) -> None:
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(text, encoding="utf-8")
+    # 中间态里就是明文口令（旧版本崩在这里会留下一个 644 的 .tmp），先收一次
+    try:
+        os.chmod(temp, 0o600)
+    except (OSError, NotImplementedError, AttributeError):
+        pass
     temp.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError, AttributeError):
+        pass
 
 
 def save_proxy(proxy) -> None:

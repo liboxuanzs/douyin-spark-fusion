@@ -25,7 +25,7 @@ if (_ROOT / ".env").exists():
 
 
 def main():
-    from core.browser import get_browser
+    from core.browser import close_context, get_browser
 
     browser = None
     try:
@@ -45,10 +45,10 @@ def main():
         return 1
     finally:
         if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
+            # 必须走 close_context：它会把 playwright 句柄从 _KEEPALIVE 里摘掉并
+            # stop() 那个 node driver。直接 browser.close() 会让句柄永久滞留
+            # （2026-10-17 审计：这正是 driver 泄漏的一个来源）。
+            close_context(browser)
 
 
 if __name__ == "__main__":

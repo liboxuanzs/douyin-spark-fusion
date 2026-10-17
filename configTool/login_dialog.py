@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import queue
 import time
 import tkinter as tk
 from datetime import datetime
@@ -488,9 +489,26 @@ class LoginDialog(tk.Toplevel):
             self._log(f"警告：profiles.json 写入失败（{type(exc).__name__}: {exc}）")
             self._log("  Cookie 仍会回填，但下次打开可能找不到这个配置目录")
 
-        self._done = True
         self._stop_poll()
         self.btn_grab.config(state="normal")
+
+        # ★ 顺序很要紧：先把 Cookie 交给主窗口落盘，**确认写进 .env 了**才显示
+        #   「已登录 ✔」并自动关窗。以前是先显示成功、再调 on_saved（异常只降级成
+        #   一行日志），于是写盘失败时用户看到的是「✔ 完成」，1.2 秒后窗口自动关闭
+        #   —— 这次抓到的 Cookie 白抓，浏览器也白开。
+        if not self._notify_saved():
+            self._done = False       # 没真正完成：关窗时要照常弹「未保存」确认
+            self._grabbed = False    # 允许再点一次「立即抓取」重试
+            self.var_login.set("已登录，但保存失败")
+            self.btn_grab.config(state="normal")
+            self._set_status(
+                "抓到了登录信息，但没能写入 .env —— 请看下方日志，处理后再点『立即抓取』",
+                RED,
+            )
+            self._log("本次不自动关窗：没有保存成功，现在关掉会丢掉这次抓到的 Cookie")
+            return
+
+        self._done = True
         self.var_login.set("已登录 ✔")
         self._set_status(
             f"✔ 完成：{self.account.username or unique_id} · {len(cookies)} 项 Cookie",
@@ -499,16 +517,29 @@ class LoginDialog(tk.Toplevel):
         if not saved:
             self._set_status(f"✔ 完成，但配置目录记录失败 · {len(cookies)} 项 Cookie", AMBER)
 
-        if self.on_saved and not self._notified:
-            self._notified = True
-            try:
-                self.on_saved(self.account, self.mode)
-            except Exception as exc:
-                self._log(f"回填到主窗口时出错：{type(exc).__name__}: {exc}")
-
         if self.auto_close and not self._auto_close_job:
             self._log("窗口即将自动关闭")
             self._auto_close_job = self.after(AUTO_CLOSE_DELAY_MS, self._auto_close)
+
+    def _notify_saved(self) -> bool:
+        """把抓到的账号信息交给主窗口落盘，返回是否**真的**保存成功。
+
+        约定：回调返回 False = 没写进 .env（主窗口自己已经弹窗 / 写过状态栏），
+        抛异常同样算失败；老回调不写返回值（None）时按成功处理，保持兼容。
+        失败会把 `_notified` 复位，用户再点一次「立即抓取」就能重试回填。
+        """
+        if self.on_saved is None or self._notified:
+            return True
+        self._notified = True          # 先置位，防重入时重复写盘
+        try:
+            result = self.on_saved(self.account, self.mode)
+        except Exception as exc:
+            self._log(f"回填到主窗口时出错：{type(exc).__name__}: {exc}")
+            result = False
+        if result is False:
+            self._notified = False     # 允许重试
+            return False
+        return True
 
     def _retry(self, title: str, detail: str) -> None:
         """抓取结果不合格：回到等待状态，允许下一次自动重试。"""
@@ -535,12 +566,18 @@ class LoginDialog(tk.Toplevel):
 
     # ------------------------------------------------------------------ 事件泵
     def _pump(self) -> None:
-        try:
-            while True:
+        while True:
+            try:
                 kind, payload = self.worker.events.get_nowait()
+            except queue.Empty:
+                break
+            # 事件已经出队了：`_handle` 再抛异常也不能当成"泵空了"处理 ——
+            # 以前两者共用一个 except Exception，抓取结果（grabbed）会被静默丢掉，
+            # 窗口就一直停在"等待登录"上，用户看到的是"抓取按钮点了没反应"。
+            try:
                 self._handle(kind, payload)
-        except Exception:
-            pass
+            except Exception as exc:
+                self._log(f"处理事件 {kind} 出错：{type(exc).__name__}: {exc}")
         if not self._closing:
             self.after(120, self._pump)
 
@@ -610,6 +647,11 @@ class LoginDialog(tk.Toplevel):
         if self.worker.is_alive() and ticks < 60:
             self.after(100, lambda: self._wait_and_destroy(ticks + 1))
         else:
+            if self.worker.is_alive():
+                # 等满 6 秒还没收干净：destroy 只是关掉窗口，工作线程和浏览器进程
+                # 还在后台收尾（最坏是变成孤儿进程）。先说一声，别让用户以为已经
+                # 关完了 —— 后面想再登录时那个 profile 目录可能还锁着。
+                self._log("浏览器可能仍在关闭中（后台还在收尾）—— 稍等一下它就会退出")
             try:
                 self.grab_release()
             except Exception:

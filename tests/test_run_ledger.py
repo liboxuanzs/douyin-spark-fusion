@@ -202,6 +202,37 @@ class LockTests(_TempFiles):
             self.assertEqual(rl.lock_info(path=self.lock)["token"], lk.token)
             lk.release()
 
+    def test_alive_but_stuck_lock_is_taken_over(self):
+        """持锁进程"还活着"，但已经超过 STUCK_LOCK_SECONDS → 当卡死处理，夺锁。
+
+        没有这一支时的真实后果：面板某条线程卡住（或 pid 被复用）→ 之后每次敲门
+        都被 RunLocked 拒掉，而 **timer 源被拒时不写账本** → 面板"最近运行"一片
+        正常，实际整天一个好友都没发，只能人工登机器 rm 锁。
+        """
+        with open(self.lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "token": "stuck",
+                       "started_at": iso(now() - timedelta(hours=7))}, f)
+        info = rl.lock_info(path=self.lock)
+        self.assertTrue(info["pid_alive"])
+        self.assertTrue(info["stale"])
+        self.assertEqual(info["stale_reason"], "alive_too_long")
+        lk = rl.RunLock(path=self.lock)
+        lk.acquire()
+        self.assertEqual(rl.lock_info(path=self.lock)["token"], lk.token)
+        lk.release()
+
+    def test_alive_and_busy_lock_is_respected(self):
+        """真跑得久（多账号 × 多目标）不算残留 —— 上限之内一律放行。"""
+        with open(self.lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "token": "busy",
+                       "started_at": iso(now() - timedelta(hours=5))}, f)
+        info = rl.lock_info(path=self.lock)
+        self.assertFalse(info["stale"])
+        self.assertEqual(info["stale_reason"], "alive")
+        self.assertFalse(rl.lock_info(path=self.lock)["stale"])
+        with self.assertRaises(rl.RunLocked):
+            rl.RunLock(path=self.lock).acquire()
+
     def test_undeterminable_pid_falls_back_to_age_rule(self):
         """`os.kill(pid, 0)` 判断不了时必须保守：只有超时才敢当残留。"""
         with open(self.lock, "w", encoding="utf-8") as f:
@@ -371,6 +402,96 @@ class RunSourceTests(unittest.TestCase):
         self.assertEqual(
             (rl.SOURCE_CLI, rl.SOURCE_TIMER, rl.SOURCE_WEBUI), ("cli", "timer", "webui")
         )
+
+
+class LedgerAppendDurabilityTests(_TempFiles):
+    """append_run 的两条写盘契约：写前补尾换行、写完 fsync（审计项：低）。
+
+    没有这两条时的真实后果：
+    - 不补尾换行：崩溃/断电留下半行后，下一次 append 会**接在断行后面**，两条记录
+      粘成一行 → read_runs 按坏行跳过，两条一起丢。表现为"这一天明明发过、账本上
+      没有"，而面板的"最近运行"和冷却判定都读这个文件。
+    - 不 fsync：那条记录可能还躺在页缓存里，断电同样表现成"发过了但账本没有"。
+    """
+
+    def test_partial_tail_line_does_not_glue_the_next_record(self):
+        # 模拟"上一次写到一半就挂了"：是合法 JSON，但没有结尾换行
+        with open(self.ledger, "w", encoding="utf-8") as f:
+            f.write(json.dumps(_rec(run_id="A")))
+        self.assertTrue(rl.append_run(_rec(run_id="B"), path=self.ledger))
+        self.assertEqual(
+            [r["run_id"] for r in rl.read_runs(path=self.ledger)], ["B", "A"]
+        )
+
+    def test_normal_append_does_not_add_blank_lines(self):
+        rl.append_run(_rec(run_id="A"), path=self.ledger)
+        rl.append_run(_rec(run_id="B"), path=self.ledger)
+        with open(self.ledger, "rb") as f:
+            raw = f.read()
+        self.assertEqual(raw.count(b"\n"), 2, raw)
+        self.assertNotIn(b"\n\n", raw)
+
+    def test_tail_is_newline_helper(self):
+        with open(self.ledger, "wb") as f:
+            f.write(b"")                      # 空文件：没什么可补的
+        with open(self.ledger, "rb") as f:
+            self.assertTrue(rl._tail_is_newline(f))
+        with open(self.ledger, "wb") as f:
+            f.write(b"x")
+        with open(self.ledger, "rb") as f:
+            self.assertFalse(rl._tail_is_newline(f))
+        with open(self.ledger, "wb") as f:
+            f.write(b"x\n")
+        with open(self.ledger, "rb") as f:
+            self.assertTrue(rl._tail_is_newline(f))
+
+    def test_append_run_fsyncs_the_record(self):
+        real_fsync = os.fsync
+        seen = []
+
+        def spy(fd):
+            seen.append(fd)
+            return real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", spy):
+            self.assertTrue(rl.append_run(_rec(run_id="S"), path=self.ledger))
+        self.assertTrue(seen, "append_run 必须 flush + fsync：不落盘的话断电就丢这一条")
+        self.assertEqual([r["run_id"] for r in rl.read_runs(path=self.ledger)], ["S"])
+
+
+class DefaultPathTests(unittest.TestCase):
+    """账本 / 运行锁的默认路径必须锚到**仓库根**（审计项：中）。
+
+    默认值以前是相对 CWD 的 "logs/runs.jsonl"：从别的目录执行
+    `python /opt/douyin-spark-fusion/main.py task` 时锁会落到那个目录里，等于
+    **没有锁** —— 定时任务与手动触发可能同时开两个浏览器发同一个账号（重复发送）。
+    `.env.example` 里写的承诺就是"相对路径按仓库根解析"。
+    """
+
+    def setUp(self):
+        self.root = os.path.dirname(os.path.dirname(os.path.abspath(rl.__file__)))
+
+    def _env(self, **extra):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("RUN_LEDGER_FILE", "RUN_LOCK_FILE")}
+        env.update(extra)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_defaults_are_absolute_under_the_repo_root(self):
+        with self._env():
+            self.assertEqual(rl.ledger_path(),
+                             os.path.join(self.root, "logs", "runs.jsonl"))
+            self.assertEqual(rl.lock_path(),
+                             os.path.join(self.root, "logs", "run.lock"))
+
+    def test_relative_env_value_is_resolved_against_the_repo_root(self):
+        with self._env(RUN_LEDGER_FILE="logs/x.jsonl", RUN_LOCK_FILE="tmp/run.lock"):
+            self.assertEqual(rl.ledger_path(), os.path.join(self.root, "logs", "x.jsonl"))
+            self.assertEqual(rl.lock_path(), os.path.join(self.root, "tmp", "run.lock"))
+
+    def test_absolute_env_value_is_kept(self):
+        with self._env(RUN_LEDGER_FILE="/var/log/x.jsonl"):
+            self.assertEqual(rl.ledger_path(), "/var/log/x.jsonl")
 
 
 if __name__ == "__main__":

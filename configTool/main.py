@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
@@ -146,6 +147,11 @@ class ConfigApp:
         folder_notes = self._attach_profile_folders()
 
         self._save_job = None
+        # 关窗流程的重入闸门：_on_close 里要跑一小段事件循环等子窗口收尾，
+        # 期间用户再点一次关闭会重入，那会把"是否仍然退出"问两遍。
+        self._closing = False
+        # 当前开着的登录窗口（同一时刻只允许一个：两个窗口会抢同一个 profile 目录）
+        self._login_dialog = None
         self._loading = True
         self._syncing = False
         self._current_index = 0
@@ -381,7 +387,9 @@ class ConfigApp:
         self.var_proxy = tk.StringVar()
         ttk.Entry(form, textvariable=self.var_proxy, font=FONT_UI).pack(fill="x")
 
-        label("执行时间", "仅 Docker 部署有效；写入 .env 时会拆成 CRON_HOUR / MINUTE / SECOND")
+        label("执行时间", "写入 .env 时同时给出两个键：TASK_SCHEDULE_TIMES（程序内决定每个账号几点发，"
+                          "秒会被丢掉 —— 调度刻度是 5 分钟）与 CRON_HOUR / MINUTE / SECOND"
+                          "（仅 Docker 部署用，systemd 部署下这三个键无效）")
         time_row = ttk.Frame(form)
         time_row.pack(fill="x")
         self.var_hour = tk.StringVar()
@@ -856,7 +864,13 @@ class ConfigApp:
             self.root.after_cancel(self._save_job)
         self._save_job = self.root.after(AUTOSAVE_DELAY_MS, lambda: self.save_now())
 
-    def save_now(self, force: bool = False) -> None:
+    def save_now(self, force: bool = False) -> bool:
+        """把界面上的配置写进 .env（本工具唯一的写盘入口）。
+
+        返回值：True = 真的写成功了；False = 没写成（原因已经写进 save_var，
+        force=True 时还会弹窗）。login_dialog 就是靠这个返回值决定要不要显示
+        「已登录 ✔」并自动关窗 —— 以前它拿不到任何信号，写盘失败也照显示成功。
+        """
         if self._save_job is not None:
             try:
                 self.root.after_cancel(self._save_job)
@@ -865,7 +879,9 @@ class ConfigApp:
             self._save_job = None
 
         if self._loading:
-            return
+            # 界面还在载入，这时候写下去只会把空值覆盖到用户配置上
+            self.save_var.set("配置还在载入中，暂时不能保存")
+            return False
 
         self.collect_from_ui()
         try:
@@ -874,9 +890,11 @@ class ConfigApp:
             self.save_var.set(f"保存失败：{type(exc).__name__}: {exc}")
             if force:
                 messagebox.showerror("保存失败", f"{type(exc).__name__}: {exc}")
-            return
+            return False
 
-        # 抓取代理单独落本地设置文件（.env 是给主程序的，别把工具私有配置混进去）
+        # 抓取代理单独落本地设置文件（.env 是给主程序的，别把工具私有配置混进去）。
+        # 它失败**不影响** .env 已经写成功这件事（Cookie 已经安全落盘），所以只提示，
+        # 不改返回值 —— 否则登录窗口会以为白抓了，把已经写好的结果报成失败。
         try:
             local_settings.save_proxy(self.proxy_settings)
         except Exception as exc:
@@ -897,6 +915,7 @@ class ConfigApp:
 
         if force:
             self._set_message(f"已写入 {self.env_path.name}")
+        return True
 
     # ------------------------------------------------------------ 预览与校验
     def _refresh_preview(self) -> None:
@@ -1106,10 +1125,25 @@ class ConfigApp:
 
     def _open_login_dialog(self, account: Account, mode: str = "add") -> None:
         taken = [item.unique_id for item in self.config.accounts if item.unique_id.strip()]
+        # 同一时刻只允许一个登录窗口：两个窗口会去抢同一个 profile 目录，而一个
+        # Chrome 的 user-data-dir 只能被一个实例打开 —— 后开的那个要么起不来，
+        # 要么把先开的挤掉（用户看到的是"浏览器莫名其妙没了"）。
+        # 已经开着就把它提到前面来，而不是再开一个。
+        existing = self._login_dialog
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    self._set_message("登录窗口已经开着 —— 请在那个窗口里完成登录")
+                    return
+            except Exception:
+                pass
+            self._login_dialog = None
         self.collect_from_ui()  # 用界面上最新的隧道配置，别用上次保存的
         try:
             # 不需要模态：浏览器窗口本来就是独立的，用户也可以同时回主界面看别的账号
-            LoginDialog(
+            self._login_dialog = LoginDialog(
                 self.root,
                 account,
                 on_saved=self._on_login_saved,
@@ -1118,10 +1152,15 @@ class ConfigApp:
                 proxy=self.proxy_settings,
             )
         except Exception as exc:
+            self._login_dialog = None
             messagebox.showerror("打不开登录窗口", f"{type(exc).__name__}: {exc}")
 
-    def _on_login_saved(self, account: Account, mode: str = "add") -> None:
-        """登录窗口抓到信息后回到这里：更新列表、写 .env、刷新界面。"""
+    def _on_login_saved(self, account: Account, mode: str = "add") -> bool:
+        """登录窗口抓到信息后回到这里：更新列表、写 .env、刷新界面。
+
+        返回值交给登录窗口：False 表示**没写进 .env**，它据此拒绝显示「已登录 ✔」
+        并取消自动关窗（否则写盘失败时用户看到的是成功，1.2 秒后 Cookie 白抓）。
+        """
         self.profile_index = profile_store.load()
 
         # 刷新模式：对象本来就在列表里，原地更新即可
@@ -1161,7 +1200,9 @@ class ConfigApp:
 
         self._refresh_account_tree(select=index)
         self._refresh_validation()
-        self.save_now()
+        # force=True：这是「刚抓到的 Cookie 立刻落盘」的关键路径，失败必须让用户
+        # 当场看见（弹窗 + 状态栏），返回值再交给登录窗口决定要不要报成功。
+        return self.save_now(force=True)
 
     # -------------------------------------------------------------- 拉取会话列表
     def on_fetch_conversations(self) -> None:
@@ -1409,12 +1450,75 @@ class ConfigApp:
 
     # ------------------------------------------------------------------ 关闭
     def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+
+        # 兜底保存：以前是 `except Exception: pass` —— 写盘失败时窗口照关，
+        # 用户以为存上了。现在失败必须问一句，由用户决定要不要带着未保存的改动退出。
+        saved = True
         try:
             if self._save_job is not None:
-                self.save_now()
-        except Exception:
-            pass
+                saved = self.save_now()
+        except Exception as exc:
+            saved = False
+            self.save_var.set(f"保存失败：{type(exc).__name__}: {exc}")
+        if not saved:
+            quit_anyway = messagebox.askyesno(
+                "配置没有保存成功",
+                f"{self.save_var.get()}\n\n"
+                "仍然要退出吗？\n"
+                "选「否」回到界面处理完再关（这次的改动，以及刚抓到的 Cookie，都会丢）。",
+                parent=self.root,
+            )
+            if not quit_anyway:
+                self._closing = False
+                return
+
+        # 关掉还开着的子对话框（登录窗口 / 会话列表）：它们各自持有浏览器 worker，
+        # 直接销毁主窗口会让 worker 卡在最长 180 秒的 page.goto 里 —— 浏览器变成
+        # 孤儿进程，profile 目录还留着 SingletonLock，下次登录直接打不开。
+        self._shutdown_child_windows()
         self.root.destroy()
+
+    def _shutdown_child_windows(self, grace_seconds: float = 3.0) -> None:
+        """让实现了 `_shutdown` 的子窗口自己收尾（发 shutdown 关浏览器），再宽限几秒。
+
+        `_shutdown` 是异步的（把命令丢给 worker，再用 after 轮询等它退出），所以
+        这里必须跑一小段事件循环，否则我们会先于它们退出，等于没关。
+        """
+        try:
+            children = list(self.root.winfo_children())
+        except Exception:
+            children = []
+        pending = []
+        for child in children:
+            shutdown = getattr(child, "_shutdown", None)
+            if not callable(shutdown):
+                continue
+            pending.append(child)
+            try:
+                shutdown()
+            except Exception:
+                continue
+        if not pending:
+            return
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        while time.monotonic() < deadline:
+            if not any(self._window_alive(child) for child in pending):
+                return
+            try:
+                self.root.update()  # 让子窗口的 after / 轮询回调继续跑
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    @staticmethod
+    def _window_alive(window) -> bool:
+        try:
+            return bool(window.winfo_exists())
+        except Exception:
+            return False
 
 
 def main() -> None:

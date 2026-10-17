@@ -38,13 +38,42 @@ STALE_LOCK_SECONDS = 2 * 60 * 60
 #: 真正在写的进程几毫秒就写完了，30 秒足够区分「正在写」和「死在那里」。
 CORRUPT_LOCK_GRACE_SECONDS = 30.0
 
+#: 「持锁进程还活着」但锁已经这么老 → 按**卡死**处理（当作残留锁夺过来）。
+#:
+#: 正常一轮有明确上界：定时器轮由 systemd 的 `TimeoutStartSec=3600` 掐掉，
+#: 面板轮就算多账号 × 多目标，也不过"目标数 ×（发送间隔 + 单步超时）"，
+#: 一小时出头。远超过这个上界还活着，几乎只有两种可能：
+#:   * webui 那条 daemon 线程卡在某个没有单步超时的调用上再也不动（面板没有
+#:     "取消这一轮"的入口，锁于是永不释放）；
+#:   * 锁里的 pid 被别的长命进程复用了（小机器上 Chromium 起落频繁）。
+#: 两者的表现完全一样：此后每次敲门都被 RunLocked 拒掉，而 **timer 源被拒时
+#: 连账本都不写**（见 core/tasks._skip），面板"最近运行"一片正常，实际整天
+#: 一个好友都没发 —— 只能靠人工登机器 rm 锁。给一个远大于合法轮次的上限，
+#: 让下一个门铃自愈。
+STUCK_LOCK_SECONDS = 6 * 60 * 60
+
 
 def ledger_path():
-    return os.getenv("RUN_LEDGER_FILE", os.path.join("logs", "runs.jsonl"))
+    """账本路径。相对路径按**仓库根**解析（与 .env.example 的口径一致）。
+
+    按 CWD 解析的代价：`WorkingDirectory=`、`cd /app`、以及"在别处执行
+    `python /opt/douyin-spark-fusion/main.py task`"三种起法会各自写一份账本，
+    面板"最近运行"就会漏掉命令行跑的那几轮。
+    """
+    from utils.config import resolve_path  # 函数内 import：避免 import 期耦合
+
+    return resolve_path(os.getenv("RUN_LEDGER_FILE", os.path.join("logs", "runs.jsonl")))
 
 
 def lock_path():
-    return os.getenv("RUN_LOCK_FILE", os.path.join("logs", "run.lock"))
+    """运行锁路径。与 `ledger_path()` 同订：相对路径按仓库根解析。
+
+    ★ 这条是**正确性**问题，不只是"文件散落"：锁落到别处等于没有锁，
+    定时任务与手动触发可能同时开两个浏览器发同一个账号（重复发送）。
+    """
+    from utils.config import resolve_path
+
+    return resolve_path(os.getenv("RUN_LOCK_FILE", os.path.join("logs", "run.lock")))
 
 
 # ---- 触发来源 ---------------------------------------------------------------
@@ -77,17 +106,42 @@ def _ensure_dir(path):
 
 # ---- 写 -------------------------------------------------------------------
 
+def _tail_is_newline(f) -> bool:
+    """文件当前最后一个字节是不是 `\\n`（空文件 / 读不到 = True）。"""
+    try:
+        if f.seek(0, os.SEEK_END) <= 0:
+            return True
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) == b"\n"
+    except OSError:  # pragma: no cover - 读不动就当作"是"，别挡住追加
+        return True
+
+
 def append_run(record, path=None):
     """追加一轮记录。写失败**不抛**：账本写不进去不能反过来让整轮任务失败。"""
     path = path or ledger_path()
     try:
         _ensure_dir(path)
-        with open(path, "a", encoding="utf-8") as f:
+        with open(path, "a+b") as f:
+            # 先确保**最后一行以 \n 结尾**再追加：上一轮如果被 SIGKILL / 断电
+            # 砍在半行上，直接 append 会把两条记录拼成一行 —— 那一行 JSON 解析
+            # 失败，于是**两条**历史一起变成坏行被 read_runs 丢掉（丢的不只是
+            # 那半条）。先补一个换行，半条留在原地当坏行，新记录仍是好记录。
+            if not _tail_is_newline(f):
+                f.write(b"\n")
             # default=str：万一条目里混进 datetime/time 这类不可序列化的东西，
             # 降级成字符串写下去，而不是抛 TypeError 把整轮任务的收尾炸掉
             # （2026-10-01 真机验证时正撞上：禁跑窗口的记录里带了个 time 元组，
             #  任务已经跑完了，却因为写账本失败把记录整个丢掉）。
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write((json.dumps(record, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+            # flush + fsync：账本只在**每轮收尾**写一次，代价可以忽略；不落盘的话
+            # 机器掉电/被硬关时这一轮的记录会随页缓存一起消失，面板的"最近运行"
+            # 与限流冷却的追溯就断档了。fsync 失败不当作写失败（数据已进内核）。
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:  # pragma: no cover - 某些文件系统不支持 fsync
+                pass
         return True
     except (OSError, ValueError, TypeError):
         # ValueError：路径里带 NUL 之类（Windows 上还会碰见非法字符）时
@@ -227,21 +281,27 @@ def lock_info(now_dt=None, path=None):
     started = parse_iso(rec.get("started_at"))
     age = (at - started).total_seconds() if started else None
     alive = _pid_alive(rec.get("pid"))
+    reason = None
     if alive is False:
-        stale = True
+        stale, reason = True, "dead_pid"
+    elif alive is True and age is not None and age > STUCK_LOCK_SECONDS:
+        # 活着的进程**通常**不该被判残留（见下面那一支的注释），但"还活着"也有
+        # 两种：真在跑，以及 pid 被复用 / 面板那条线程卡死了。超过 STUCK_LOCK_SECONDS
+        # 就归到后者 —— 否则整套发送会静默停摆到有人登机器 rm 锁为止。
+        stale, reason = True, "alive_too_long"
     elif alive is True:
         # 进程确实活着 —— 跑了多久都不是残留。**这一支必须排在按时间判断之前**：
         # 一场多账号 × 多目标、间隔 8~20 秒的真跑超过 2 小时很现实，
         # 若按时间判成残留，第二个进程会把锁删掉并夺锁 —— 同账号两个 Chromium
-        # 同时登录会互踢，正是本项目最怕的事故。进程卡死时请人工 kill。
-        stale = False
+        # 同时登录会互踢，正是本项目最怕的事故。（上限见 STUCK_LOCK_SECONDS）
+        stale, reason = False, "alive"
     elif age is None:
-        stale = False        # 时间读不出来 → 保守当作"还在跑"
+        stale, reason = False, "unknown_age"   # 时间读不出来 → 保守当作"还在跑"
     else:
-        stale = age > STALE_LOCK_SECONDS
+        stale, reason = age > STALE_LOCK_SECONDS, "age"
     out = dict(rec)
     out.update({"age_seconds": int(age) if age is not None else None,
-                "pid_alive": alive, "stale": bool(stale)})
+                "pid_alive": alive, "stale": bool(stale), "stale_reason": reason})
     return out
 
 
@@ -257,11 +317,17 @@ class RunLock:
     两个浏览器就同时开起来了。
     """
 
-    def __init__(self, source="cli", dry_run="off", path=None, run_id=None):
+    def __init__(self, source="cli", dry_run="off", path=None, run_id=None,
+                 accounts=None):
         self.path = path or lock_path()
         self.source = source
         self.dry_run = dry_run
         self.run_id = run_id
+        #: 这一轮要处理哪些账号。**只是给人看的元信息，不参与互斥** —— 互斥永远只靠
+        #  O_EXCL + token；面板读它来判断"派发器正在动这个账号"，见 `webui/app.py` 的
+        #  `_dispatcher_accounts()`（2026-10-17 审计：面板登录/扫描与派发器之间原本
+        #  没有账号级互斥，同一个账号能被两只 Chromium 同时打开）。
+        self.accounts = [str(a).strip() for a in (accounts or []) if str(a or "").strip()]
         self.token = uuid.uuid4().hex
         self.acquired = False
         self.record = None
@@ -272,7 +338,8 @@ class RunLock:
                "started_at": iso(now()), "started_ts": time.time(),
                "source": self.source, "dry_run": self.dry_run,
                # run_id 只是给人看的：仪表盘拿它跟账本对上；锁的互斥性只靠 O_EXCL + token
-               "run_id": self.run_id}
+               "run_id": self.run_id,
+               "accounts": self.accounts}
         for attempt in (1, 2):
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)

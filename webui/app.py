@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -44,6 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from webui import auth, config, envfile, logtail, password, settings, store, viewmodel
+from core import maintenance
 
 __all__ = ["build_context", "create_app", "run_once", "start_run_thread"]
 
@@ -75,7 +77,7 @@ def normalize_dry_run(value) -> str:
 # 缺浏览器依赖时的统一中文说明（HTTP 503）。
 BROWSER_MISSING_HINT = (
     "本机未安装 cloakbrowser / playwright，无法执行任务。"
-    "请在部署机（.172）的 .venv 里安装依赖后重试；"
+    "请在部署机（本机）的 .venv 里安装依赖后重试；"
     "仪表盘的查看类功能不受影响。"
 )
 
@@ -668,15 +670,41 @@ def _safe_next(value: str) -> str:
     return text
 
 
-#: 口令连续失败计数：{来源 IP: [连续失败次数, 罚站结束时刻]}。
+#: 口令连续失败计数：{来源 IP: [连续失败次数, 罚站结束时刻, 最后一次记账时刻]}。
 #:
 #: 为什么要罚站：面板是**单进程**，`/login` 每验一次口令要跑 480000 轮 PBKDF2
 #: （见 `webui/password.py`），并发打几次就能把这个进程占满 —— 面板连不上事小，
 #: 正在跑的那一轮发消息被拖慢事大。内存记账就够：进程重启本来就要重新登录。
+#:
+#: 记账本身也必须有上界，否则"换 IP 猜口令"就是一条内存泄漏（旧版按 IP 只增不减）。
+#: 现在三层一起管：
+#:   * 表最多记 `_LOGIN_FAIL_TRACK_MAX` 个来源，超了淘汰"最久没更新"的那些；
+#:   * 罚站一到期就不再拦人（`_login_wait_left` 立刻回 0），一条记账在
+#:     `_LOGIN_FAIL_FORGET` 秒没有新动静后整个删掉；
+#:   * 另加**全局限流**：所有来源合计一分钟内失败超过 `_LOGIN_FAIL_GLOBAL_MAX`
+#:     次就整体拒一小会儿（换 IP 也绕不过去），按 IP 那一层只拦得住单个来源。
 _LOGIN_FAILS: Dict[str, list] = {}
 _LOGIN_FAIL_LIMIT = 5            # 连错几次开始罚站
 _LOGIN_FAIL_BASE = 30.0          # 首次罚站秒数，之后每多错一次翻倍
 _LOGIN_FAIL_MAX = 300.0          # 罚站上限
+#: 最多同时跟踪多少个来源 IP。512 个：正常运维（家里 + 公司 + 手机 + 内网反代）
+#: 连零头都用不到，而每条记账只有三个数字（几十字节），512 条撑死几十 KB；
+#: 再多就说明有人在换 IP 扫 —— 那时候该优先保住的是面板自己的响应。
+_LOGIN_FAIL_TRACK_MAX = 512
+#: 一条记账多久没有新动静就整个删掉（秒）。10 分钟：比最长罚站（5 分钟）长一倍，
+#: 所以"罚站刚过又接着输错"仍然会记账累加、罚站翻倍，而早就走人的来源不会一直占着表。
+_LOGIN_FAIL_FORGET = 600.0
+#: 全局限流：所有来源合计每分钟最多认多少次失败。
+#: 30 次/分钟：正常运维一天也输错不了这么多（真忘了口令是去改 `.env`，不是撞 30 次），
+#: 而攻击者哪怕换 IP 也只有 30 次/分钟的试错额度 —— 每轮 480000 轮 PBKDF2 之下，
+#: 这点额度对暴力破解毫无意义，又不会把"自己多试几次"变成锁死。
+_LOGIN_FAIL_GLOBAL_MAX = 30
+_LOGIN_FAIL_GLOBAL_WINDOW = 60.0
+#: 最近一分钟内的失败时刻（单调钟），只留窗口内的那几次。
+_LOGIN_FAIL_TIMES: List[float] = []
+#: `/login` 是普通 `def` 路由，FastAPI 把它放进线程池跑 —— 上面几张表会被多个
+#: 线程同时改，所以自己配一把锁（这里没有 await，用普通锁就够）。
+_LOGIN_FAILS_LOCK = threading.Lock()
 
 
 def _login_key(request: Request) -> str:
@@ -685,26 +713,111 @@ def _login_key(request: Request) -> str:
     return str(getattr(client, "host", "") or "?")
 
 
+def _prune_login_fails_locked(now: float) -> None:
+    """删掉"罚站已过期且很久没动静"的记账（调用方必须持 `_LOGIN_FAILS_LOCK`）。"""
+    for key, entry in list(_LOGIN_FAILS.items()):
+        try:
+            until = float(entry[1])
+            touched = float(entry[2])
+        except (IndexError, TypeError, ValueError):              # 记账坏了就当过期
+            until = touched = 0.0
+        if until <= now and now - touched > _LOGIN_FAIL_FORGET:
+            _LOGIN_FAILS.pop(key, None)
+
+
+def _trim_login_fails_locked() -> None:
+    """表超过上界就按"最久没更新"淘汰（调用方必须持锁）。
+
+    淘汰的必须是"最久没更新"而不是"最早开始罚站"的：正在扫的那个来源刚刚
+    记过账，本来就应该留在表里（它正被罚站），先出局的该是早就没动静的那些。
+    """
+    extra = len(_LOGIN_FAILS) - _LOGIN_FAIL_TRACK_MAX
+    if extra <= 0:
+        return
+    victims = sorted(_LOGIN_FAILS, key=lambda key: _LOGIN_FAILS[key][2])[:extra]
+    for key in victims:
+        _LOGIN_FAILS.pop(key, None)
+    _log(
+        f"口令失败的来源 IP 太多（超过 {_LOGIN_FAIL_TRACK_MAX} 个），"
+        f"按「最久没更新」淘汰了 {len(victims)} 个，腾出记账空间"
+    )
+
+
+def _forget_old_fail_times_locked(now: float) -> None:
+    """只留限流窗口内的失败时刻（调用方必须持锁）。"""
+    cutoff = now - _LOGIN_FAIL_GLOBAL_WINDOW
+    while _LOGIN_FAIL_TIMES and _LOGIN_FAIL_TIMES[0] <= cutoff:
+        _LOGIN_FAIL_TIMES.pop(0)
+
+
 def _login_wait_left(request: Request) -> float:
-    """还要罚站多少秒（0 = 可以试）。"""
-    entry = _LOGIN_FAILS.get(_login_key(request))
+    """这个来源还要罚站多少秒（0 = 可以试）。"""
+    now = time.monotonic()
+    key = _login_key(request)
+    with _LOGIN_FAILS_LOCK:
+        _prune_login_fails_locked(now)
+        entry = _LOGIN_FAILS.get(key)
     if not entry:
         return 0.0
-    return max(0.0, float(entry[1]) - time.monotonic())
+    return max(0.0, float(entry[1]) - now)
+
+
+def _login_global_wait_left() -> float:
+    """全局限流还要等多少秒才放行（0 = 现在可以试）。
+
+    与按 IP 罚站的区别：那一层只拦单个来源，换个 IP 就能接着猜；这一层算的是
+    **所有来源合计**的失败次数，换 IP 也绕不过去。它给的是"稍后再试"而不是
+    "谁被锁死"：窗口一滑过去就自动恢复，不需要任何人干预。
+    """
+    now = time.monotonic()
+    with _LOGIN_FAILS_LOCK:
+        _forget_old_fail_times_locked(now)
+        if len(_LOGIN_FAIL_TIMES) < _LOGIN_FAIL_GLOBAL_MAX:
+            return 0.0
+        return max(0.0, _LOGIN_FAIL_GLOBAL_WINDOW - (now - _LOGIN_FAIL_TIMES[0]))
 
 
 def _note_login_fail(request: Request) -> None:
     """记一次口令失败；连错到额度就开始罚站，越错越久。"""
+    now = time.monotonic()
     key = _login_key(request)
-    entry = _LOGIN_FAILS.setdefault(key, [0, 0.0])
-    entry[0] = int(entry[0]) + 1
-    if entry[0] >= _LOGIN_FAIL_LIMIT:
-        entry[1] = time.monotonic() + min(
-            _LOGIN_FAIL_MAX, _LOGIN_FAIL_BASE * (2 ** (entry[0] - _LOGIN_FAIL_LIMIT)))
+    with _LOGIN_FAILS_LOCK:
+        _prune_login_fails_locked(now)
+        entry = _LOGIN_FAILS.get(key)
+        if not entry:
+            entry = [0, 0.0, now]
+            _LOGIN_FAILS[key] = entry
+        entry[0] = int(entry[0]) + 1
+        entry[2] = now
+        count = int(entry[0])
+        wait = 0.0
+        if count >= _LOGIN_FAIL_LIMIT:
+            wait = min(
+                _LOGIN_FAIL_MAX, _LOGIN_FAIL_BASE * (2 ** (count - _LOGIN_FAIL_LIMIT)))
+            entry[1] = now + wait
+        _LOGIN_FAIL_TIMES.append(now)
+        _forget_old_fail_times_locked(now)
+        recent = len(_LOGIN_FAIL_TIMES)
+        _trim_login_fails_locked()
+    # 日志里只有来源、次数、秒数 —— 绝不记口令原文或哈希。全局限流封顶 30 次/分钟，
+    # 所以这行日志本身也不会被失败请求刷爆。
+    if wait > 0:
+        _log(f"口令连续失败：来源 {key} 已经错了 {count} 次，罚站 {int(wait)} 秒")
+    else:
+        _log(f"口令失败：来源 {key} 累计错了 {count} 次"
+             f"（连错 {_LOGIN_FAIL_LIMIT} 次开始罚站）")
+    if recent >= _LOGIN_FAIL_GLOBAL_MAX:
+        _log(
+            f"一分钟内口令失败的次数已经达到全局限流上限（{recent} 次，来源 {key} 的"
+            f"这次也在内），接下来 {int(_LOGIN_FAIL_GLOBAL_WINDOW)} 秒内所有来源的"
+            f"口令尝试都会被拒绝 —— 大概率是有人在撞口令，不是运维手滑"
+        )
 
 
 def _clear_login_fail(request: Request) -> None:
-    _LOGIN_FAILS.pop(_login_key(request), None)
+    with _LOGIN_FAILS_LOCK:
+        _LOGIN_FAILS.pop(_login_key(request), None)
+    _log(f"口令验证通过，清掉来源 {_login_key(request)} 的失败记账")
 
 
 def require_login(request: Request) -> Optional[Response]:
@@ -755,6 +868,8 @@ def password_panel_state() -> Dict[str, Any]:
         "auth_mode": auth_mode,
         "inline": bool(mode) and mode == envfile.PASSWORD_MODE_PLAIN,
         "session_hours": round(config.session_max_age() / 3600, 1),
+        "session_seconds": config.session_max_age(),
+        "session_text": config.session_max_age_text(),
         "secret_configured": config.session_secret_configured(),
         "min_length": password.MIN_LENGTH,
         "max_length": password.MAX_LENGTH,
@@ -855,6 +970,15 @@ def wants_html(request: Request) -> bool:
     return "text/html" in accept
 
 
+def _form_flag(value: Any) -> bool:
+    """表单里的开关：``1/true/on/yes`` 算开，其余（含空、``0``）算关。
+
+    ★ 默认必须是**关**：`apply` 这类字段直接决定"删不删文件"，参数丢了/写错时
+    只能更保守，绝不能因为解析成真值就把东西删了。
+    """
+    return str(value or "").strip().lower() in ("1", "true", "on", "yes")
+
+
 def redirect_with(
     request: Request, *, path: str = "/", anchor: str = "", **params: str
 ) -> RedirectResponse:
@@ -875,6 +999,157 @@ _LOGIN_LATEST = ""
 _LOGIN_KEEP = 3
 #: 会话多久没有任何动静就当成卡死（正常会话每次推进都会刷新 updated_at）。
 SESSION_STUCK_SECONDS = 20 * 60
+#: "占位会话"多久算卡死（秒）。它代表的那次浏览器启动正常是秒级的事，
+#: 2 分钟还没返回就说明启动线程死在半路了 —— 那时候必须把占位撤掉，
+#: 否则这个账号会被一条永远 active 的记录锁住（比旧版的"资料目录永久损坏"好一点，
+#: 但仍然是"永远忙"的假状态）。
+START_STUCK_SECONDS = 120.0
+
+
+class _StartingSession:
+    """占位会话：浏览器还在启动（秒级），但**资料目录已经先被占住**。
+
+    为什么要有这个东西 —— 这是一个真实的 TOCTOU：旧写法是「在 `_LOGIN_LOCK` 里查忙 →
+    出锁调用 `qr_login.start_session()`（内部真的拉起 Chromium，耗时以秒计）→ 最后才登记
+    进 `_LOGIN_SESSIONS`」。双击（或开两个标签页）时第二个请求会落在那段"还没登记"的窗口里，
+    忙检查放它过去，于是**同一份** `logs/login-profile/<uid>/` 被第二个 Chromium 抢：
+    抢不到的那个抛 `SingletonLock`，而它已经创建的 context 再也没有引用，那个资料目录
+    从此再也打不开，只能人工去删目录。
+
+    修法就是"先占位、再启动"：忙检查和占位登记在**同一把锁**里完成，占位对象进会话表
+    （所以 `_profile_in_use` / `_reap_stuck_sessions` / 忙检查都看得见它），出锁才去启动
+    浏览器。启动成功就把同一个 key 换成真会话（双击的第二个请求在占位期间就已经被拒了），
+    失败/异常/用户取消/等待超时都会把这个占位撤掉。占位只实现"会话表需要的那几个成员"，
+    和真会话一样能过 `snapshot()` / `cancel()`。
+    """
+
+    #: 超过这个时长还没被换成真会话就当卡死（`_reap_stuck_sessions` 会认这个属性）。
+    STUCK_AFTER_SECONDS = START_STUCK_SECONDS
+
+    def __init__(self, *, profile_dir: Any, owner: str = "", fingerprint: str = "",
+                 kind: str = "login") -> None:
+        now = time.time()
+        self.profile_dir = str(profile_dir)
+        self.adopt_dir = ""
+        self.owner = str(owner or "")
+        self.fingerprint = str(fingerprint or "")
+        self.kind = str(kind or "login")
+        self.cancelled = False
+        self.started_at = now
+        self._updated = now
+        self._message = "正在启动浏览器（要几秒）……"
+
+    def note(self, message: str = "") -> None:
+        """记一句进展/失败原因并刷新 `updated_at`（避免被判卡死）。"""
+        self._updated = time.time()
+        if message:
+            self._message = str(message)
+
+    def snapshot(self) -> Dict[str, Any]:
+        """给面板看的快照：字段与真会话的取同一批名字，缺的都留空/假值。"""
+        now = time.time()
+        return {
+            "id": "",
+            "state": "starting",
+            "state_label": "正在启动浏览器",
+            "message": self._message,
+            "hint": "",
+            "error": "",
+            "has_qr": False,
+            "qr_seq": 0,
+            "active": True,
+            "started_at": self.started_at,
+            "updated_at": self._updated,
+            "finished_at": 0.0,
+            "age_seconds": int(max(0.0, now - self.started_at)),
+            "profile_dir": self.profile_dir,
+            "adopt_dir": self.adopt_dir,
+            "owner": self.owner,
+            "account": {"unique_id": self.owner} if self.owner else {},
+            "persist": False,
+            "need_code": False,
+            "code_tries": 0,
+            "code_max_attempts": 0,
+            "code_error": "",
+            "code_text": "",
+            "code_options": [],
+            "has_shot": False,
+            "shot_seq": 0,
+            "scanned_all": 0,
+            "truncated": False,
+            "groups": [],
+            "note": self._message,
+            "count": 0,
+            "steps": [],
+            "visited": 0,
+        }
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.note("已取消")
+
+    def items(self) -> List[Any]:
+        return []
+
+    def qr_png(self) -> bytes:
+        return b""
+
+    def shot_png(self) -> bytes:
+        return b""
+
+
+def _busy_login_error(owner: str = "") -> str:
+    """双击/多标签页时第二个请求看到的中文原因（路由会把它当 409 返回）。"""
+    who = str(owner or "").strip() or "(默认)"
+    return (
+        f"该账号的扫码登录正在进行中（{who}）"
+        f"：已经有一次扫码登录在进行，先等它结束或点「取消」"
+    )
+
+
+def _busy_friend_error(owner: str = "") -> str:
+    who = str(owner or "").strip() or "(默认)"
+    return (
+        f"该账号的好友列表读取正在进行中（{who}）"
+        f"：已经有一次好友列表读取在进行，先等它结束或点「停止」"
+    )
+
+
+def _claim_start_slot(
+    sessions: Dict[str, Any],
+    lock: threading.Lock,
+    placeholder: "_StartingSession",
+    *,
+    busy_error,
+) -> tuple:
+    """在**忙检查的同一把锁**里把占位登记进会话表；返回 `(session_id, error)`。
+
+    这是缺陷 1 的核心：忙检查和登记必须原子。任何"检查完再出锁去启动"的写法都会
+    留下第二个请求能钻的窗口。失败时 `session_id` 为空字符串、`error` 是给用户的
+    中文原因（由 `busy_error` 生成，保留各自既有的文案前缀）。
+    """
+    with lock:
+        busy = next(
+            (item for item in sessions.values() if item.snapshot().get("active")), None
+        )
+        if busy is not None:
+            try:
+                snap = busy.snapshot()
+            except Exception:  # noqa: BLE001
+                snap = {}
+            owner = str(snap.get("owner") or snap.get("account") or "")
+            return "", busy_error(owner)
+        session_id = uuid.uuid4().hex[:12]
+        sessions[session_id] = placeholder
+    return session_id, ""
+
+
+def _drop_claim(sessions: Dict[str, Any], lock: threading.Lock, session_id: str) -> bool:
+    """撤掉占位（启动失败、被取消、被判卡死时都要走这里）；返回是否真的撤掉了。"""
+    if not session_id:
+        return False
+    with lock:
+        return sessions.pop(session_id, None) is not None
 
 
 def login_profile_dir(unique_id: str = "") -> Path:
@@ -941,9 +1216,89 @@ def _profile_in_use(path: Any, *, skip_login: str = "", skip_friend: str = "") -
     return ""
 
 
+def _dispatcher_accounts() -> set:
+    """派发器当前这一轮正在处理哪些账号（没在跑 / 读不到锁 → 空集合）。
+
+    ★ 2026-10-17 审计：面板的扫码登录/读好友列表 与 派发器发送之间原本**没有**
+    账号级互斥 —— 同一个账号能被两只 Chromium 同时打开（两份设备指纹、同一个资料
+    目录），登录成功还会在派发器跑着的时候把 `.env` 里的 cookie 换掉。这里做"看得
+    见"的那半边：派发器把本轮账号写进运行锁（`core.run_ledger.RunLock(accounts=…)`），
+    面板起会话前先查一遍。
+    """
+    try:
+        state = store.read_lock()
+    except Exception:                                    # noqa: BLE001 - 读不到就放行
+        return set()
+    if not state.running:
+        return set()
+    return {str(x) for x in (getattr(state, "accounts", None) or []) if str(x).strip()}
+
+
+def _dispatcher_blocks(unique_id: str) -> str:
+    """派发器正在处理这个账号？返回人话原因（不忙返回空串）。"""
+    uid = str(unique_id or "").strip()
+    if not uid:
+        return ""
+    if uid in _dispatcher_accounts():
+        return ("派发器正在跑这个账号（同一个资料目录不能开两只浏览器），"
+                "等这一轮结束再试")
+    return ""
+
+
+def _panel_busy_reason() -> str:
+    """面板上有没有正在进行的扫码/读好友会话？有就别让派发器起跑。
+
+    与 `_dispatcher_accounts()` 是同一件事的两半：反方向也要拦，否则"先点扫码、
+    再点立即运行"照样能撞上同一个账号。
+    """
+    for sessions, lock, what in ((_LOGIN_SESSIONS, _LOGIN_LOCK, "扫码登录"),
+                                 (_FRIEND_SESSIONS, _FRIEND_LOCK, "读取好友列表")):
+        with lock:
+            items = list(sessions.values())
+        for item in items:
+            snap = item.snapshot() if hasattr(item, "snapshot") else {}
+            if snap.get("active"):
+                return (f"面板上有正在进行的{what}，等它结束再跑"
+                        "（同一个账号不能开两只浏览器）")
+    return ""
+
+
 def _latest_session():
     with _LOGIN_LOCK:
         return _LOGIN_SESSIONS.get(_LOGIN_LATEST)
+
+
+def _latest_login_slot() -> tuple:
+    """最新那个扫码会话的 `(key, 会话)`；没有则 `(None, None)`。
+
+    取消时要知道 key：占位会话要连占位一起撤掉，光 `cancel()` 会让账号继续"忙"。
+    """
+    with _LOGIN_LOCK:
+        return _LOGIN_LATEST, _LOGIN_SESSIONS.get(_LOGIN_LATEST)
+
+
+def _profile_still_locked(item: Any) -> bool:
+    """会话卡死了，但它占着的资料目录是不是**真的**还被浏览器锁着？
+
+    `cancel()` 只是置旗：卡在 `page.evaluate` 里的线程收不到（2026-10-17 审计）。
+    注册表一旦被 pop，`_profile_in_use` 立刻认为目录空闲，下一次登录就会对同一个
+    user-data-dir 再起一只 Chromium（SingletonLock 抢不到 → 用户看到"浏览器启动
+    失败"）。真正收尾靠会话自己的守夜线程，这里只判断"能不能动它"。
+    """
+    try:
+        snap = item.snapshot() if hasattr(item, "snapshot") else {}
+        dirs = [snap.get("profile_dir"), snap.get("adopt_dir")]
+    except Exception:                                    # noqa: BLE001
+        return False
+    for raw in dirs:
+        if not raw:
+            continue
+        try:
+            if maintenance.profile_in_use(raw):
+                return True
+        except Exception:                                # noqa: BLE001 - 判不了就不拦
+            continue
+    return False
 
 
 def _reap_stuck_sessions(
@@ -966,9 +1321,25 @@ def _reap_stuck_sessions(
                 snap = {}
             if not snap.get("active"):
                 continue
+            # 占位会话（浏览器还在启动）自带更短的期限：秒级的启动不该拖到 20 分钟。
+            limit = SESSION_STUCK_SECONDS
+            own_limit = getattr(item, "STUCK_AFTER_SECONDS", None)
+            if own_limit:
+                try:
+                    limit = min(limit, float(own_limit))
+                except (TypeError, ValueError):  # pragma: no cover - 定义写坏了就当没有
+                    pass
             updated = float(snap.get("updated_at") or 0)
             idle = (now - updated) if updated else float(snap.get("age_seconds") or 0)
-            if idle < SESSION_STUCK_SECONDS:
+            if idle < limit:
+                continue
+            if _profile_still_locked(item):
+                # 卡死的是面板这条线程，但浏览器**真的还活着**、还占着那个资料目录。
+                # 先不动它（动了会让下一次登录去抢同一个目录），等守夜线程收尾。
+                _log(
+                    f"{label}会话 {key} 已经 {int(idle)} 秒没有动静，"
+                    f"但它占用的资料目录还被浏览器锁着，先不动它（等它自己收尾）"
+                )
                 continue
             try:
                 item.cancel()
@@ -1095,7 +1466,7 @@ def _requeue_after_relogin(unique_id: str) -> Dict[str, Any]:
 
     为什么需要它：登录失效那一轮记的是 `status=error`（见 `core/tasks.py`），
     而时间表把"失败"也算办过（当天不再重试，否则坏 cookie 一天被门铃踹 288 次）。
-    于是重新扫码登录之后，人还得手动点「立即运行」才会补发 —— 2026-10-09 wheat
+    于是重新扫码登录之后，人还得手动点「立即运行」才会补发 —— 2026-10-09 示例号
     掉登录那次就是丢在这里。登录成功的瞬间把今天的记账撤掉，下一个 5 分钟门铃
     就会补上；**今天已经成功发过的账号绝不撤**（撤了就变成一天发两遍）。
     """
@@ -1121,14 +1492,31 @@ def _requeue_after_relogin(unique_id: str) -> Dict[str, Any]:
                     sent_today = True
             except (TypeError, ValueError):
                 sent_today = True      # 读不懂就当发过：宁可不补发，也不能补出双份
+    # ★ 账本和状态文件是**两次写**：收尾时先写状态、后追加账本，中间被
+    #   SIGKILL/OOM/重启打断，就成了"状态里有今天、账本里没有"。只看账本会把
+    #   这种情况误判成「今天没跑过」（no-run-today），于是既不撤账也不补发 ——
+    #   当天火花静默丢失。所以状态文件也要看一眼（两个都看，宁可不补发）。
+    try:
+        mark = schedule.entry_for(schedule.load_state(), uid, when=schedule.now())
+    except Exception:  # noqa: BLE001 —— 状态文件读不了就只看账本
+        mark = None
+    if isinstance(mark, dict):
+        seen_today = True
+        if str(mark.get("status") or "") == schedule.STATUS_OK:
+            sent_today = True
     if sent_today:
         return {"requeued": False, "reason": "already-sent"}
     if not seen_today:
         return {"requeued": False, "reason": "no-run-today"}
     try:
+        # 这里是**跨进程**改状态文件：不能整体覆盖。sender 可能正跑着这一轮，
+        # 它手里那份快照是几分钟前读的，收尾时会合并写一遍 —— 所以撤账要写成
+        # `skipped` 墓碑（带撤销时刻）再按时间戳合并，sender 才会认输；
+        # 直接删掉的话文件里没有时间戳可比，它会把 error 记录原样写回，
+        # 当天火花再次静默丢失（2026-10-09 示例号 走的正是这条路径）。
         state = schedule.load_state()
-        changed = schedule.clear_mark(state, uid, when=schedule.now())
-        saved = schedule.save_state(state) if changed else False
+        changed = schedule.retract_mark(state, uid, when=schedule.now())
+        saved = schedule.save_marks(state, [uid]) if changed else False
     except Exception as exc:  # noqa: BLE001
         return {"requeued": False, "reason": f"{type(exc).__name__}: {exc}"}
     return {"requeued": bool(changed), "saved": bool(saved),
@@ -1146,20 +1534,13 @@ def start_login_session(
 
     # 先清掉卡死的旧会话，否则下面两条"正在进行"的判断会把账号永久锁死。
     _forget_old_sessions()
-    with _LOGIN_LOCK:
-        busy = next(
-            (item for item in _LOGIN_SESSIONS.values() if item.snapshot().get("active")), None
-        )
-    if busy is not None:
-        return {"ok": False, "error": "已经有一次扫码登录在进行，先等它结束或点「取消」"}
+
+    # 派发器正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
+    blocked = _dispatcher_blocks(unique_id)
+    if blocked:
+        return {"ok": False, "error": blocked}
 
     profile = login_profile_dir(unique_id)
-    occupied = _profile_in_use(profile)
-    if occupied:
-        return {
-            "ok": False,
-            "error": f"{occupied}（同一个浏览器资料目录只能开一个），先等它结束再来",
-        }
 
     def on_success(result: Dict[str, Any]) -> Dict[str, Any]:
         account = result.get("account") or {}
@@ -1206,35 +1587,95 @@ def start_login_session(
             "requeue": requeue,
         }
 
-    try:
-        ttl = float(os.getenv("QR_LOGIN_TTL_SECONDS", "") or qr_login.DEFAULT_TTL_SECONDS)
-    except ValueError:
-        ttl = qr_login.DEFAULT_TTL_SECONDS
-
-    try:
-        session = qr_login.start_session(
-            login_profile_dir(unique_id),
-            fingerprint=str(fingerprint or "").strip(),
-            ttl=ttl,
-            on_success=on_success,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"启动扫码登录失败：{type(exc).__name__}: {exc}"}
-
+    # 缺陷 1：占位与忙检查必须在同一把锁里完成 —— 出锁之后才开始启动浏览器，
+    # 双击的第二个请求因此在占位期间就被明确拒绝（409 + 中文原因），不会再去抢
+    # 同一份资料目录。
+    claim = _StartingSession(
+        profile_dir=profile, owner=str(unique_id or "").strip(),
+        fingerprint=str(fingerprint or "").strip(), kind="login",
+    )
+    session_id, busy_error = _claim_start_slot(
+        _LOGIN_SESSIONS, _LOGIN_LOCK, claim, busy_error=_busy_login_error
+    )
+    if busy_error:
+        return {"ok": False, "error": busy_error}
     global _LOGIN_LATEST
-    session_id = uuid.uuid4().hex[:12]
     with _LOGIN_LOCK:
-        _LOGIN_SESSIONS[session_id] = session
         _LOGIN_LATEST = session_id
+
+    try:
+        # 占位自己占着 profile，所以查"资料目录被占"时要跳过它自己。
+        occupied = _profile_in_use(profile, skip_login=session_id)
+        if occupied:
+            _drop_claim(_LOGIN_SESSIONS, _LOGIN_LOCK, session_id)
+            return {
+                "ok": False,
+                "error": f"{occupied}（同一个浏览器资料目录只能开一个），先等它结束再来",
+            }
+
+        try:
+            ttl = float(os.getenv("QR_LOGIN_TTL_SECONDS", "") or qr_login.DEFAULT_TTL_SECONDS)
+            if math.isnan(ttl) or math.isinf(ttl) or ttl <= 0:
+                # 裸 float 能过 `1e999`（= inf）和 `nan`，而这两个值拿去当会话 TTL
+                # 会让"什么时候回收这个会话"永远算不出来 —— 面板上表现为会话不回收
+                # 或立刻过期。写成垃圾值就回落默认，别让它变成 500。
+                raise ValueError(f"不是有限正数：{ttl!r}")
+        except (TypeError, ValueError):
+            ttl = qr_login.DEFAULT_TTL_SECONDS
+
+        try:
+            session = qr_login.start_session(
+                login_profile_dir(unique_id),
+                fingerprint=str(fingerprint or "").strip(),
+                ttl=ttl,
+                on_success=on_success,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 启动失败：把占位撤掉再报错，否则这个账号会一直显示"正在进行"。
+            _drop_claim(_LOGIN_SESSIONS, _LOGIN_LOCK, session_id)
+            _log(f"启动扫码登录失败，已撤回占位：session={session_id} profile={profile}")
+            return {"ok": False, "error": f"启动扫码登录失败：{type(exc).__name__}: {exc}"}
+
+        with _LOGIN_LOCK:
+            still_ours = _LOGIN_SESSIONS.get(session_id) is claim
+            if still_ours:
+                # 同一个 key 换成真会话：占位期间的那次 id 依然有效，而忙检查
+                # 继续拦着后来的人，直到这次登录真的结束。
+                _LOGIN_SESSIONS[session_id] = session
+        if not still_ours:
+            # 占位已经被撤（用户点了取消，或等待超时被判卡死）—— 刚起来的浏览器
+            # 必须关掉，否则就是"没人看着的 Chromium 抓着资料目录"。
+            try:
+                session.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            _log(f"扫码会话的占位已经被撤，关掉刚启动的浏览器：session={session_id}")
+            return {
+                "ok": False,
+                "error": "这次扫码登录已经被取消（或等待太久被当成卡死清理），"
+                         "刚起来的浏览器已经关掉，请重新发起",
+            }
+    except Exception:
+        # 兜底：任何没预料到的异常都不能让占位留在表里（"永远忙"的假状态）。
+        _drop_claim(_LOGIN_SESSIONS, _LOGIN_LOCK, session_id)
+        raise
+
     _forget_old_sessions()
     _log(f"发起扫码登录：session={session_id} profile={session.profile_dir}")
     return {"ok": True, "session": session_id}
 
 
 def cancel_login_session() -> Dict[str, Any]:
-    session = _latest_session()
+    session_id, session = _latest_login_slot()
     if session is None or not session.snapshot().get("active"):
         return {"ok": False, "error": "当前没有正在进行的扫码登录"}
+    if isinstance(session, _StartingSession):
+        # 占位：取消要连占位一起撤掉 —— 只 cancel() 的话，忙检查仍然会看到它 active，
+        # 于是这个账号在浏览器启动完成之前一直"取消不掉"。
+        _drop_claim(_LOGIN_SESSIONS, _LOGIN_LOCK, session_id)
+        session.cancel()
+        _log(f"取消扫码登录（浏览器还在启动，占位已撤）：session={session_id}")
+        return {"ok": True}
     session.cancel()
     return {"ok": True}
 
@@ -1446,54 +1887,96 @@ def start_friend_scan(*, unique_id: str = "", fingerprint: str = "",
 
     # 同扫码登录：先清掉卡死的旧会话，别让账号被一条永远 active 的记录锁住。
     _forget_old_friend_sessions()
-    with _FRIEND_LOCK:
-        busy = next(
-            (item for item in _FRIEND_SESSIONS.values() if item.snapshot().get("active")), None
-        )
-    if busy is not None:
-        owner = busy.snapshot().get("owner") or "(默认)"
-        return {"ok": False, "error": f"已经有一次好友列表读取在进行（账号 {owner}），先等它结束或点「停止」"}
+
+    # 派发器正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
+    blocked = _dispatcher_blocks(unique_id)
+    if blocked:
+        return {"ok": False, "error": blocked}
 
     profile = login_profile_dir(unique_id)
-    occupied = _profile_in_use(profile)
-    if occupied:
-        return {
-            "ok": False,
-            "error": f"{occupied}（同一个浏览器资料目录只能开一个），先等它结束再来",
-        }
-
-    try:
-        limit = float(
-            timeout if timeout is not None
-            else (os.getenv("FRIEND_SCAN_TIMEOUT_SECONDS", "") or friend_scan.DEFAULT_TIMEOUT_SECONDS)
-        )
-    except (TypeError, ValueError):
-        limit = friend_scan.DEFAULT_TIMEOUT_SECONDS
-
-    try:
-        session = friend_scan.start_session(
-            login_profile_dir(unique_id),
-            fingerprint=str(fingerprint or "").strip(),
-            timeout=limit,
-            owner=str(unique_id or ""),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"启动好友列表读取失败：{type(exc).__name__}: {exc}"}
-
+    # 缺陷 1（好友列表这一侧同构）：占位与忙检查在同一把锁里完成，出锁才启动浏览器。
+    # 否则双击两次"读取好友列表"会拿同一份 logs/login-profile/<uid>/ 去开两个 Chromium。
+    claim = _StartingSession(
+        profile_dir=profile, owner=str(unique_id or "").strip(),
+        fingerprint=str(fingerprint or "").strip(), kind="friend",
+    )
+    session_id, busy_error = _claim_start_slot(
+        _FRIEND_SESSIONS, _FRIEND_LOCK, claim, busy_error=_busy_friend_error
+    )
+    if busy_error:
+        return {"ok": False, "error": busy_error}
     global _FRIEND_LATEST
-    session_id = uuid.uuid4().hex[:12]
     with _FRIEND_LOCK:
-        _FRIEND_SESSIONS[session_id] = session
         _FRIEND_LATEST = session_id
+
+    try:
+        # 占位自己占着 profile，所以查"资料目录被占"时要跳过它自己。
+        occupied = _profile_in_use(profile, skip_friend=session_id)
+        if occupied:
+            _drop_claim(_FRIEND_SESSIONS, _FRIEND_LOCK, session_id)
+            return {
+                "ok": False,
+                "error": f"{occupied}（同一个浏览器资料目录只能开一个），先等它结束再来",
+            }
+
+        try:
+            limit = float(
+                timeout if timeout is not None
+                else (os.getenv("FRIEND_SCAN_TIMEOUT_SECONDS", "") or friend_scan.DEFAULT_TIMEOUT_SECONDS)
+            )
+        except (TypeError, ValueError):
+            limit = friend_scan.DEFAULT_TIMEOUT_SECONDS
+
+        try:
+            session = friend_scan.start_session(
+                login_profile_dir(unique_id),
+                fingerprint=str(fingerprint or "").strip(),
+                timeout=limit,
+                owner=str(unique_id or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 启动失败：撤占位再报错，不能让这个账号一直显示"正在读取"。
+            _drop_claim(_FRIEND_SESSIONS, _FRIEND_LOCK, session_id)
+            _log(f"启动好友列表读取失败，已撤回占位：session={session_id} profile={profile}")
+            return {"ok": False, "error": f"启动好友列表读取失败：{type(exc).__name__}: {exc}"}
+
+        with _FRIEND_LOCK:
+            still_ours = _FRIEND_SESSIONS.get(session_id) is claim
+            if still_ours:
+                # 同一个 key 换成真会话：忙检查继续拦着后来的人，直到这次读取结束。
+                _FRIEND_SESSIONS[session_id] = session
+        if not still_ours:
+            # 占位已经被撤（点了「停止」，或等待超时被判卡死）—— 关掉刚起来的浏览器。
+            try:
+                session.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            _log(f"好友列表读取的占位已经被撤，关掉刚启动的浏览器：session={session_id}")
+            return {
+                "ok": False,
+                "error": "这次好友列表读取已经被停止（或等待太久被当成卡死清理），"
+                         "刚起来的浏览器已经关掉，请重新发起",
+            }
+    except Exception:
+        # 兜底：任何没预料到的异常都不能让占位留在表里（"永远忙"的假状态）。
+        _drop_claim(_FRIEND_SESSIONS, _FRIEND_LOCK, session_id)
+        raise
+
     _forget_old_friend_sessions()
     _log(f"发起好友列表读取：session={session_id} 账号={unique_id or '(默认)'} profile={session.profile_dir}")
     return {"ok": True, "session": session_id, "owner": str(unique_id or "")}
 
 
 def cancel_friend_scan() -> Dict[str, Any]:
-    _, session = _latest_friend_session()
+    session_id, session = _latest_friend_session()
     if session is None or not session.snapshot().get("active"):
         return {"ok": False, "error": "当前没有正在进行的读取"}
+    if isinstance(session, _StartingSession):
+        # 占位：连占位一起撤掉，否则浏览器启动完成之前这个账号一直"停不掉"。
+        _drop_claim(_FRIEND_SESSIONS, _FRIEND_LOCK, session_id)
+        session.cancel()
+        _log(f"停止好友列表读取（浏览器还在启动，占位已撤）：session={session_id}")
+        return {"ok": True}
     session.cancel()
     return {"ok": True}
 
@@ -1617,6 +2100,29 @@ def create_app() -> FastAPI:
                                        error=f"口令连续输错，请 {int(wait) + 1} 秒后再试",
                                        next_url=next_url),
                 status_code=429,
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
+        # 全局限流：按 IP 那一层换个 IP 就绕过去了，这一层算的是**所有来源合计**的
+        # 失败次数 —— 撞口令的人换 IP 也没用。给的是"稍后再试"而不是"谁被锁死"：
+        # 窗口一滑过去就自动恢复，正常运维输错几次根本碰不到这个上限。
+        global_wait = _login_global_wait_left()
+        if global_wait > 0:
+            seconds = int(global_wait) + 1
+            _log(
+                f"口令尝试被全局限流挡下（来源 {_login_key(request)}）："
+                f"一分钟内失败次数已达上限 {_LOGIN_FAIL_GLOBAL_MAX}，请 {seconds} 秒后再试"
+            )
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context=_login_context(
+                    request,
+                    error=f"最近一分钟口令输错的次数太多，请 {seconds} 秒后再试"
+                          f"（全局限流：所有来源合计每分钟最多 {_LOGIN_FAIL_GLOBAL_MAX} 次失败）",
+                    next_url=next_url,
+                ),
+                status_code=429,
+                headers={"Retry-After": str(seconds)},
             )
         if not _check_password(password_field):
             _note_login_fail(request)
@@ -1636,6 +2142,10 @@ def create_app() -> FastAPI:
         if not _csrf_ok(request):
             return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
         response = RedirectResponse(url="/login", status_code=303)
+        # ★ 先吊销再删 cookie：token 是无状态的，只删 cookie 等于"这台浏览器
+        #   不带了"，复制走同一份 cookie 的人在有效期内照样能进。这里把 token
+        #   记进进程内黑名单（`auth.is_revoked`），删 cookie 只是顺手清理。
+        auth.revoke_token(request.cookies.get(config.session_cookie_name()))
         response.delete_cookie(config.session_cookie_name(), path="/")
         return response
 
@@ -1787,6 +2297,10 @@ def create_app() -> FastAPI:
                 },
                 status_code=409,
             )
+
+        busy = _panel_busy_reason()
+        if busy:
+            return fail(busy, 409)
 
         lock = store.read_lock()
         if lock.running:
@@ -1971,7 +2485,7 @@ def create_app() -> FastAPI:
 
         # 勾选列表是**整表覆盖**：这次没勾上的旧目标会被删掉。先记下原来有哪些，
         # 保存后把"删掉了谁"一并写进提示 —— 否则用户只看到"已保存 N 个"，
-        # 少掉的目标要到下一轮发送时才发现（2026-10-11 wheat 就是这样少过 2 个）。
+        # 少掉的目标要到下一轮发送时才发现（2026-10-11 示例号 就是这样少过 2 个）。
         before = _target_labels(unique_id)
         # 两种来源：勾选列表（每个 value 是一小段 JSON）优先，其次是旧的手填文本。
         items = parse_picked(picked)
@@ -2135,6 +2649,109 @@ def create_app() -> FastAPI:
             return redirect_with(request, path="/", error=result.get("error") or "停止失败")
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
+    # ---- 磁盘与资料目录（只读盘点 + 手动清理，默认只预演） ----------------------
+
+    @app.get("/api/ops/maintenance")
+    def api_ops_maintenance(request: Request) -> Response:
+        """「磁盘与资料目录」区块：面板**展开时**拉一次，不轮询。
+
+        刻意不并进首页渲染：`core.maintenance.profile_report()` 会把每个资料目录
+        递归走一遍（线上两个目录就一千多 MB、几万个缓存文件），并进首页等于每次
+        翻页都白扫一遍盘。用户点了才付这份钱。
+        """
+        if current_user(request) is None:
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        try:
+            store.refresh_env()          # 面板可能刚改过 .env，名单要按最新的读
+        except Exception:  # noqa: BLE001
+            pass
+        tasks, _tasks_error = store.read_tasks_env()
+        # 昵称只是给人看的（目录名是抖音号，光看号认不出是谁）；名单的**权威**判定
+        # 在 core.maintenance.known_ids() 里，读不到它会返回 ok=False。
+        names = {
+            str(item.get("unique_id") or ""): str(item.get("username") or "")
+            for item in tasks
+            if str(item.get("unique_id") or "")
+        }
+        payload = viewmodel.maintenance_view(names=names)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.post("/ops/maintenance/caches")
+    def ops_maintenance_caches(request: Request, apply: str = Form("0")) -> Response:
+        """清**可再生缓存**（`Cache` / `Code Cache` / `GPUCache` …）。
+
+        安全线全在 `core.maintenance`：只删白名单里的目录/文件，绝不动
+        `Cookies` / `Local Storage` / `Local State`；在跑的资料目录跳过；
+        **账号名单读不到时一个都不删**（返回 ok=False）。`apply` 默认 "0" = 只预演。
+        """
+        as_html = wants_html(request)
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        try:
+            store.refresh_env()
+        except Exception:  # noqa: BLE001
+            pass
+        # 名单读不到时 known_ids() 会把错误带出来，prune_caches 见到错误直接空手而归
+        # —— 这里不再自己判断，避免出现"两套安全线"。
+        payload = viewmodel.prune_view(
+            maintenance.prune_caches(apply=_form_flag(apply)), what="缓存"
+        )
+        if as_html:
+            if payload.get("ok"):
+                return redirect_with(
+                    request, path="/", anchor="maintenance-panel",
+                    saved=payload.get("headline") or "已处理",
+                )
+            return redirect_with(
+                request, path="/", anchor="maintenance-panel",
+                error=payload.get("error") or "清理缓存失败",
+            )
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 409)
+
+    @app.post("/ops/maintenance/orphans")
+    def ops_maintenance_orphans(request: Request, apply: str = Form("0")) -> Response:
+        """删**孤儿资料目录**（不在 `TASKS` 里 + 闲置超过宽限期 + 没在跑）。
+
+        `apply` 默认 "0" = 只预演；真删要走前端 `confirm()`。宽限期用
+        `core.maintenance.ORPHAN_GRACE_DAYS`（7 天），防的是"刚扫码登录、
+        还没写进 TASKS 的账号目录被当成孤儿删掉"。
+        """
+        as_html = wants_html(request)
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        try:
+            store.refresh_env()
+        except Exception:  # noqa: BLE001
+            pass
+        payload = viewmodel.prune_view(
+            maintenance.prune_orphans(apply=_form_flag(apply)), what="孤儿目录"
+        )
+        if as_html:
+            if payload.get("ok"):
+                return redirect_with(
+                    request, path="/", anchor="maintenance-panel",
+                    saved=payload.get("headline") or "已处理",
+                )
+            return redirect_with(
+                request, path="/", anchor="maintenance-panel",
+                error=payload.get("error") or "清理孤儿目录失败",
+            )
+        return JSONResponse(payload, status_code=200 if payload.get("ok") else 409)
+
     @app.post("/ops/account/remove")
     def ops_account_remove(request: Request, unique_id: str = Form("")) -> Response:
         as_html = wants_html(request)
@@ -2188,12 +2805,18 @@ def create_app() -> FastAPI:
         }
         prepared = settings.collect(submitted, env_map)
         result = settings.apply(prepared)
+        # `store.refresh_env()` 会重读 .env、把新值灌进本进程的 os.environ（`config.load()`
+        # 读到的东西）。文件写成功但它失败是可能的（读权限、编码、并发改坏），
+        # 而失败时页面**不能**说"已重读" —— 那会让用户以为新配置已经在跑，
+        # 实际还在用旧值，直到重启面板。返回值以前被丢掉了，这里必须留着。
+        reloaded = False
         if result.get("ok"):
             envfile.reload()
             try:
-                store.refresh_env()
+                reloaded = bool(store.refresh_env())
             except Exception:  # noqa: BLE001
-                pass
+                reloaded = False
+        result["env_reloaded"] = reloaded
         changed = result.get("changed") or {}
         if as_html:
             if result.get("ok"):
@@ -2202,11 +2825,19 @@ def create_app() -> FastAPI:
                         request, path="/", anchor="config-panel", saved="运行配置没有变化，什么都没写"
                     )
                 pairs = "、".join(f"{key}={value}" for key, value in changed.items())
+                # ok=True 不变：文件确实写进去了（还备份了旧文件），失败的是"本进程
+                # 重新读进内存"这一步 —— 两者必须分开说，否则用户以为整个保存都失败了，
+                # 会去反复点保存。
+                reload_text = (
+                    "并重读 .env"
+                    if reloaded
+                    else "但本进程重读失败（重启面板后生效）"
+                )
                 return redirect_with(
                     request,
                     path="/",
                     anchor="config-panel",
-                    saved=f"已保存 {len(changed)} 项并重读 .env：{pairs}（改前的 .env 已备份）",
+                    saved=f"已保存 {len(changed)} 项{reload_text}：{pairs}（改前的 .env 已备份）",
                 )
             return redirect_with(
                 request, path="/", anchor="config-panel", error=result.get("error") or "保存失败"

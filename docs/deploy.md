@@ -1,7 +1,7 @@
 # 部署到自有服务器（systemd）
 
 融合版**不依赖 GitHub Actions、不依赖 Docker**：一台能跑 Chromium 的 Linux 机器 +
-systemd 就够了。下面以本机实际的 `.172`（Ubuntu 24.04，root）为例。
+systemd 就够了。下面以本机实际的 `本机`（Ubuntu 24.04，root）为例。
 
 > 面板与定时任务是**两个独立单元**：面板常驻（随时看状态、手动触发、跑空跑），
 > 定时器负责每天真正发一轮。可以先只开面板，确认无误再开定时器。
@@ -13,7 +13,7 @@ systemd 就够了。下面以本机实际的 `.172`（Ubuntu 24.04，root）为�
 | 项 | 要求 | 检查命令 |
 |---|---|---|
 | 系统 | Ubuntu 22.04/24.04（其它发行版同理，只要有 systemd） | `systemctl --version` |
-| Python | 3.10+（`.172` 上是 3.12.3） | `python3 -V` |
+| Python | 3.10+（`本机` 上是 3.12.3） | `python3 -V` |
 | venv | `python3-venv` | `python3 -m venv --help >/dev/null && echo ok` |
 | 网络 | 能直连 `pypi.org`；能访问 `github.com`（只在需要下载浏览器时） | `curl -sS -o /dev/null -w '%{http_code}\n' https://pypi.org/simple/` |
 | 浏览器 | 系统 Chrome，或 cloakbrowser 自带的 Chromium，或 Playwright 的缓存 | `ls -l /opt/google/chrome/chrome` |
@@ -104,7 +104,7 @@ cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh '我的新口
 | `RUN_LEDGER_FILE` | `logs/runs.jsonl` | 运行账本（面板读它画图表） |
 | `RUN_LOCK_FILE` | `logs/run.lock` | 运行锁（防止两个任务同时开浏览器） |
 | `RATE_LIMIT_FILE` | `logs/rate_limit.json` | 冷却状态 |
-| `OPS_LOG_FILE` | `logs/douyin-spark-fusion.log` | 面板"日志"页读的文件；两个 systemd 单元的标准输出都追加到它 |
+| `OPS_LOG_FILE` | `logs/app.log` | 面板"日志"页读的文件（默认读 Python 日志 `logs/app.log`）。`deploy/` 里的两个 systemd 单元把标准输出追加到 `logs/douyin-spark-fusion.log`，`.env.example` 给的也是后者 —— 想让面板同时看到单元输出，就显式把它设成 `logs/douyin-spark-fusion.log` |
 | `BROWSER_BACKEND` | `auto` | `auto` / `cloakbrowser` / `playwright` |
 | `TASK_SCHEDULE_TIMES` | `20:30` | **每个账号的发送时间**：当天的门铃第一次到点之后才发。面板上单独给某个账号设了时间就以账号的为准，这里是没单独设的账号的默认值 |
 | `SCHEDULE_JITTER_MINUTES` | `15` | 发送时间上的随机抖动（分钟）。按「账号 + 日期」**确定性**取值 —— 同一天同一账号每次算出来一样，不会每 5 分钟漂一次；`0` = 准点发 |
@@ -176,7 +176,7 @@ systemctl enable --now douyin-spark-fusion-web.service
 systemctl status douyin-spark-fusion-web.service
 ```
 
-- 面板：`http://<本机IP>:8787/`（`.172` → http://192.168.15.172:8787/ ）
+- 面板：`http://<本机IP>:8787/`（`本机` → http://192.168.1.100:8787/ ）
 - **绑非回环且没配口令时服务会拒绝启动**（退出码 2，`journalctl -u douyin-spark-fusion-web -n 20` 有中文原因）。
 - 日志：`logs/douyin-spark-fusion.log`，同时 `journalctl -u douyin-spark-fusion-web -f`。
 - 只校验配置不启动：`.venv/bin/python -m webui --check`。
@@ -233,6 +233,33 @@ systemctl list-timers douyin-spark-fusion-daily.timer
 logrotate -d /etc/logrotate.d/douyin-spark-fusion
 logrotate -f /etc/logrotate.d/douyin-spark-fusion   # 强制轮转一次，然后去面板看日志页还有没有内容
 ```
+
+### 磁盘与登录资料目录
+
+`logs/login-profile/<抖音号>/` 是扫码登录留下的浏览器资料目录（**等价于凭据**）。Chrome 在里面
+写的缓存（`Cache` / `Code Cache` / `GPUCache` / `ShaderCache` …）**默认没有上限**，实测一个账号
+一天能长 180MB 左右；账号删了但目录还在的"孤儿目录"也不会自己消失。盘满的表现是发送直接失败，
+所以要么定期盘一次：
+
+```bash
+cd /opt/douyin-spark-fusion
+.venv/bin/python main.py prune                      # 只盘点：每个目录多大、多少是可再生的缓存
+.venv/bin/python main.py prune --apply --caches     # 清缓存（保留 Cookies / Local Storage / Local State）
+.venv/bin/python main.py prune --apply --older-than 30   # 删闲置超过 30 天的孤儿目录
+```
+
+面板上也有同一套：首页「磁盘与资料目录」区块（展开时才盘点），四个按钮分别是"预演/执行 ×
+清缓存/清孤儿"。三条安全线在 `core/maintenance.py` 里：**只删白名单里的缓存目录**、**在册账号
+永不删**（孤儿还要过 7 天宽限期、且没在跑）、**账号名单读不到就一个都不删**。清理必须以
+`root` 跑（资料目录是 `700`）；面板服务本身就是 root，手工跑就 `sudo`。
+
+**也可以让它自己清**：定时器每 5 分钟敲一次门，`main.py task` 会顺带检查一次维护计时器，
+到点（默认 `MAINTENANCE_AUTO_PRUNE_HOURS=168`，一周）就自动做一遍上面那两步，日志里会多一行
+`[维护] 自动清理：回收 …`。没到点只是一次状态文件读取（约 1 ms），不建浏览器、不碰登录态。
+要关掉就把这个键写成 `0`；维护失败（例如 `TASKS` 写坏导致名单读不到）**不会**影响发送，
+也**不会**推进计时器，但至少隔 1 小时才重试一次，免得每 5 分钟刷一行错误。
+两个边界：**空跑（dry-run）不碰磁盘**（人正盯着屏幕时不该有东西被删）；面板的「立即运行」
+走的是进程内调用、也**不做**自动清理 —— 只用面板、不开定时器的话，要清就在上面那个区块里点。
 
 ---
 

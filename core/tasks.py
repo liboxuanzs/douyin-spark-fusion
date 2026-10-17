@@ -23,6 +23,7 @@ from core.douyin_im import (
     DouyinIM, STATUS_READY, STATUS_EXPIRED, STATUS_LOGGED_OUT, STATUS_LOGIN_LOST,
     target_name, target_refs,
 )
+from core import cookie_utils
 from core import limit_guard
 from core import quiet_window
 from core import run_ledger as ledger
@@ -54,7 +55,7 @@ def _gate_reason(status):
 #
 # 这类失败**重试没有任何意义**：页面再开一百次，服务端认的还是同一份作废的
 # sessionid；而每 5 分钟敲一次门的定时器（`deploy/douyin-spark-fusion-daily.timer`
-# 的 `OnCalendar=*:0/5`）真的会把它开一百次 —— 2026-10-10 wheat 实测：20:48 起
+# 的 `OnCalendar=*:0/5`）真的会把它开一百次 —— 2026-10-10 示例号 实测：20:48 起
 # 每 5 分钟一次「开浏览器 → goto /chat → 判 EXPIRED」，一天最多 288 次，
 # 全部是同一个形状。对一个正在被风控盯着的账号，这些重复请求只有坏处。
 #
@@ -116,7 +117,11 @@ def _retry_budget(raw) -> int:
     """
     try:
         n = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError 也要接：`TASK_RETRY_TIMES=1e999` 是"合法数字"，
+        # `int(inf)` 抛的却是 OverflowError —— 漏掉它，这一行会在**每个**目标的
+        # 重试判断里炸出去，整轮发送直接变成账号级异常（用户看到的是"任务异常
+        # 终止"，看不出是配置写错了）。
         logger.warning(f"TASK_RETRY_TIMES={raw!r} 不是数字 —— 按默认 1 次重试")
         return 1
     if n < 0:
@@ -150,7 +155,8 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
     实现委托给 `core.douyin_im.DouyinIM`：
       任务一（门禁）    DouyinIM 构造时自动完成，结论在 wait_ready() 里
       任务二（找人）    iter_find_and_select —— yield 时该会话已选中且 conv_id 已校验
-      任务三（发送）    im.type_and_send —— 真实键盘事件 + HTTP/DOM 回执双确认
+      任务三（发送）    im.type_and_send —— 全选 + 可信 insertText 输入（落地校验，
+                        失败当场退回 JS 合成输入覆盖重打）+ HTTP/DOM 回执双确认
     拟人化节奏由 cloakbrowser 的 humanize 负责，这里只补一个"别太快"的下限。
 
     `message` 是这个账号专属的发送内容（`TASKS[].message`）；留空就用全局
@@ -183,8 +189,20 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
 
     page = context.new_page()
 
-    # 注入 Cookie
-    context.add_cookies(cookies)
+    # 注入 Cookie。★ 必须先清洗：Playwright 的 add_cookies 是**整批**语义，
+    # 一条 name/domain 为空的条目就会让整批被拒，这个账号随后会被判成"掉登录"
+    # （面板提示重新扫码）。抖音自己就会产出这种空名 cookie（value="douyin.com"，
+    # 见 core/cookie_utils.py:51-77），而 .env 里的 COOKIES_* 是历史快照，
+    # 完全可能带着它。filter_cookies 只丢不可用条目，不动其它字段。
+    safe_cookies, cookie_stats = cookie_utils.filter_cookies(cookies, domains_only=False)
+    if cookie_stats.get("invalid"):
+        logger.warning(
+            f"⚠️ 注入前丢弃不可用 cookie {cookie_stats['invalid']} 条"
+            f"（空 name/空 domain）—— 留着会让整批注入失败"
+        )
+    if not safe_cookies:
+        raise RuntimeError("cookie 全部不可用（空 name/domain），无法注入登录态")
+    context.add_cookies(safe_cookies)
 
     im = None
     try:
@@ -252,7 +270,24 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
         for friend in im.iter_find_and_select(targets):
             logger.debug(f"账号 {username} 已选中好友 {friend['display']}，准备发送")
             text = build_message(message)
-            r = im.type_and_send(friend, text, dry_run=dry_run)
+            try:
+                r = im.type_and_send(friend, text, dry_run=dry_run)
+            except Exception as exc:                                # noqa: BLE001
+                # 输入环节自己拒绝发送（打不进去 / 可能叠发）时抛异常。以前这会冒到
+                # `do_user_task` 的外层 except，把**整个账号**带崩 —— 后面的好友
+                # 一条都不发。现在只记这一条失败，后面的目标继续；重试没有意义
+                # （同一条输入通道刚失败过），所以直接换下一个目标。
+                logger.error(f"账号 {username} → {friend['display']} 输入环节拒绝发送：{exc}")
+                logger.debug(traceback.format_exc())
+                sent_fail += 1
+                r = {"ok": False, "level": "none", "reason": f"input_failed: {exc}",
+                     "via": None, "message_id": None, "dry_run": dry_run,
+                     "rate_limited": False}
+                if len(out["entries"]) < ENTRY_CAP:
+                    out["entries"].append(_entry(friend, r, dry_run))
+                else:
+                    out["entries_truncated"] = True
+                continue
             tag = "空跑" if dry_run != DRY_RUN_OFF else ""
             if r["ok"]:
                 sent_ok += 1
@@ -374,7 +409,7 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
         if login_lost:
             # 账号级结论：**掉登录 ≠ 发送失败**。记成 ok 会让调度把这一天
             # 当成"已发"（core/schedule.select 当天不再重试），面板上也没有任何
-            # 提示 —— 2026-10-09 wheat 就是这么静默丢掉一整天的。记成 error 后
+            # 提示 —— 2026-10-09 示例号 就是这么静默丢掉一整天的。记成 error 后
             # 面板计入「需要处理」，人只要重新扫码登录，当天就会被补发
             # （见 webui/app.py 的扫码成功回调）。
             out["status"] = "error"
@@ -383,20 +418,36 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
                 "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
             )
-        elif (dry_run == DRY_RUN_OFF and sent_ok == 0 and sent_fail > 0
+        elif (dry_run == DRY_RUN_OFF and sent_ok == 0
               and not out.get("abort_run")):
-            # **一条都没送达**：每个目标都"选中 strong、输入 63/63、点了发送"，
-            # 抖音那边却一条都不收（`[SEND] ❌ 失败 code=None`，或响应体干脆是空的）。
-            # 2026-10-09 wheat、2026-10-10 🌈LBX🌈 都是这个形状 —— 页面仍然长得
-            # 像登录着（`check_login` 也这么说），服务端却已经把会话作废 / 拦下了。
-            # 记成 ok 的代价：时间表认定"今天已发"、面板显示一切正常，用户第二天
-            # 才发现朋友根本没收到。这里按"没干成活"记账，面板计入「需要处理」，
-            # 重新登录后当天自动补发。
+            # **一条都没送达**。这里刻意**不再要求 `sent_fail > 0`**：从前只有
+            # 「试过但失败」才算坏消息，于是下面这些形状会被 `_mark_status` 兜成
+            # ok —— 时间表认定今天已发、名额被吃掉，面板上还自相矛盾
+            # （时间表行写「今天已发」、状态胶囊写「尚未运行」），用户第二天才发现
+            # 朋友根本没收到：
+            #   * 计划里的目标一个都没匹配上（好友改了备注名 / 被折叠 / 页面没加载
+            #     出来）→ `sent_ok == sent_fail == 0`，一次发送都没发生；
+            #   * 目标列表是空的（上面那条 no_targets 分支会先兜住，这里是双保险）。
+            # 2026-10-09 示例号、2026-10-10 🌈示例号🌈 走的是 `sent_fail > 0` 那一支
+            # （每个目标都点了发送、回执全消失）。
+            scan_now = (im.last_scan if im is not None else None) or {}
+            missing = [str(x) for x in (scan_now.get("missing") or [])]
+            failed = [str(x) for x in (scan_now.get("select_failed") or [])]
+            if sent_fail:
+                why = f"本轮 {sent_fail} 个目标一条都没送达（全部没拿到可信回执）"
+                hint = "通常是登录被服务端作废或风控拦截"
+            elif missing or failed:
+                why = (f"本轮 {len(targets)} 个目标一条都没发出去"
+                       f"（没找到 {missing or '无'}；找到但没选中 {failed or '无'}）")
+                hint = "多半是好友改了备注名、被折叠进别的分组，或页面没加载出来"
+            else:
+                why = f"本轮 {len(targets)} 个目标一条都没发出去"
+                hint = "页面可能没加载出来，或发送被拦下了"
             out["status"] = "error"
             out["error"] = (
-                f"nothing_sent: 本轮 {sent_fail} 个目标一条都没送达"
-                "（全部没拿到可信回执）—— 通常是登录被服务端作废或风控拦截；"
-                "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+                f"nothing_sent: {why} —— {hint}；"
+                "请到面板核对目标名，或重新扫码登录该账号"
+                "（登录成功后当天会自动补发）"
             )
 
         scan = im.last_scan or {}
@@ -545,6 +596,65 @@ def _mark_status(result) -> str:
     return schedule.STATUS_OK
 
 
+def _persist_mark(state, uid, status, note, plan, *, stamped, run_id, source,
+                  count_attempt=True):
+    """把一个账号的记账**立刻**合并写进状态文件。返回是否写进了 `state`。
+
+    ★ 为什么不能只等收尾那一次：从前所有记账都压在 `runTasks` 收尾的 `finally`
+      里，整轮被 SIGKILL / 断电时，**已经发出去**的账号在文件里一条记录都没有
+      —— 下一个门铃重新算「今天还没发」→ 同一个好友收到第二条火花（本项目最
+      刺眼的线上事故）。逐账号落盘把"已发出"这件事的暴露窗口从整轮（分钟级）
+      缩到一个账号。
+
+    用 `save_marks`（只合并点名的这**一个**账号）而不是 `save_state`：`state`
+    是整轮开始时读的快照，整体覆盖会把面板在这中间改过的别的账号抹掉。
+
+    这里**绝不抛**：记不上账的最坏后果是"可能重复发一次"，而抛出去会让这一轮
+    剩下的账号一个都不跑、连收尾的账本行也没有 —— 两者不对称，所以一律吞掉只
+    记警告（与 `core/schedule.py` 里 `save_marks` 明写的"不抛"契约一致）。
+    """
+    try:
+        schedule.mark_sent(state, uid, when=stamped, plan=plan, run_id=run_id,
+                           status=status, source=source, note=note,
+                           count_attempt=count_attempt)
+    except Exception as exc:                    # noqa: BLE001 —— 记账不许打断发送
+        logger.warning(f"⚠️ 账号 {uid} 的记账没写进内存（{type(exc).__name__}: {exc}）"
+                       f" —— 收尾那次合并写还会再试一遍")
+        return False
+    try:
+        if not schedule.save_marks(state, [uid]):
+            logger.warning(
+                f"⚠️ 账号 {uid} 的记账没能立刻落盘（{schedule.state_path()}）——"
+                f"这一轮若中途被杀，它今天可能被重复发送；检查目录是否存在/可写"
+            )
+    except Exception as exc:                    # noqa: BLE001
+        logger.warning(f"⚠️ 账号 {uid} 的记账落盘时出错（{type(exc).__name__}: {exc}）"
+                       f" —— 收尾那次合并写还会再试一遍")
+    return True
+
+
+def _dedupe_plans(planned):
+    """按 `unique_id` 去重（保留第一条），返回 `(去重后的列表, 被丢掉的名字)`。
+
+    重复的账号在同一轮里会被完整处理两次 —— 同一个好友收到两条一模一样的火花。
+    来源有两处：手改 `.env` 写出两条同号账号；以及 `utils.config.get_userData()`
+    的账号名单在"面板每请求刷新 + 运行线程 reload"并发重建时重复（见那里的说明）。
+    这里是最靠近伤害点的一道闸：无论上游怎么错，同一个 uid 一轮只发一次。
+    """
+    seen = set()
+    kept = []
+    dropped = []
+    for user, plan in planned or []:
+        uid = str((plan or {}).get("unique_id") or "")
+        if uid and uid in seen:
+            dropped.append(str((plan or {}).get("username") or uid))
+            continue
+        if uid:
+            seen.add(uid)
+        kept.append((user, plan))
+    return kept, dropped
+
+
 def runTasks(dry_run=None, source="cli", force=False, only=""):
     """跑一轮。返回结构化汇总，并追加进运行账本。
 
@@ -668,6 +778,16 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             f"{len(plan_result['sent'])} 个今天已经发过"
         )
 
+    # 同一轮里同一个账号被排两次 = 好友收到两条一样的火花（本项目最刺眼的线上事故）。
+    # `unique_id` 本来就是账号的键，配置层又"读出来什么就是什么"（手改 .env 可以写出
+    # 两条同号账号），所以在这里按 uid 去重，并明确留痕。
+    planned, duplicates = _dedupe_plans(planned)
+    if duplicates:
+        logger.warning(
+            f"⚠️ TASKS 里有重复的账号（{('、'.join(duplicates))}），"
+            f"本轮每个账号只处理一次；请到面板核对账号列表"
+        )
+
     logger.debug("当前配置如下：")
     # ★ 用 repr：模板里的换行是**字面 `\n`（两个字符）**，直接打印看不出区别 ——
     #   而"配置层把反斜杠吃掉了"正是最隐蔽的一类故障（日志里只剩一个裸 n，
@@ -677,10 +797,17 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
     logger.debug(f"发送间隔: {config.get('sendIntervalMinSeconds')}~"
                  f"{config.get('sendIntervalMaxSeconds')}s（空跑时不等待）")
     for user in userData:
+        # `user['targets']` 可能是 `None`（手改 .env 写成 `"targets": null`）——
+        # 这里只是打日志，绝不能因为一行 DEBUG 把整轮发送掀翻。
         logger.debug(f"用户: {user.get('username', '未知用户')}, "
-                     f"目标好友: {[target_name(t) for t in user['targets']]}")
+                     f"目标好友: {[target_name(t) for t in (user.get('targets') or [])]}")
 
-    lock = ledger.RunLock(source=source, dry_run=level, run_id=run_id)
+    lock = ledger.RunLock(
+        source=source, dry_run=level, run_id=run_id,
+        # 把这一轮要碰的账号写进运行锁：面板靠它拦住"派发器正在发这个账号、
+        # 又去给它扫码登录/读好友列表"（两只会同时打开同一个资料目录）。
+        accounts=[plan["unique_id"] for _user, plan in planned],
+    )
     try:
         lock.acquire()
     except ledger.RunLocked as e:
@@ -694,12 +821,21 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
     # 反复踹起来开浏览器，一天 288 次。
     state = schedule.load_state()
     marks = {}          # 抖音号 -> (结局, 备注)
+    recording = level == DRY_RUN_OFF      # 空跑轮次什么都不记（见收尾注释）
+    flushed = set()     # 已经"跑完就立刻落盘"的账号：收尾合并写别再 mark 一遍
+    free_skips = set()  # 没开浏览器的那种跳过（targets 为空），不计入重试上限
     try:
         for user, plan in planned:
             if rec.get("rate_limited"):
                 break       # 命中熔断：剩下的账号也不跑了，**也不记账** ——
                             # 让它们等冷却结束，而不是被白白判成"今天办过了"
             uid = plan["unique_id"]
+            if uid in marks:
+                # 真的撞上重复配置时（上面的 _dedupe_plans 是常规闸门），
+                # 宁可不发也不能给同一个好友发两条。
+                logger.warning(f"⚠️ 账号 {plan.get('username') or uid} 在本轮里出现了两次，"
+                               f"第二次直接跳过（避免重复发送）")
+                continue
             cookies = user["cookies"]
             # 归一化在**这里**做（配置读取端不做）：`target_refs()` 用 `douyin_im.norm`
             # 归一名字，`DouyinIM._match` 内部用同一套 —— 两边都归过才谈得上相等，
@@ -708,6 +844,35 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             # 空项在这里丢掉：留在剩余名单里永远扣不掉，会白滚到底。
             targets = target_refs(user["targets"])
             username = user.get("username", "未知用户")
+            if not targets:
+                # 这个账号一个目标都没有（TASKS 里漏写 targets、面板上全取消勾选、
+                # 或者 JSON 写成了 null）。**别开浏览器**：开起来也只会白等一轮超时，
+                # 而每 5 分钟一次的门铃会把它反复踹起来 —— 那正是要避免的风控面。
+                # 也**别记成 ok**：记 ok 等于把今天的名额吃掉，面板还会自相矛盾
+                # （时间表行写「今天已发」、状态胶囊写「尚未运行」）。
+                logger.error(
+                    f"账号 {username} 没有配置任何目标，本轮跳过（不记「今天已发」，"
+                    f"修好 TASKS 的 targets 后下一个门铃就会补发）"
+                )
+                # 时间表记 `skipped`（而不是 error）：`select()` 只有对 skipped 才
+                # 认为"当天名额还在"（见 core/schedule.py:550 的注释）。记成 error
+                # 会让这个账号今天彻底静音 —— 用户中午把目标加回来，也要等到明天
+                # 才会发出去；而它一条消息都没发过，没有任何理由占掉今天的名额。
+                marks[uid] = (schedule.STATUS_SKIPPED,
+                              "no_targets: 这个账号没有配置任何目标（TASKS 的 targets 为空）")
+                # 这种跳过**不开浏览器**，风控上没有成本（见上面两行）：不计入
+                # `SCHEDULE_SKIP_RETRY_MAX` 的重试上限。理由反过来说更清楚 ——
+                # 计数只会在"重新扫码"时归零，而用户补配 targets 时不走扫码，
+                # 计进去 = 他半小时后才把目标填回来，这个账号当天再也不会被重试。
+                free_skips.add(uid)
+                rec["accounts"].append({
+                    "username": username, "unique_id": user.get("unique_id"),
+                    # 账本这一行写 error：面板上要一眼看得见（"这个账号没配目标"），
+                    # 与时间表那侧的 skipped 是给两个不同的读者看的。
+                    "status": "error", "sent_ok": 0, "sent_fail": 0, "entries": [],
+                    "error": f"no_targets: {username} 的 TASKS 条目里 targets 是空的",
+                })
+                continue
             fingerprint = user.get("fingerprint", None)
             message = str(user.get("message") or "")
             logger.info(f"开始处理账号 {username}（计划 {plan['time']}，"
@@ -731,6 +896,15 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
                 )
                 rec["accounts"].append(res)
                 marks[uid] = (_mark_status(res), str(res.get("error") or ""))
+                if recording and _persist_mark(
+                    state, uid, marks[uid][0], marks[uid][1], plan,
+                    stamped=started, run_id=run_id, source=source,
+                ):
+                    # ★ 这一个账号的记账已经落盘了。收尾那次合并写不要再 mark
+                    #   一遍：skipped 的 attempts 会被同一轮加两次（6 次上限只撑
+                    #   3 轮）。`state` 里已经有这条记录，收尾的 `save_marks` 照样
+                    #   会把它写出去。
+                    flushed.add(uid)
                 if res.get("limit"):
                     rec["rate_limited"] = True
                     rec["limit"] = res["limit"]
@@ -740,6 +914,11 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
                 logger.error(f"账号 {username} 任务异常终止：{type(e).__name__}: {e}")
                 logger.debug(traceback.format_exc())
                 marks[uid] = (schedule.STATUS_ERROR, f"{type(e).__name__}: {e}")
+                if recording and _persist_mark(
+                    state, uid, marks[uid][0], marks[uid][1], plan,
+                    stamped=started, run_id=run_id, source=source,
+                ):
+                    flushed.add(uid)
                 rec["accounts"].append({
                     "username": username, "unique_id": user.get("unique_id"),
                     "status": "error", "error": f"{type(e).__name__}: {e}",
@@ -752,40 +931,51 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
                     # 以前只关浏览器不还句柄，跑久了机器上全是 node。
                     close_context(browser)
     finally:
-        lock.release()
-        # 记账放在 finally 里：就算上面是"熔断提前 break"或账号级异常，
-        # 已经跑过的账号也必须落下记录 —— 否则门铃下一轮会把它们再踹起来。
-        if marks and level == DRY_RUN_OFF:
-            # 用**本轮开始**的时刻记账，而不是收尾时刻：23:58 起跑、00:01 收尾的
-            # 那一轮若按收尾时刻记，落的是明天的日期，于是明天一整天都被当成
-            # 「今天已经发过了」—— 跨零点的那一次会把第二天的火花静默吃掉。
-            stamped = started
-            for user, plan in planned:
-                uid = plan["unique_id"]
-                if uid not in marks:
-                    continue
-                status, note = marks[uid]
-                schedule.mark_sent(
-                    state, uid, when=stamped, plan=plan, run_id=run_id,
-                    status=status, source=source, note=note,
-                )
-            schedule.prune(state)
-            if not schedule.save_state(state):
-                logger.warning(
-                    f"⚠️ 发送时间表写不进去（{schedule.state_path()}）——"
-                    f"这些账号今天可能被重复发送，检查目录是否存在/可写"
-                )
-        elif marks:
-            # 空跑轮次不记账：什么都没发出去，记了就占掉当天的真发名额，
-            # 面板上还会显示「今天已发」——用户以为发过了，其实一条都没有。
-            logger.info("本轮是空跑（dry-run），不写发送时间表：什么都没发出去，"
-                        "不能占掉这些账号今天的名额")
-        if planned:
-            brief = _schedule_brief(plan_result, planned, marks)
-            brief["forced"] = bool(force)
-            rec["schedule"] = brief
-        rec["finished_at"] = iso(now())
-        ledger.append_run(rec)
+        # ★ 记账必须在**释放锁之前**做完：锁一放开，下一个进程（或面板）就可能
+        #   读走状态文件再写回来，而我们随后用手里这份旧快照整体覆盖 —— 它的改动
+        #   就被抹掉了（2026-10-09 示例号 掉登录静默丢一天，走的正是这条路径）。
+        #   用嵌套 finally：记账这段自己抛了异常，锁也必须放掉。
+        try:
+            # 记账放在 finally 里：就算上面是"熔断提前 break"或账号级异常，
+            # 已经跑过的账号也必须落下记录 —— 否则门铃下一轮会把它们再踹起来。
+            if marks and level == DRY_RUN_OFF:
+                # 用**本轮开始**的时刻记账，而不是收尾时刻：23:58 起跑、00:01 收尾的
+                # 那一轮若按收尾时刻记，落的是明天的日期，于是明天一整天都被当成
+                # 「今天已经发过了」—— 跨零点的那一次会把第二天的火花静默吃掉。
+                # 逐账号落盘（`_persist_mark`）用的也是这个时刻，两边口径一致。
+                stamped = started
+                for user, plan in planned:
+                    uid = plan["unique_id"]
+                    if uid not in marks or uid in flushed:
+                        # flushed：那个账号跑完时已经 mark 过并落盘了，再来一遍会把
+                        # skipped 的 attempts 在同一轮里多加一次（见上面的注释）。
+                        continue
+                    status, note = marks[uid]
+                    schedule.mark_sent(
+                        state, uid, when=stamped, plan=plan, run_id=run_id,
+                        status=status, source=source, note=note,
+                        count_attempt=uid not in free_skips,
+                    )
+                # 只合并**本轮真走到**的这几个账号：磁盘上别的账号（以及面板在我们
+                # 跑的过程中改过的同一批账号）以文件为准，别拿旧快照盖回去。
+                if not schedule.save_marks(state, list(marks)):
+                    logger.warning(
+                        f"⚠️ 发送时间表写不进去（{schedule.state_path()}）——"
+                        f"这些账号今天可能被重复发送，检查目录是否存在/可写"
+                    )
+            elif marks:
+                # 空跑轮次不记账：什么都没发出去，记了就占掉当天的真发名额，
+                # 面板上还会显示「今天已发」——用户以为发过了，其实一条都没有。
+                logger.info("本轮是空跑（dry-run），不写发送时间表：什么都没发出去，"
+                            "不能占掉这些账号今天的名额")
+            if planned:
+                brief = _schedule_brief(plan_result, planned, marks)
+                brief["forced"] = bool(force)
+                rec["schedule"] = brief
+            rec["finished_at"] = iso(now())
+            ledger.append_run(rec)
+        finally:
+            lock.release()
 
     s = ledger.summarize(rec)
     logger.info(

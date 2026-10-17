@@ -12,17 +12,22 @@ import inspect
 import json
 import re
 import unittest
+
+from pathlib import Path
 from unittest import mock
 
 from core import douyin_im
 from core.douyin_im import (
+    ROW_HEIGHT,
     DouyinIM,
     ImMonitor,
+    _dom_text_matches,
     _envelope_code,
     _is_group,
     _norm,
     _readback_matches,
     _residue_echo,
+    _scroll_top_for,
     check_login,
     decode_user_info,
     envelope,
@@ -80,6 +85,44 @@ class ScrollCriterionTests(unittest.TestCase):
         for ch in (300, 600, 900):
             step = max(120, int(ch * 0.4))
             self.assertLessEqual(step, ch * 0.4 + 1, f"容器高 {ch}px")
+
+
+class ScrollTopTests(unittest.TestCase):
+    """`data_index` 的安全消费（`_scroll_top_for`）：老代码会在这里抛 TypeError。
+
+    现场：`JS_COLLECT` 里写的是 `dataIndex: holder ? Number(...) : null` —— **键在、
+    值是 None**，所以 `item.get("data_index", 0)` 的默认值根本不生效：`None * 67`
+    抛 TypeError。这行在 `iter_find_and_select` 里没有任何 try 兜着，异常一路穿到
+    core/tasks.py 的账号级 except → 整轮被记成 error，排在后面的好友一个都不发。
+    """
+
+    def test_valid_index_is_multiplied_by_row_height(self):
+        self.assertEqual(_scroll_top_for({"data_index": 3}), 3 * ROW_HEIGHT)
+        self.assertEqual(_scroll_top_for({"data_index": 0}), 0)     # 0 是合法下标
+
+    def test_none_falls_back_to_dom_index(self):
+        # 同一窗口里的渲染序号也够用：滚到那个位置，目标所在窗口会被重新渲染
+        self.assertEqual(_scroll_top_for({"data_index": None, "dom_index": 4}),
+                         4 * ROW_HEIGHT)
+
+    def test_none_without_any_index_falls_back_to_top(self):
+        self.assertEqual(_scroll_top_for({"data_index": None}), 0)
+        self.assertEqual(_scroll_top_for({"data_index": None, "dom_index": None}), 0)
+        self.assertEqual(_scroll_top_for({}), 0)
+        self.assertEqual(_scroll_top_for(None), 0)
+
+    def test_negative_and_garbage_are_rejected(self):
+        # 负数：浏览器会把负 scrollTop 夹到 0，但日志里留一个 -67 只会把排查带偏；
+        # NaN 来自 `Number('非数字的 data-index')`，字符串乱值来自更下游的退化。
+        for bad in (-1, -67, float("nan"), float("inf"), float("-inf"),
+                    "abc", "", [], {}, True):
+            self.assertEqual(_scroll_top_for({"data_index": bad}), 0,
+                             f"data_index={bad!r} 不该被当成下标")
+
+    def test_numeric_string_and_float_are_accepted(self):
+        # JS 侧 `Number()` 给的就是数，这里是便宜的兜底（别把能用的值判死）
+        self.assertEqual(_scroll_top_for({"data_index": "12"}), 12 * ROW_HEIGHT)
+        self.assertEqual(_scroll_top_for({"data_index": 2.7}), 2 * ROW_HEIGHT)
 
 
 class NormTests(unittest.TestCase):
@@ -324,11 +367,11 @@ class IdentityMatchTests(unittest.TestCase):
         self.assertEqual(how, "fuzzy")
 
     def test_emoji_decoration_is_trimmed_before_matching(self):
-        """昵称两端的 emoji 不算数（本项目自己的号就叫 🌈LBX🌈）。"""
-        item = dict(self.item, remark="🌈LBX🌈", display="🌈LBX🌈",
+        """昵称两端的 emoji 不算数（本项目自己的号就叫 🌈示例号🌈）。"""
+        item = dict(self.item, remark="🌈示例号🌈", display="🌈示例号🌈",
                     nickname="", title="", douyin_id="")
-        key, how = self.s._match(item, {_norm("LBX"): "LBX"}, by_conv={}, by_uid={})
-        self.assertEqual(key, "lbx")
+        key, how = self.s._match(item, {_norm("示例号"): "示例号"}, by_conv={}, by_uid={})
+        self.assertEqual(key, _norm("示例号"))
         self.assertEqual(how, "fuzzy")
 
     def test_two_name_targets_on_one_conversation_mark_ambiguous(self):
@@ -540,6 +583,60 @@ class WalkTests(unittest.TestCase):
                 break
         self.s._finish_scan({}, [])
         self.assertEqual(self.s.last_scan["note"], "扫描未完成，missing 不代表不存在")
+
+    def test_exhausted_steps_is_not_scanned_all(self):
+        """步数用尽 ≠ 扫全了：`exhausted` 是「我还没扫完就没步数了」。
+
+        上游把它算进 scanned_all → 没找到的目标被汇报成"确实不在列表里"
+        （面板不报警）→ 静默漏发。这里用 400 条的长列表 + 3 步上限模拟现场。
+        """
+        self.s.total = 400          # 200 步 × 268px 也扫不完
+        self.s.max_steps = 3
+        with self.assertLogs("douyin_im", level="WARNING"):
+            list(self.s._walk())
+            self.s._finish_scan({}, ["没找到的人"])
+        self.assertEqual(self.s._walk_stat["stopped"], "exhausted")
+        self.assertFalse(self.s.last_scan["scanned_all"])
+        self.assertEqual(self.s.last_scan["missing"], ["没找到的人"])
+        self.assertEqual(self.s.last_scan["note"], "扫描未完成，missing 不代表不存在")
+
+    def test_exhausted_warning_names_max_steps_and_remaining_rows(self):
+        """光把 scanned_all 改成 False 不够：日志里得有人喊，还要带上 imMaxSteps 的值。"""
+        self.s.total = 400
+        self.s.max_steps = 3
+        list(self.s._walk())
+        with self.assertLogs("douyin_im", level="WARNING") as cm:
+            self.s._finish_scan({}, ["甲同学"])
+        msg = "\n".join(r.getMessage() for r in cm.records)
+        self.assertIn("imMaxSteps=3", msg)
+        self.assertIn("甲同学", msg)            # 没找到的人要出现在告警里
+        self.assertIn("不能", msg)              # 不能当"不在列表里"
+        self.assertTrue(any("还剩约" in r.getMessage() for r in cm.records), cm.output)
+
+    def test_no_move_is_still_scanned_all(self):
+        """no-move（连续 3 轮 scrollTop 不动）是刻意的"到底了"启发式：语义不变。
+
+        它和 exhausted 的区别在于：那是页面自己不动了，不是"我没步数了"。
+        """
+        self.s._scroll_to = lambda top: None      # 页面滚不动了
+        list(self.s._walk())
+        self.s._finish_scan({}, [])
+        self.assertEqual(self.s._walk_stat["stopped"], "no-move")
+        self.assertTrue(self.s.last_scan["scanned_all"])
+
+    def test_scan_stop_is_exposed_for_the_caller(self):
+        """停止原因要能被调用方直接写进日志/账本 note（tasks.py 还没消费，字段先给）。"""
+        list(self.s._walk())                       # 50 条短列表 → 到底
+        self.s._finish_scan({}, [])
+        self.assertEqual(self.s.last_scan["scan_stop"], "reach-bottom")   # 与 stopped 同值
+        self.assertEqual(self.s.last_scan["scan_stop"], self.s.last_scan["stopped"])
+
+        long_list = _VListStub(total=400)
+        long_list.max_steps = 3
+        list(long_list._walk())
+        with self.assertLogs("douyin_im", level="WARNING"):
+            long_list._finish_scan({}, [])
+        self.assertEqual(long_list.last_scan["scan_stop"], "exhausted")
 
 
 class IterConversationsTests(unittest.TestCase):
@@ -884,6 +981,62 @@ class ResidueEchoTests(unittest.TestCase):
         self.assertEqual(_residue_echo(None, None), (False, 0))
 
 
+class DomTextMatchTests(unittest.TestCase):
+    """气泡文本判据（`_dom_text_matches`）：DOM 侧回执确认的"文本这一条证据"。
+
+    ★ 两个真实会误判的输入（本组测试的存在理由）：
+    ① 多行模板 `"早上好\\n晚安"`：head 取自模板、含 `\\n`，而气泡 textContent 里
+       没有换行（Draft.js 的块边界在 textContent 里直接相接）；
+    ② 模板以 emoji 开头：emoji 在气泡里是 `<img>` 渲染的，textContent 读不到它。
+    误判的后果不是"少确认一次"——已发成功却等不到 DOM 确认，没有 HTTP 回执时判
+    失败，任务层重发同一条 → 好友收到两条（本项目最忌讳的失败形态）。
+    """
+
+    def test_plain_single_line_still_matches(self):
+        self.assertTrue(_dom_text_matches("早上好", "早上好"))
+        # 前 8 字的对照口径不变：DOM 里是整条消息 + 后面的内容也算匹配
+        self.assertTrue(_dom_text_matches("早上好", "早上好呀，今天也要加油"))
+
+    def test_multiline_template_matches_textcontent_without_newline(self):
+        self.assertTrue(_dom_text_matches("早上好\n晚安", "早上好晚安"))
+        self.assertTrue(_dom_text_matches("早上好\n晚安", "早上好晚安，明天见"))
+
+    def test_emoji_at_head_matches_bubble_without_the_emoji(self):
+        # 气泡里 emoji 是 <img>，textContent 读不到它
+        self.assertTrue(_dom_text_matches("🎉早上好", "早上好"))
+        self.assertTrue(_dom_text_matches("🌈 示例号 🌈 今日火花+1", "示例号 今日火花+1"))
+        # 另一端也可能把 emoji 画成了文字，同样得对得上
+        self.assertTrue(_dom_text_matches("🎉早上好", "🎉早上好"))
+
+    def test_zero_width_and_variation_selectors_are_ignored(self):
+        self.assertTrue(_dom_text_matches("早上好\u200b", "早上好"))
+        self.assertTrue(_dom_text_matches("早上好", "\ufeff早上好\ufe0f"))
+        self.assertTrue(_dom_text_matches("早\u200d上好\ufe0e", "早上好"))
+
+    def test_all_whitespace_differences_are_ignored(self):
+        # 全角空格、NBSP、制表符、行首行尾的空行
+        self.assertTrue(_dom_text_matches("早\u3000上\xa0好", "早上好"))
+        self.assertTrue(_dom_text_matches("  早上好 ", "\t早上好\n"))
+
+    def test_empty_head_defers_to_count_and_last_from_me(self):
+        """整条都是 emoji/空白 → 文本给不出结论，返回 True 交回给调用方那两个条件。
+
+        这里不是在放宽判据：`count > before` 与 `lastFromMe` 仍然在 `_wait_receipt`
+        里独立成立才算 DOM 确认（见 ReceiptVerdictIntegrationTests）。
+        """
+        self.assertTrue(_dom_text_matches("🎉🎉🎉", "完全不同的东西"))
+        self.assertTrue(_dom_text_matches("", "随便什么"))
+        self.assertTrue(_dom_text_matches(" \n\t\u200b", "随便什么"))
+        self.assertTrue(_dom_text_matches(None, None))
+
+    def test_clearly_different_text_is_not_a_match(self):
+        self.assertFalse(_dom_text_matches("早上好", "昨天的消息"))
+        self.assertFalse(_dom_text_matches("早上好", ""))
+        self.assertFalse(_dom_text_matches("早上好", None))
+        # 只有开头的 emoji 不一样、文字部分完全对不上时，仍然判不匹配
+        self.assertFalse(_dom_text_matches("🎉早上好", "晚上好"))
+
+
 class _ClearPage:
     """按剧本演"清空编辑器"这件事的假页面（只实现 `_clear_editor` 用到的两个方法）。"""
 
@@ -1063,6 +1216,68 @@ class LoggingTests(unittest.TestCase):
         params = inspect.signature(check_login).parameters
         self.assertNotIn("log", params)
 
+    def test_hook_already_installed_logs_at_debug_not_warning(self):
+        """钩子第二次安装返回 undefined（JS 第一句就 `return`）—— 正常路径，归 debug。
+
+        改造前每轮每个目标都会刷一条 `[SEL][HOOK] 安装=None` 的 warning（线上日志
+        实测：每个目标一条），把真正的失败淹在噪音里。
+        """
+        im = _Stub()
+        im.page = _HookPage(None)
+        with self.assertLogs("douyin_im", level="DEBUG") as cm:
+            with self.assertRaises(RuntimeError):    # 后面的定位由替身终止
+                im._mouse_select(0, "mouse")
+        hook = [r for r in cm.records if "[SEL][HOOK]" in r.getMessage()]
+        self.assertEqual(len(hook), 1, cm.output)
+        self.assertEqual(hook[0].levelname, "DEBUG", cm.output)
+        self.assertIn("安装=None", hook[0].getMessage())
+
+    def test_hook_install_state_is_still_warned(self):
+        """真装上了（或装了但状态异常）→ 照旧 warning，别把信号一起调没了。"""
+        im = _Stub()
+        im.page = _HookPage("hooked:true")
+        with self.assertLogs("douyin_im", level="DEBUG") as cm:
+            with self.assertRaises(RuntimeError):
+                im._mouse_select(0, "mouse")
+        self.assertTrue(any(r.levelname == "WARNING"
+                            and "安装=hooked:true" in r.getMessage()
+                            for r in cm.records), cm.output)
+
+    def test_hook_install_failure_is_still_warned(self):
+        """`evaluate` 自己抛了（页面没了 / 脚本报错）—— 这才是真失败，保留 warning。"""
+        im = _Stub()
+        im.page = _HookPage(boom=RuntimeError("页面没了"))
+        with self.assertLogs("douyin_im", level="DEBUG") as cm:
+            with self.assertRaises(RuntimeError):
+                im._mouse_select(0, "mouse")
+        self.assertTrue(any(r.levelname == "WARNING" and "安装失败" in r.getMessage()
+                            for r in cm.records), cm.output)
+
+
+class _HookPage(_FakePage):
+    """只够 `_mouse_select` 走到"装输入钩子"那一步的页面替身。
+
+    `evaluate_handle` 直接抛错：钩子那行日志在它之前就打完了，后续定位元素的事
+    本组测试不关心，异常由 `assertRaises(RuntimeError)` 接住。
+    """
+
+    def __init__(self, hook_state=None, boom=None):
+        super().__init__()
+        self.hook_state = hook_state
+        self.boom = boom
+        self.hook_calls = 0
+
+    def evaluate(self, script, arg=None):
+        if self.boom is not None:
+            raise self.boom
+        if script is DouyinIM.JS_INPUT_HOOK:
+            self.hook_calls += 1
+            return self.hook_state       # 第二次调用时 JS 直接 return → None
+        return None
+
+    def evaluate_handle(self, script, arg=None):
+        raise RuntimeError("本组测试到此为止（钩子日志已经写完了）")
+
 
 class _SelPage(_FakePage):
     """`_select_and_verify` / `_wait_receipt` 用到的最小页面替身。
@@ -1103,6 +1318,11 @@ class SelectionFailClosedTests(unittest.TestCase):
         # —— 只替换真正碰浏览器的四个点，其余走真实实现 ——
         def _input_mode(self):
             return "real"
+
+        def _type_real(self, editor, lines, dry):
+            # 这些用例钉的是回执/熔断/登录态接线，打字机制由 ReplaceTypingTests 覆盖。
+            self.typed_text = "\n".join(lines)
+            return True
 
         def _dom_index_of(self, conv_id):
             return self.idx
@@ -1270,6 +1490,42 @@ class SelectionFailClosedTests(unittest.TestCase):
         self.assertEqual(self.im.page.removed[0][0], "response")
         self.assertEqual(self.im.page.listeners["response"], [])
 
+    def test_none_data_index_scrolls_instead_of_raising_type_error(self):
+        """`data_index=None`（JS_COLLECT 的 `holder ? Number(...) : null`）不许打断整轮。
+
+        老代码 `item.get("data_index", 0) * ROW_HEIGHT` → 键在、值是 None，默认值
+        不生效 → `None * 67` 抛 TypeError → 从这里一路穿到 tasks.py 的账号级 except：
+        整轮记 error，排在后面的好友一个都不发。这里把「目标不在当前窗口 → 按
+        data_index 滚过去」那条真实分支跑通，断言滚动落点而不是错误类型。
+        """
+        scrolled = []
+
+        class _IM(self._IM):
+            def __init__(self):
+                super().__init__()
+                self.lookups = 0
+
+            def _dom_index_of(self, conv_id):
+                # 第一次：不在当前窗口里（正是要走"滚过去再找"那一步）
+                self.lookups += 1
+                return None if self.lookups == 1 else self.idx
+
+            def _scroll_to(self, top):
+                scrolled.append(top)
+                return True
+
+        im = _IM()
+        im.cur = {"convId": self.conv_a, "title": "甲同学"}
+        self.assertTrue(im._select_and_verify(dict(self.item, data_index=None)))
+        self.assertEqual(scrolled, [0])        # 退回顶部，而不是 None * 67
+
+        # 同一窗口里的渲染序号也够用：能拿到就用它，别白滚一趟
+        im2 = _IM()
+        im2.cur = {"convId": self.conv_a, "title": "甲同学"}
+        self.assertTrue(im2._select_and_verify(
+            dict(self.item, data_index=None, dom_index=5)))
+        self.assertEqual(scrolled, [0, 5 * ROW_HEIGHT])
+
 
 class ReceiptVerdictIntegrationTests(unittest.TestCase):
     """把回执裁决钉在真实 `_wait_receipt` 上（含 convId 采集与「发错人」判定）。"""
@@ -1324,12 +1580,41 @@ class ReceiptVerdictIntegrationTests(unittest.TestCase):
         self.assertFalse(rc["ok"])
         self.assertEqual(rc["verdict"].reason, "receipt_failed")
 
-    def test_ok_receipt_confirms_even_when_bubble_count_flat(self):
-        """虚拟列表不重渲染时气泡数**不涨**很常见；只要会话没变、回执 ok 就算成功。
+    def test_ok_receipt_without_dom_growth_is_success_and_strong(self):
+        """虚拟列表不重渲染时气泡数**不涨**很常见；会话没变、回执 ok 就算发出去了。
 
-        上游在这里会判失败（只看 DOM 增长），然后重试一次 → 重复消息。
+        强证据的**正向**条件是"回执 ok + 发送后当前会话就是目标会话"（能点名收件人），
+        刻意不要求气泡数上涨 —— 生产 2026-10-01→10-13 的 81 条成功记录里 DOM 气泡
+        证据一次都没出现过，拿它当必要条件等于把每一次发送都判成弱证据。
+        上游在这里判失败（只看 DOM 增长）→ 重试一次 → 重复消息；融合版保留
+        ok=True，气泡数只记进 evidence 不作反证。
         """
         self.im.cur = {"convId": self.conv_a}
+        self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
+                              "status": "OK"}]
+        rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertTrue(rc["ok"])
+        self.assertEqual(rc["verdict"].level, "strong")
+        self.assertTrue(rc["verdict"].evidence["recipient_ok"])
+
+    def test_ok_receipt_without_conv_id_is_success_but_weak(self):
+        """回执 ok 但 DOM 连会话 id 都读不到 → 点不出收件人，只能算弱证据。
+
+        回执里没有收件人字段（`decode_send_resp` 只解 code/status/message_id），
+        所以"服务端收下了一条消息"证明不了"收件人是甲同学"。
+        """
+        self.im.cur = {}                      # 读不到当前会话
+        self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
+                              "status": "OK"}]
+        rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertTrue(rc["ok"])
+        self.assertEqual(rc["verdict"].level, "medium")
+        self.assertIn("无法确认收件人是目标", rc["verdict"].reason)
+
+    def test_ok_receipt_with_dom_growth_in_target_conv_is_strong(self):
+        """回执 ok + 目标会话里多了一个自己发的气泡（文本也对得上）→ 强证据。"""
+        self.im.cur = {"convId": self.conv_a}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "你好"}
         self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
                               "status": "OK"}]
         rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
@@ -1340,6 +1625,38 @@ class ReceiptVerdictIntegrationTests(unittest.TestCase):
         self.im.cur = None
         self.im.mon.sends = []
         rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertFalse(rc["ok"])
+
+    def test_dom_only_confirmation_accepts_multiline_template(self):
+        """多行模板：气泡 textContent 里没有换行，DOM 确认照样要建得起来。
+
+        改造前 head 是 `"早上好\\n晚安"[:8]`（含 `\\n`）→ startswith 永远不成立 →
+        dom 一直是 None → 没有 HTTP 回执时判失败 → 任务层重发同一条 → 好友收到两条。
+        """
+        self.im.cur = {"convId": self.conv_a}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "早上好晚安"}
+        self.im.mon.sends = []
+        rc = self.im._wait_receipt(0, self.before, "早上好\n晚安", 0.2, hit=self.item)
+        self.assertTrue(rc["dom"], "DOM 确认没建起来：文本判据没接进 _wait_receipt")
+        self.assertTrue(rc["ok"])
+        self.assertIsNone(rc["http"])
+
+    def test_dom_only_confirmation_accepts_emoji_head(self):
+        """emoji 开头：气泡里那个 emoji 是 <img>，textContent 读不到它。"""
+        self.im.cur = {"convId": self.conv_a}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "早上好"}
+        self.im.mon.sends = []
+        rc = self.im._wait_receipt(0, self.before, "🎉早上好", 0.2, hit=self.item)
+        self.assertTrue(rc["dom"])
+        self.assertTrue(rc["ok"])
+
+    def test_dom_growth_with_unrelated_last_text_is_not_confirmed(self):
+        """气泡涨了、最后一条也是自己发的，但文本明显对不上 → 不确认（不放宽判据）。"""
+        self.im.cur = {"convId": self.conv_a}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "昨天的消息"}
+        self.im.mon.sends = []
+        rc = self.im._wait_receipt(0, self.before, "早上好", 0.2, hit=self.item)
+        self.assertIsNone(rc["dom"])
         self.assertFalse(rc["ok"])
 
 
@@ -1407,12 +1724,21 @@ class SendLimitWiringTests(unittest.TestCase):
         def _input_mode(self):
             return "real"
 
+        def _type_real(self, editor, lines, dry):
+            # 这些用例钉的是回执/熔断/登录态接线，打字机制由 ReplaceTypingTests 覆盖。
+            self.typed_text = "\n".join(lines)
+            return True
+
         def _editor(self):
             return self.editor
 
         def _click_send(self):
             self.send_clicks += 1
             return "btn"
+
+        # 这些用例把发送点击换成了自己的计数器（`_click_send`），
+        # 所以显式声明走可信点击那条线（生产默认 False，见 PREFER_TRUSTED_CLICK）。
+        PREFER_TRUSTED_CLICK = True
 
         def _msg_state(self):
             return {"count": 1, "lastFromMe": False, "convId": None}
@@ -1490,6 +1816,68 @@ class SendLimitWiringTests(unittest.TestCase):
         self.assertEqual(im.send_clicks, 1)
 
 
+class ClickCredentialTests(unittest.TestCase):
+    """发送凭据：`wait_receipt=False` 这条路不许把"根本没点下去"记成成功。
+
+    审计现场（修复前 core/douyin_im.py:2711-2712）：`how = self._js_click_send()`
+    在按钮找不到 / JS 抛异常时返回 None，调用方却无条件 `return dict(base, ok=True,
+    via=how)` —— 一个字符都没出去也记成"已发送"，任务层当天不再重试（朋友那边火花
+    照断），而账本和面板上写着成功。这里把"有凭据 / 没凭据"两条路都钉住。
+    """
+
+    class _Page:
+        def __init__(self):
+            self.keyboard = SendLimitWiringTests._Kbd()
+
+        def evaluate(self, expr, *a):
+            if expr is douyin_im.JS_EDITOR_EMPTY:
+                return True                       # 没有草稿残留，别走清空分支
+            if expr is douyin_im.JS_EDITOR_EXISTS:
+                return True
+            if expr is douyin_im.JS_EDITOR_TEXT:
+                return {"text": "", "len": 0}
+            if expr is douyin_im.JS_TYPE_LINE:
+                # 合成输入要报"这一行进去了几个字"：返回 grew=0 时 `type_and_send`
+                # 会以"合成输入一行都没进去"抛错，那就永远走不到点击那一步。
+                return {"grew": len((a[0] or {}).get("text") or ""), "brk": "ok"}
+            return None
+
+        def wait_for_timeout(self, ms):
+            pass
+
+    class _IM(_Stub):
+        def __init__(self, how):
+            super().__init__()
+            self.page = ClickCredentialTests._Page()
+            self.mon = type("M", (), {"sends": []})()
+            self.how = how
+
+        def _input_mode(self):
+            return "synth"                        # 合成输入这条路才会用 JS 点击
+
+        def _js_click_send(self):
+            return self.how
+
+    def _send(self, how):
+        im = self._IM(how)
+        out = im.type_and_send({"conv_id": f"0:1:{ME}:{PEER_A}", "uid": PEER_A,
+                                "display": "甲同学"}, "你好", wait_receipt=False)
+        return im, out
+
+    def test_missing_click_credential_is_not_reported_as_sent(self):
+        """`_js_click_send()` 返回 None（按钮没找到 / JS 抛异常）→ ok 必须是 False。"""
+        im, out = self._send(None)
+        self.assertFalse(out["ok"])
+        self.assertIsNone(out["via"])
+        self.assertTrue(out["reason"], "没发出去却连原因都不写，面板上只会看到一行空白")
+
+    def test_click_credential_still_reports_success(self):
+        """拿到 "js" 凭据 → 照旧算成功，via 带上凭据来源（别把好数据也一起压掉）。"""
+        im, out = self._send("js")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["via"], "js")
+
+
 class MsgStateConvIdTests(unittest.TestCase):
     """`_msg_state()` 必须带出 convId —— 回执裁决的会话归属全靠它。"""
 
@@ -1530,7 +1918,7 @@ class MsgStateConvIdTests(unittest.TestCase):
 class LoginVerdictVetoTests(unittest.TestCase):
     """登录态判定不许"乐观通过"。
 
-    线上实测到的 bug：.172 上一台**从未登录过**的机器跑 dry-run，页面明明是扫码登录框
+    线上实测到的 bug：本机 上一台**从未登录过**的机器跑 dry-run，页面明明是扫码登录框
     （body 里是"扫码登录 / 验证码登录 / 密码登录"），日志却打出
     `[LOGIN] ✅ 已登录  user_id=2117023095855936` —— 因为抖音给**匿名访客**也会发
     `odin.user_id`，而 `scrape_ssr` 只看"有没有数字 id"、从不看抖音自己写的 `isLogin`。
@@ -1684,7 +2072,7 @@ class IdentitySelectionTests(unittest.TestCase):
 class LoginRecheckTests(unittest.TestCase):
     """「发送拿不到回执」与「登录已失效」必须分开报。
 
-    2026-10-09 wheat 的真实事故：网页登录态失效之后页面**仍然长着 IM 的样子**，
+    2026-10-09 示例号 的真实事故：网页登录态失效之后页面**仍然长着 IM 的样子**，
     点击发送照样"成功"、回执永远不来，4 个目标被记成「发送失败」而整轮按 ok 记账
     —— 面板上一切正常，人却在等消息，而且当天再也不会重试。这里把接线钉住：
     发送失败要复检登录态，复检出掉登录要（1）带 `login_lost` 出来，
@@ -1708,12 +2096,21 @@ class LoginRecheckTests(unittest.TestCase):
         def _input_mode(self):
             return "real"
 
+        def _type_real(self, editor, lines, dry):
+            # 这些用例钉的是回执/熔断/登录态接线，打字机制由 ReplaceTypingTests 覆盖。
+            self.typed_text = "\n".join(lines)
+            return True
+
         def _editor(self):
             return self.editor
 
         def _click_send(self):
             self.send_clicks += 1
             return "btn"
+
+        # 这些用例把发送点击换成了自己的计数器（`_click_send`），
+        # 所以显式声明走可信点击那条线（生产默认 False，见 PREFER_TRUSTED_CLICK）。
+        PREFER_TRUSTED_CLICK = True
 
         def _msg_state(self):
             return {"count": 1, "lastFromMe": False, "convId": None}
@@ -1791,7 +2188,7 @@ class LoginRecheckTests(unittest.TestCase):
 class ListTimeoutLoginRecheckTests(unittest.TestCase):
     """列表等不到时先复检登录态：登录失效要报「登录已失效」，不是「等待超时」。
 
-    2026-10-09 wheat：网页登录态失效后，2026-10 新版登录弹窗（没有 `data-e2e`，
+    2026-10-09 示例号：网页登录态失效后，2026-10 新版登录弹窗（没有 `data-e2e`，
     只有 `.douyin_login_new_class` / `#douyin_login_comp_*`）画在页面上，
     旧选择器一个都没命中 → 门禁判成 TIMEOUT。而面板上"超时"没法告诉用户
     该去重新扫码，只有"登录已失效"才指向唯一的出路。
@@ -1882,6 +2279,563 @@ class NewLoginDialogDetectionTests(unittest.TestCase):
         for token in ("douyin_login_new_class", "douyin_login_comp_mobile_code",
                       "loginNew", "loginWords"):
             self.assertIn(token, js)
+
+
+class _ProbePage:
+    """`_input_mode` / `_select_all` / `_type_real` / `_type_synth` 的最小页面替身。
+
+    形状由 2026-10-15 的真机取证决定：
+      * `insert_text`（CDP `Input.insertText`）是可信输入里**唯一可靠**的那条 ——
+        `page.keyboard.type` 打 ASCII 一个字都进不去（页面收不到按键事件）；
+      * 清空不可信，所以新设计根本不走"清空"这条路，**全选 + 插入**才是覆盖。
+
+    `trusted_text` 模拟可信输入打完之后编辑器里剩下什么：
+      * `"same"`   —— 精确落地（全选生效，插入即覆盖）；
+      * `"append"` —— 选区没生效、插入变成追加（老毛病：叠字）；
+      * 其它字符串 —— 直接指定残留内容（模拟掉字现场，如 `<>` 没进去）。
+    `synth_lands` 决定 JS 覆盖输入（`JS_REPLACE_TEXT`）能不能打进去；
+    `js_sel_in` 决定它内部那次原生全选有没有落在编辑器里（真机上只有落在编辑器里
+    的**原生**选区才管用，元素级选区配 execCommand 是 no-op —— 见 `JsReplaceTests`）。
+    """
+
+    def __init__(self, events=(), *, editor=True, text="", trusted_text="same",
+                 synth_lands=True, backspace_works=True, clear_script=("key", "key"),
+                 js_sel_in=True, select_all_ok=True, boom=None):
+        self.events = list(events)
+        self.editor = editor
+        self.text = text
+        self.trusted_text = trusted_text
+        self.synth_lands = synth_lands
+        self.js_sel_in = js_sel_in       # 原生全选有没有落在编辑器里
+        self.select_all_ok = select_all_ok   # JS_SELECT_ALL 这条通道本身通不通
+        self.backspace_works = backspace_works
+        self.script = list(clear_script)
+        self.boom = boom
+        self.evals = []
+        self.moves = []
+        self.typed = []            # ("cdp-insert"|"cdp-type"|"synth", 文本)
+        self.js_replaces = []      # JS 覆盖输入打进去的文本
+        self.presses = []
+        self.selected_text = None
+        self.clicked = 0
+        self.keyboard = self       # page.keyboard.insert_text / type / press
+        self.mouse = self          # page.mouse.move
+
+    # —— CDP 鼠标 / 键盘 ——
+    def move(self, x, y):
+        self.moves.append((x, y))
+
+    def insert_text(self, s):
+        """CDP 可信输入：真机实测这条可靠（全选生效时是覆盖）。"""
+        self.typed.append(("cdp-insert", s))
+        if self.trusted_text == "same":
+            self.text = s
+        elif self.trusted_text == "append":
+            self.text += s
+        else:
+            self.text = self.trusted_text
+
+    def type(self, s):
+        """老路径：真机上 ASCII 一个字都进不去，这里如实模拟（不落地）。"""
+        self.typed.append(("cdp-type", s))
+
+    def press(self, key):
+        self.presses.append(key)
+        if key == "Backspace" and self.backspace_works and self.text:
+            self.text = self.text[:-1]
+        elif key == "Shift+Enter":
+            self.text += "\n"
+
+    def click(self, **kw):
+        self.clicked += 1
+        self.click_kw = dict(kw)
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def evaluate(self, expr, arg=None):
+        self.evals.append(expr)
+        if self.boom is not None:
+            raise self.boom
+        if expr is douyin_im.DouyinIM.JS_INPUT_PROBE:
+            return "hooked"
+        if isinstance(expr, str) and "__improbe" in expr:
+            if "splice" in expr:
+                out, self.events = list(self.events), []
+                return out
+            return None
+        if expr is douyin_im.JS_EDITOR_EXISTS:
+            return self.editor
+        if expr is douyin_im.JS_EDITOR_TEXT:
+            if not self.editor:
+                return None
+            return {"text": self.text, "len": len(self.text)}
+        if expr is douyin_im.JS_EDITOR_EMPTY:
+            return self.text.strip() == ""
+        if expr is douyin_im.JS_EDITOR_CLEAR:
+            act = self.script.pop(0) if self.script else "lie"
+            if act == "key":
+                self.text = ""
+                return {"ok": True, "how": "key", "left": ""}
+            if act == "already":
+                return {"ok": True, "how": "already-empty", "left": ""}
+            if act == "none":
+                return {"ok": False, "how": "none", "left": self.text[:20]}
+            return {"ok": True, "how": "key", "left": ""}   # lie：说清好了，其实没清
+        if expr is douyin_im.JS_SELECT_ALL:
+            if not self.editor or not self.select_all_ok:
+                return None
+            self.selected_text = self.text
+            return self.text
+        if expr is douyin_im.JS_REPLACE_TEXT:
+            text = (arg or {}).get("text") or ""
+            self.js_replaces.append(text)
+            if self.synth_lands:
+                self.text = text          # 选区被替换 = 覆盖，不是追加
+            return {"ok": bool(self.synth_lands), "sel_in": self.js_sel_in,
+                    "before": 0, "after": len(text)}
+        if expr is douyin_im.JS_TYPE_LINE:
+            if not self.editor:
+                return {"ins": False, "grew": 0, "brk": "none"}
+            self.typed.append(("synth", (arg or {}).get("text")))
+            if arg and arg.get("text"):
+                self.text += arg["text"]
+            return {"ins": True, "grew": 1, "brk": "ins"}
+        return None
+
+
+class _TypingIM:
+    """借用真方法的最小宿主（与 `_ClearIM` 同款：不构造 DouyinIM）。"""
+
+    JS_INPUT_PROBE = douyin_im.DouyinIM.JS_INPUT_PROBE
+    PREFER_TRUSTED_CLICK = douyin_im.DouyinIM.PREFER_TRUSTED_CLICK
+    _input_mode = douyin_im.DouyinIM._input_mode
+    _log_input_evidence = douyin_im.DouyinIM._log_input_evidence
+    _select_all = douyin_im.DouyinIM._select_all
+    _typing_landed = douyin_im.DouyinIM._typing_landed
+    _type_synth = douyin_im.DouyinIM._type_synth
+    _type_real = douyin_im.DouyinIM._type_real
+    _try_trusted_typing = douyin_im.DouyinIM._try_trusted_typing
+    _type_js_replace = douyin_im.DouyinIM._type_js_replace
+    EDITOR_CLICK_TIMEOUT_MS = douyin_im.DouyinIM.EDITOR_CLICK_TIMEOUT_MS
+    READBACK_ATTEMPTS = douyin_im.DouyinIM.READBACK_ATTEMPTS
+    READBACK_SETTLE_MS = douyin_im.DouyinIM.READBACK_SETTLE_MS
+    _editor_probe = douyin_im.DouyinIM._editor_probe
+    _clear_editor = douyin_im.DouyinIM._clear_editor
+
+    def __init__(self, page, mode=None):
+        self.page = page
+        self._editor_dirty = True
+        self._input_mode_cache = mode
+
+    def _editor(self):
+        """`_type_real` 重试前会**重新取一次**编辑器（上一轮的节点可能已被 React 换掉）。"""
+        return self.page if getattr(self.page, "editor", True) else None
+
+
+class OptimisticInputModeTests(unittest.TestCase):
+    """输入方式不再"先探测再决定"（2026-10-15 真机推翻了事件探针这条路）。
+
+    老版拿"页面收不收可信事件"当判据：真机上 CDP 的鼠标/按键事件根本到不了页面，
+    于是永远判 synth —— 而生产一直在走 JS 合成输入（`isTrusted=false`）。现在改成
+    **乐观先试可信输入**，由落地校验决定成败并缓存到本进程；事件探针只当日志证据。
+    """
+
+    def test_defaults_to_real_without_a_probe(self):
+        self.assertEqual(_TypingIM(_ProbePage())._input_mode(), "real")
+
+    def test_cached_mode_wins(self):
+        self.assertEqual(_TypingIM(_ProbePage(), mode="synth")._input_mode(), "synth")
+        self.assertEqual(_TypingIM(_ProbePage(), mode="real")._input_mode(), "real")
+
+    def test_evidence_is_logged_once_through_cdp_moves(self):
+        page = _ProbePage([{"t": "mousemove", "trusted": True}])
+        im = _TypingIM(page)
+        im._input_mode()
+        self.assertTrue(im._input_evidence_logged)
+        self.assertEqual(page.moves, [(2, 2), (6, 6)])
+        page.moves = []
+        im._input_mode()
+        self.assertEqual(page.moves, [])          # 第二次不再探
+
+    def test_evidence_failure_does_not_change_the_mode(self):
+        im = _TypingIM(_ProbePage(boom=RuntimeError("页面没了")))
+        self.assertEqual(im._input_mode(), "real")   # 探针炸了也照样先试可信输入
+
+    def test_probe_result_never_decides_the_mode(self):
+        """源码级守卫：`_input_mode` 的代码里不许再出现 synth 判定。"""
+        src = Path(douyin_im.__file__).read_text(encoding="utf-8")
+        body = src.split("def _input_mode(self):", 1)[1].split("def _log_input_evidence", 1)[0]
+        code = body.split('"""')[2]              # 去掉 docstring，只看代码
+        self.assertIn('return "real"', code)
+        self.assertNotIn("synth", code)
+
+    def test_hook_still_watches_move_events(self):
+        js = douyin_im.DouyinIM.JS_INPUT_PROBE
+        for token in ("pointermove", "mousemove", "isTrusted"):
+            self.assertIn(token, js)
+        self.assertNotIn("__imev", js)          # 不污染选中链路的点击诊断
+
+
+class SelectAllTests(unittest.TestCase):
+    """全选是"覆盖式重打"的地基：只动选区、不插字。"""
+
+    def test_select_all_reports_the_selected_text(self):
+        page = _ProbePage(text="旧文本")
+        self.assertTrue(_TypingIM(page)._select_all())
+        self.assertEqual(page.selected_text, "旧文本")
+        self.assertEqual(page.text, "旧文本")     # 只选中，没动内容
+
+    def test_select_all_without_editor_is_false(self):
+        self.assertFalse(_TypingIM(_ProbePage(editor=False))._select_all())
+
+    def test_select_all_exception_is_false(self):
+        self.assertFalse(_TypingIM(_ProbePage(boom=RuntimeError("页面没了")))._select_all())
+
+
+class TypingLandedTests(unittest.TestCase):
+    """落地校验是**精确比较**：真机上可信输入会掉字（`<`/`>` 就是进不去）。"""
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_exact_match_lands(self):
+        page = _ProbePage(text=self.LINES[0])
+        self.assertTrue(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_partial_text_is_not_landed(self):
+        page = _ProbePage(text="续火花˵ㅿ˵")          # 真机实测：<> 掉了
+        self.assertFalse(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_extra_text_is_not_landed(self):
+        """多出来也算不一致 —— 那是"上一条没清干净"的叠字现场。"""
+        page = _ProbePage(text="续火花续火花˵ㅿ")
+        self.assertFalse(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_whitespace_differences_are_ignored(self):
+        page = _ProbePage(text="续火花˵>\nㅿ<˵")
+        self.assertTrue(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_unreadable_editor_is_not_a_disproof(self):
+        """编辑器在、只是读不到内容 —— 不算反证（与 `_residue_echo` 同一取舍）。"""
+        page = _NoReadbackPage()
+        self.assertTrue(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_a_missing_editor_is_a_disproof(self):
+        """编辑器**确定不存在**是反证：字不可能在里面，不能算"落地"。"""
+        page = _ProbePage(editor=False)
+        self.assertFalse(_TypingIM(page)._typing_landed(self.LINES))
+
+
+class _FastClock:
+    """把 `_type_synth` 的"等编辑器就绪 10 秒"压缩成瞬时（测试不睡真实时间）。"""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        self.t += 1.0
+        return self.t
+
+
+class _NoReadbackPage(_ProbePage):
+    """编辑器存在、但内容读不回来的页面（`innerText` 取不到那种退化）。"""
+
+    def evaluate(self, expr, arg=None):
+        if expr is douyin_im.JS_EDITOR_TEXT:
+            return None
+        return super().evaluate(expr, arg)
+
+
+class _StalePage(_ProbePage):
+    """读回"迟到"的页面：前几次读到的还是旧内容，之后才是真内容。
+
+    真机上 `insert_text` 之后编辑器的 state 未必立刻重渲染完 —— 一次读回就判死会把
+    "其实打进去了"误判成没落地（白退一次、甚至白拒一条）。
+    """
+
+    def __init__(self, *a, stale=(), **kw):
+        super().__init__(*a, **kw)
+        self.stale = list(stale)
+        self.text_reads = 0
+
+    def evaluate(self, expr, arg=None):
+        if expr is douyin_im.JS_EDITOR_TEXT:
+            self.text_reads += 1
+            if self.stale:
+                return {"text": self.stale.pop(0), "len": 0}
+        return super().evaluate(expr, arg)
+
+
+class _TruncatingPage(_ProbePage):
+    """`JS_TYPE_LINE` 只打进去一部分的页面（模拟"掉字"：读回里没有完整期望文本）。"""
+
+    def evaluate(self, expr, arg=None):
+        if expr is douyin_im.JS_TYPE_LINE:
+            text = (arg or {}).get("text") or ""
+            part = text[:2]
+            self.text += part
+            self.typed.append(("synth", text))
+            return {"ins": True, "grew": len(part), "brk": "ins"}
+        return super().evaluate(expr, arg)
+
+
+class ReplaceTypingTests(unittest.TestCase):
+    """可信输入 = 全选 + `insert_text` 覆盖；打不进去就用 JS 覆盖重打；都不成就拒发。
+
+    ★ 为什么不是"清空 + 重打"：真机实测这个编辑器（字节 EditorKit）的清空不可信 ——
+    `_clear_editor` 判"已清空"、读回也是空的，下一次输入旧文本又从编辑器自己的 state
+    里冒出来，退回重打会叠成 `续火花续火花˵ㅿ`。全选 + 插入是**替换**，不会叠。
+    """
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_trusted_insert_that_lands_is_kept(self):
+        page = _ProbePage()
+        im = _TypingIM(page, mode="real")
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(page.typed, [("cdp-insert", self.LINES[0])])
+        self.assertEqual(page.text, self.LINES[0])
+        self.assertEqual(im._input_mode_cache, "real")     # 没有退回
+        self.assertEqual(page.js_replaces, [])             # 没走兜底
+
+    def test_trusted_insert_replaces_a_dirty_editor(self):
+        """编辑器里有脏字时也必须只剩期望消息（覆盖，不是追加）。"""
+        page = _ProbePage(text="ABC<>xyz")
+        im = _TypingIM(page, mode="real")
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(page.text, self.LINES[0])
+
+    def test_partial_landing_falls_back_to_js_replace(self):
+        page = _ProbePage(trusted_text="续火花˵ㅿ˵")        # <> 掉了
+        im = _TypingIM(page, mode="real")
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(im._input_mode_cache, "jsreplace")  # 后续目标不再试错
+        self.assertEqual(page.js_replaces, [self.LINES[0]])
+        self.assertEqual(page.text, self.LINES[0])         # 覆盖，不是叠字
+
+    def test_appending_trusted_insert_is_corrected_by_the_js_path(self):
+        """真机老毛病：选区没生效、可信插入变成追加 → JS 覆盖必须把它救回来。"""
+        page = _ProbePage(text="ABC<>xyz", trusted_text="append")
+        im = _TypingIM(page, mode="real")
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(page.text, self.LINES[0])
+
+    def test_both_paths_failing_refuses_to_send(self):
+        page = _ProbePage(trusted_text="续", synth_lands=False)
+        im = _TypingIM(page, mode="real")
+        with self.assertRaises(RuntimeError) as ctx:
+            im._type_real(page, self.LINES, "none")
+        self.assertIn("拒绝发送", str(ctx.exception))
+        self.assertNotEqual(page.text, self.LINES[0])
+
+    def test_second_trusted_attempt_saves_the_message(self):
+        """第一次没落地时**必须重试可信输入**，别一步退到不可靠的 JS 通道。"""
+        page = _FlakyPage(fail_times=1)
+        im = _TypingIM(page, mode="real")
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(page.text, self.LINES[0])
+        self.assertEqual(im._input_mode_cache, "real")     # 没退到 JS 通道
+        self.assertEqual(page.js_replaces, [])
+        self.assertEqual(page.insert_calls, 2)             # 真的重试过一次
+        self.assertGreaterEqual(page.clicked, 2)           # 重试时重新点了编辑器
+
+    def test_editor_click_timeout_is_actually_passed(self):
+        """回归：类常量在方法体里必须写 `self.`。
+
+        裸写 `EDITOR_CLICK_TIMEOUT_MS` 会变成全局名查找 → `NameError` → 被
+        `except Exception` 吞掉 —— 现场表现是「点了编辑器、但超时根本没传下去」
+        （真机上就是这么错过一次：点击一直用上下文默认的几十秒超时）。
+        """
+        page = _FlakyPage()
+        im = _TypingIM(page, mode="real")
+        im._try_trusted_typing(page, self.LINES)
+        self.assertEqual(page.click_kw,
+                         {"timeout": douyin_im.DouyinIM.EDITOR_CLICK_TIMEOUT_MS})
+
+    def test_retry_falls_through_when_the_editor_is_gone(self):
+        """重试前要重新取编辑器；取不到就跳过重试，直接走 JS 覆盖（不能崩）。"""
+        page = _FlakyPage(fail_times=99)
+        im = _TypingIM(page, mode="real")
+        im._editor = lambda: None
+        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        self.assertEqual(im._input_mode_cache, "jsreplace")
+        self.assertEqual(page.text, self.LINES[0])
+
+    def test_no_editor_refuses_to_send(self):
+        page = _ProbePage(editor=False)
+        im = _TypingIM(page, mode="real")
+        with self.assertRaises(RuntimeError):
+            im._type_real(page, self.LINES, "none")
+
+    def test_synth_zero_typing_refuses_to_send(self):
+        page = _ProbePage(editor=False)
+        im = _TypingIM(page, mode="real")
+        with mock.patch.object(douyin_im, "time", _FastClock()):
+            with self.assertRaises(RuntimeError) as ctx:
+                im._type_synth(self.LINES, "none")
+        self.assertIn("一行都没进去", str(ctx.exception))
+
+    def test_synth_zero_typing_in_dry_run_only_warns(self):
+        page = _ProbePage(editor=False)
+        im = _TypingIM(page, mode="real")
+        with mock.patch.object(douyin_im, "time", _FastClock()):
+            im._type_synth(self.LINES, douyin_im.DRY_RUN_FULL)  # 不抛
+
+
+class _FlakyPage(_ProbePage):
+    """可信输入**第一次不落地、第二次才落地**的页面。
+
+    真机上"没落地"多半是焦点/选区还没生效（刚切过来的会话、上一轮的选区还挂在旧
+    节点上）—— 重新点一次编辑器再来一遍就好了。这条替身守的就是那层重试：没有它，
+    一次抖动就会白退到 JS 覆盖通道，而那条通道在本编辑器上**不可靠**（真机取证见
+    `JS_REPLACE_TEXT` 的注释），最后只能拒发 = 漏发一条。
+    """
+
+    def __init__(self, *a, fail_times=1, **kw):
+        super().__init__(*a, **kw)
+        self.fail_times = fail_times
+        self.insert_calls = 0
+
+    def insert_text(self, s):
+        self.insert_calls += 1
+        if self.insert_calls <= self.fail_times:
+            self.typed.append(("cdp-insert", s))      # 记一笔，但不落地
+            return
+        super().insert_text(s)
+
+
+class SameTextTests(unittest.TestCase):
+    """落地判据 `_same_text`：逐行比，退化时才整体折叠比。"""
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_exact_is_true(self):
+        self.assertTrue(douyin_im._same_text(self.LINES[0], self.LINES))
+
+    def test_line_break_shape_is_tolerated(self):
+        self.assertTrue(douyin_im._same_text("续火花˵>\nㅿ<˵", self.LINES))
+
+    def test_partial_is_false(self):
+        self.assertFalse(douyin_im._same_text("续火花˵ㅿ˵", self.LINES))
+
+    def test_duplicated_is_false(self):
+        self.assertFalse(douyin_im._same_text("续火花续火花˵ㅿ", self.LINES))
+
+    def test_multi_line_must_keep_every_line(self):
+        lines = ["第一行", "第二行"]
+        self.assertTrue(douyin_im._same_text("第一行\n第二行", lines))
+        self.assertFalse(douyin_im._same_text("第一行", lines))
+
+
+class ReadbackRetryTests(unittest.TestCase):
+    """读回要重试几拍：state 还没重渲染完时一次读回就判死 = 白拒一条。"""
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_a_late_render_still_counts_as_landed(self):
+        page = _StalePage(text=self.LINES[0], stale=["", ""])
+        self.assertTrue(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_text_that_never_matches_is_still_not_landed(self):
+        page = _StalePage(text="别的字", stale=["", ""])
+        self.assertFalse(_TypingIM(page)._typing_landed(self.LINES))
+
+    def test_attempts_are_bounded(self):
+        page = _StalePage(text=self.LINES[0], stale=[""] * 20)
+        self.assertFalse(_TypingIM(page)._typing_landed(self.LINES))
+        self.assertLessEqual(page.text_reads, _TypingIM.READBACK_ATTEMPTS + 2)
+
+
+class JsReplaceTests(unittest.TestCase):
+    """JS 覆盖通道 `_type_js_replace`：先**原生全选**，再 execCommand 替换。
+
+    ★ 第一版兜底（"元素级选区 + execCommand"）在真机上**完全无效**（`/tmp/ml_probe2.py`：
+      `ok=false`、内容一个字符都不变）⇒ 可信输入一旦掉字就必然走到"拒发" = 漏发。
+      这里把新通道的两条安全线钉住：全选失败且编辑器非空 → 拒发；覆盖后读回不过 → 拒发。
+    """
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_replaces_a_dirty_editor(self):
+        page = _ProbePage(text="ABC<>xyz")
+        im = _TypingIM(page, mode="jsreplace")
+        self.assertTrue(im._type_js_replace(self.LINES, "none"))
+        self.assertEqual(page.text, self.LINES[0])
+        self.assertEqual(page.js_replaces, [self.LINES[0]])
+
+    def test_select_all_failure_with_a_dirty_editor_refuses(self):
+        page = _ProbePage(select_all_ok=False, text="残留")
+        im = _TypingIM(page, mode="jsreplace")
+        with self.assertRaises(RuntimeError) as ctx:
+            im._type_js_replace(self.LINES, "none")
+        self.assertIn("全选失败", str(ctx.exception))
+        self.assertEqual(page.js_replaces, [])       # 一个字都没插进去
+
+    def test_select_all_failure_with_an_empty_editor_is_allowed(self):
+        page = _ProbePage(select_all_ok=False, text="")
+        im = _TypingIM(page, mode="jsreplace")
+        self.assertTrue(im._type_js_replace(self.LINES, "none"))
+        self.assertEqual(page.js_replaces, [self.LINES[0]])
+
+    def test_js_path_that_does_not_land_refuses_to_send(self):
+        page = _ProbePage(text="ABC", synth_lands=False)
+        im = _TypingIM(page, mode="jsreplace")
+        with self.assertRaises(RuntimeError) as ctx:
+            im._type_js_replace(self.LINES, "none")
+        self.assertIn("拒绝发送", str(ctx.exception))
+
+
+class SynthResidueGuardTests(unittest.TestCase):
+    """老 JS 合成输入是**追加**语义：编辑器有残留时必须拒发，而不是叠成一条。"""
+
+    LINES = ["续火花˵>ㅿ<˵"]
+
+    def test_residue_plus_expected_text_refuses(self):
+        page = _ProbePage(text="残留字")
+        im = _TypingIM(page, mode="synth")
+        with self.assertRaises(RuntimeError) as ctx:
+            im._type_synth(self.LINES, "none")
+        self.assertIn("叠发", str(ctx.exception))
+
+    def test_short_typing_still_only_warns(self):
+        """掉字（读回里没有完整期望文本）走老口径：只告警、照发 —— 产品取舍。"""
+        page = _TruncatingPage(text="")
+        im = _TypingIM(page, mode="synth")
+        im._type_synth(self.LINES, "none")           # 不抛
+        self.assertEqual(page.text, "续火")
+
+
+class JsReplaceSourceGuardTests(unittest.TestCase):
+    """源码级守卫：把真机取证钉在代码里，防止"顺手改回去"。"""
+
+    def test_js_replace_does_its_own_native_select_all(self):
+        js = douyin_im.JS_REPLACE_TEXT
+        self.assertIn("execCommand('selectAll')", js)
+        self.assertIn("sel_in", js)
+
+    def test_editor_selectors_match_pick(self):
+        """`_editor()` 的选择器必须与 `JS_EDITOR_SELECTORS.pick()` 完全一致。"""
+        src = Path(douyin_im.__file__).read_text(encoding="utf-8")
+        body = src.split("def _editor(self):", 1)[1].split("def _msg_state", 1)[0]
+        body = body.split('"""')[-1]                 # 去掉 docstring，只看代码
+        pick = src.split("JS_EDITOR_SELECTORS = ", 1)[1].split('"""', 2)[1]
+        for sel in re.findall(r"document\.querySelector\('([^']+)'\)", pick):
+            self.assertIn(sel, body, f"_editor 少了 pick() 里的选择器：{sel}")
+        self.assertNotIn(".messageEditorimChatEditorContainer", body)
+
+
+class ClickDecouplingTests(unittest.TestCase):
+    """点击方式与输入方式解耦：可信鼠标点在虚拟化会话列表上会点错会话。"""
+
+    def test_clicks_use_the_constant_not_the_input_mode(self):
+        src = Path(douyin_im.__file__).read_text(encoding="utf-8")
+        self.assertIn('modes = (("mouse", "elclick", "jsclick") if self.PREFER_TRUSTED_CLICK', src)
+        self.assertIn("how = self._click_send() if self.PREFER_TRUSTED_CLICK else self._js_click_send()", src)
+        self.assertNotIn("if self._input_mode() == 'synth' else self._click_send()", src)
+        self.assertNotIn('if self._input_mode() == "synth"\n                 else ("mouse", "elclick", "jsclick")', src)
+
+    def test_default_prefers_the_proven_js_clicks(self):
+        self.assertFalse(douyin_im.DouyinIM.PREFER_TRUSTED_CLICK)
 
 
 if __name__ == "__main__":

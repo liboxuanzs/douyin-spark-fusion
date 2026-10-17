@@ -43,6 +43,12 @@ GOTO_TIMEOUT_MS = 180_000
 # 一次扫码会话的总预算（秒）。二维码本身也会过期，超时就让用户重开一次。
 DEFAULT_TTL_SECONDS = 300.0
 
+#: 会话超过 TTL 之后还活着多久，就认定它卡死、由守夜线程强制收尾（秒）。
+#: 卡死的典型形态是浏览器停止响应，`page.evaluate` 永远不返回。
+WATCHDOG_GRACE_SECONDS = 120.0
+#: 用户点了取消之后，浏览器还没关完的宽限（秒）。
+CANCEL_GRACE_SECONDS = 20.0
+
 # 轮询间隔（毫秒）。**必须用 Playwright 自己的等待**（page.wait_for_timeout）：
 # 用 time.sleep 会挡住事件泵，page.on("response") 的回调永远不执行。
 POLL_INTERVAL_MS = 700
@@ -52,6 +58,10 @@ VERIFY_TIMEOUT_SECONDS = 60.0
 
 # 账号资料接口的等待（秒）：先原地等，再考虑扫 localStorage 兜底
 PROFILE_GRACE_SECONDS = 6.0
+
+# 资料目录的权限位：Chromium 的 Cookies sqlite（抖音 sessionid 就在里面）连同整份登录态
+# 都落在这个目录下，只给本用户。单元文件是 User=root，同机其它用户没有任何理由读得到它。
+PROFILE_DIR_MODE = 0o700
 
 # 二维码多久没换新就判定「页面停摆」（秒）。
 # 抖音的登录码实测 ~60 秒就过期换新（qr_seq 每 60 秒左右自增一次，换出来的
@@ -374,6 +384,63 @@ def _looks_like_login_form(probe, inputs, text) -> bool:
     return any(word in text for word in LOGIN_PAGE_WORDS)
 
 
+def _chmod_profile_root(path: str) -> None:
+    """把资料**根目录**收紧为 0700（只认 `login-profile` 这一层，见调用处）。
+
+    失败只记一行 WARNING：目录本身已经能用了，登录不该因为一个权限位失败。
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(parent) != "login-profile":
+        return
+    try:
+        os.chmod(parent, PROFILE_DIR_MODE)
+    except Exception as exc:                                     # noqa: BLE001
+        logger.warning(f"[QR] 资料根目录收权限失败（应为 {PROFILE_DIR_MODE:o}）：{parent}"
+                       f"：{type(exc).__name__}: {exc}")
+
+
+def _goto_timeout_ms(deadline=None) -> int:
+    """导航超时：没给截止时刻就用 `GOTO_TIMEOUT_MS`，给了就按**剩余预算**收缩。
+
+    `page.goto(timeout=)` 是"等多久不再等"、不是"多久之后中断请求"，所以 TTL 本来
+    就只是软上限；但把超时收进预算里，至少不会让一次自愈把会话拖到 TTL 的 1.5 倍
+    （那段时间资料目录一直被占着，面板看起来像卡死）。
+    """
+    if deadline is None:
+        return GOTO_TIMEOUT_MS
+    remain_ms = (float(deadline) - time.time()) * 1000.0
+    return int(max(MIN_GOTO_TIMEOUT_MS, min(float(GOTO_TIMEOUT_MS), remain_ms)))
+
+
+def _ensure_profile_dir(path) -> str:
+    """建出资料目录，并把权限收紧为 0700（`PROFILE_DIR_MODE`）。
+
+    为什么不能只靠 `os.makedirs(mode=...)` —— 两个地方都会漏：
+      · `mode` 只作用于**新建的叶子目录**，上级目录照旧按 umask 走（通常 755）；
+      · 目录要是早就存在（老版本建出来的 755），`exist_ok=True` 直接返回，一位权限都不改。
+    所以建完再无条件 `chmod` 一次：连已经存在的老目录也能就地收紧，不用人工去改。
+
+    收权限失败**绝不往外抛**：目录本身已经能用了，登录不该因为一个权限位失败，
+    日志留一行（成功 DEBUG / 失败 WARNING）够事后排查就行。
+    """
+    path = str(path)
+    os.makedirs(path, mode=PROFILE_DIR_MODE, exist_ok=True)
+    # ★ 资料**根目录**（`logs/login-profile`）也要收一次：`os.makedirs(mode=...)`
+    #   只作用于新建的叶子，中间目录按 umask 走 755 —— 同机其它用户因此能列出
+    #   "这台机器上跑着哪些抖音号"（凭据本体在叶子里，叶子一直是 700）。
+    #   只认 `login-profile` 这一层，**不碰 `logs/`**：日志目录还有别的工具要读。
+    _chmod_profile_root(path)
+    try:
+        os.chmod(path, PROFILE_DIR_MODE)
+    except Exception as exc:                                     # noqa: BLE001
+        logger.warning(
+            f"[QR] 资料目录收权限失败（应为 {PROFILE_DIR_MODE:o}）：{path}"
+            f"：{type(exc).__name__}: {exc}")
+        return path
+    logger.debug(f"[QR] 资料目录权限已收紧为 {PROFILE_DIR_MODE:o}：{path}")
+    return path
+
+
 def _launch_context(profile_dir, *, args, proxy):
     """启动**持久化**上下文（实现在 `core.browser.launch_persistent_context`）。
 
@@ -411,6 +478,9 @@ class QrLoginSession(threading.Thread):
         self._started_at = time.time()
         self._updated_at = self._started_at
         self._finished_at = 0.0
+        self._cancel_at = 0.0      # 用户点取消的时刻（守夜线程据此缩短宽限）
+        self._forced = ""          # 非空 = 守夜线程强制收尾过（原因，排障用）
+        self._watchdog_started = False
         self.result = None          # 成功后：cookies / 账号资料 / 诊断信息
         self.persist = None         # on_success 的返回值（写了哪个键、备份在哪）
         self.browser = ""           # 实际用上的后端名（排障用）
@@ -425,6 +495,7 @@ class QrLoginSession(threading.Thread):
         # ---- 「这个上下文算登录了吗」的旁路确认 ----
         self._cookie_sig = ()       # 扫码页就绪时那份登录 cookie 的指纹（见 login_cookie_signature）
         self._last_login_probe = 0.0
+        self._code_base_sig = ()    # 进入二次验证那一刻的指纹（掉登录重扫时它正是那份作废的 cookie）
         self._code_value = ""       # 面板送进来的验证码（会话线程取走就清空）
         self._code_event = threading.Event()
         self._code_tries = 0        # 已经提交过几次
@@ -475,6 +546,8 @@ class QrLoginSession(threading.Thread):
 
     def cancel(self) -> None:
         self._cancel.set()
+        if not self._cancel_at:
+            self._cancel_at = time.time()
         self.message = "已请求取消，正在关闭浏览器…"
 
     def shot_png(self) -> bytes:
@@ -548,6 +621,7 @@ class QrLoginSession(threading.Thread):
     # ---- 主循环 ----
     def run(self) -> None:                                       # noqa: C901 —— 线性流程，读起来更顺
         ctx = None
+        self._start_watchdog()
         try:
             import core.browser as browser_mod
             args = browser_mod.chrome_args(self.fingerprint or None)
@@ -555,7 +629,8 @@ class QrLoginSession(threading.Thread):
             # 否则拿本机 IP 换来的 cookie 拿到云端去用，等于换了地区，风控一眼就看出来。
             proxy = self.proxy or (browser_mod.get_config().get("proxyAddress") or "")
             self._set(STATE_STARTING, "正在启动隐身浏览器…")
-            os.makedirs(self.profile_dir, exist_ok=True)
+            # 用 user-data-dir 之前先把权限收紧（里面全是登录态），见 `_ensure_profile_dir`
+            _ensure_profile_dir(self.profile_dir)
             ctx = _launch_context(self.profile_dir, args=args, proxy=proxy)
             self.browser = "cloakbrowser" if not self._cancel.is_set() else ""
             try:
@@ -576,8 +651,10 @@ class QrLoginSession(threading.Thread):
             except Exception as exc:                             # noqa: BLE001
                 self.message = f"账号资料钩子注入失败（不影响登录）：{type(exc).__name__}: {exc}"
 
-            # ① 浏览器里可能已经存着登录态（同一个 profile 反复扫码时），先探一次
-            if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
+            # ① 浏览器里可能已经存着登录态（同一个 profile 反复扫码时），先探一次。
+            #    用 has_usable_login_cookie：`expires` 已经写在过去的那份（掉登录后的
+            #    典型状态）没必要再导航一次去问服务端，直接去扫码更省事。
+            if cookie_utils.has_usable_login_cookie(self._cookies_raw(ctx)):
                 self._set(STATE_CHECKING, "浏览器里已有登录态，正在确认…")
                 if self._verify(page, mon, conclusive_exit=True):
                     return self._finish(ctx, page, mon)
@@ -672,7 +749,7 @@ class QrLoginSession(threading.Thread):
                         f"url={page.url[:100]} evaluate 失败 {self._qr_read_fails} 次，"
                         "重新载入登录页")
                     self._set(STATE_WAITING_QR, "二维码卡住了，正在自动重开登录页…")
-                    if self._reopen_login_page(page):
+                    if self._reopen_login_page(page, deadline):
                         last_qr_at = time.time()
                         self._set(STATE_WAITING_SCAN, "请用抖音 App 扫描二维码，并在手机上确认登录")
                     else:
@@ -744,11 +821,33 @@ class QrLoginSession(threading.Thread):
             self._adopt_note({"ok": False, "error": f"资料目录不存在：{src}"})
             return
         if os.path.exists(dst):
-            # 目标已经有了（老账号换设备重扫之类）：不覆盖，把已有那份留着更安全
-            self._adopt_note({"ok": False, "error": f"目标目录已存在，未覆盖：{dst}"})
-            return
+            # 目标已经有了（掉登录后重扫、换设备、或上次搬目录失败留下的半份）。
+            # ★ 以前这里是"直接放弃"，后果很具体：账号继续用旧的、可能已经登出的
+            #   那一份，用户看到的是"扫了码还是没登上"，而**新登录态留在源目录里
+            #   没人用**（新账号的源目录是 `login-profile/default`，面板也不会去清）。
+            #   现在把旧的挪到 `<uid>.stale-<时间戳>`：这个名字不在账号名单里，
+            #   `core/maintenance.prune_orphans` 会在 7 天宽限期之后顺手收走。
+            from core.maintenance import profile_in_use   # 函数内 import：避免 import 期耦合
+
+            if profile_in_use(dst):
+                self._adopt_note({"ok": False,
+                                  "error": f"旧资料目录还被浏览器占着（有单例锁），这次先不搬：{dst}"})
+                return
+            stale = f"{dst}.stale-{time.strftime('%Y%m%d-%H%M%S')}"
+            try:
+                shutil.move(dst, stale)
+            except Exception as exc:                             # noqa: BLE001
+                self._adopt_note({"ok": False,
+                                  "error": f"旧资料目录挪不开（{type(exc).__name__}: {exc}），"
+                                           f"这次先不搬：{dst}"})
+                return
+            logger.warning(f"[QR] 目标资料目录已存在，旧的挪到 {stale}"
+                           "（不在账号名单里，7 天后可被自动清理收走）")
         try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            # 上级就是资料根目录（logs/login-profile）：`_ensure_profile_dir` 会把它
+            # 也收紧为 0700（见 `_chmod_profile_root`），同机其它用户因此连"这台机器上
+            # 有哪些账号目录"都列不出来。
+            _ensure_profile_dir(os.path.dirname(dst))
             shutil.move(src, dst)
         except Exception as exc:                                 # noqa: BLE001
             self._adopt_note({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -784,6 +883,23 @@ class QrLoginSession(threading.Thread):
             return False
         self._cookie_sig = sig
         return True
+
+    def _login_started_since_code_page(self, ctx) -> bool:
+        """二次验证页上，登录 cookie 是不是"换了一份新的"。
+
+        这里**绝不能**用 `has_login_cookie`（只看名字）：掉登录之后重扫二维码时，
+        资料目录里躺着的正是上一轮那份**已被服务端作废**的 `sessionid`，名字一模一样
+        —— 名字判据会在一进这个页面就为真。2026-10-11 现场：面板已经代用户点过
+        「接收短信验证码」（短信真的发出去了），用户却永远看不到输入框，几十秒后
+        以 `verify_failed` 收场，重试多少次都一样。
+
+        基准是进入二次验证那一刻的指纹（`_code_base_sig`）：进来时没有登录 cookie
+        的话，现在有了也算"新的"。
+        """
+        sig = self._cookie_signature(ctx)
+        if not sig:
+            return False
+        return sig != getattr(self, "_code_base_sig", ())
 
     def _probe_logged_in(self, ctx) -> bool:
         """在**旁边的标签页**上问服务端：这份登录态算数吗？
@@ -850,14 +966,18 @@ class QrLoginSession(threading.Thread):
             page.wait_for_timeout(POLL_INTERVAL_MS)
         return b""
 
-    def _reopen_login_page(self, page) -> bool:
+    def _reopen_login_page(self, page, deadline=None) -> bool:
         """页面停摆时的自愈：整页重开一次，重新把二维码点出来。
 
         不做「点一下刷新」那种小动作：停摆多半意味着页面的取码轮询已经死了，
         只有重新载入才能拿回一个会自己换码的干净登录面板。
+
+        `deadline` 是**整轮 TTL 的截止时刻**：导航超时按剩余预算收缩（见
+        `_goto_timeout_ms`），免得自愈把会话拖过 TTL 太多。
         """
         try:
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+            page.goto(LOGIN_URL, wait_until="domcontentloaded",
+                      timeout=_goto_timeout_ms(deadline))
         except Exception as exc:                                 # noqa: BLE001
             # 超时 ≠ 导航失败：Playwright 只是不再等，请求仍在继续
             logger.warning("[QR] 自愈时重新载入登录页超时，继续等页面就绪："
@@ -1043,7 +1163,12 @@ class QrLoginSession(threading.Thread):
                 if code:
                     return code
             self._shot(page)
-            if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
+            # 这里只做便宜的指纹比较，**不**去开旁路标签页问服务端：这一步的主线是
+            # 等用户在面板上敲码，`_probe_logged_in` 一次最多要占 LOGIN_PROBE_SECONDS，
+            # 会把"用户已经提交了验证码"这件事最多压后这么久才发现。
+            # "服务端认了但 cookie 值没变"那种情况由 `_await_login` 去问。
+            if self._login_started_since_code_page(ctx):
+                logger.info("[QR] 还没填验证码，登录 cookie 就换成新的一份了 —— 视为已经放行")
                 return ""
         return None
 
@@ -1069,12 +1194,24 @@ class QrLoginSession(threading.Thread):
             logger.warning(f"[QR] 回车提交验证码失败：{type(exc).__name__}: {exc}")
 
     def _await_login(self, ctx, page, timeout: float = 0.0) -> bool:
-        """填完码之后等登录 cookie 出现。"""
+        """填完码之后等登录 cookie 出现。
+
+        判据与 `_wait_for_code` 一样只认"换了一份新的"（`has_login_cookie` 只看名字，
+        掉登录重扫时那份作废的 `sessionid` 会让这一步立刻"通过"）。另外按
+        `LOGIN_PROBE_INTERVAL` 的节奏去旁边问一次服务端：服务端可能就把这一份
+        cookie 标记成已验证、值不变 —— 那种情况下只有服务端问得出结论。
+        """
         wait = float(timeout or 0) or CODE_VERIFY_SECONDS
         deadline = time.time() + wait
         while time.time() < deadline and not self._cancel.is_set():
-            if cookie_utils.has_login_cookie(self._cookies_raw(ctx)):
+            if self._login_started_since_code_page(ctx):
+                logger.info("[QR] 验证码提交后，登录 cookie 换成新的一份了")
                 return True
+            if time.time() - self._last_login_probe >= LOGIN_PROBE_INTERVAL:
+                self._last_login_probe = time.time()
+                if self._probe_logged_in(ctx):
+                    logger.info("[QR] 旁路确认：验证码过了，服务端已经认这份登录态")
+                    return True
             self._shot(page)
             page.wait_for_timeout(POLL_INTERVAL_MS)
         return False
@@ -1106,6 +1243,10 @@ class QrLoginSession(threading.Thread):
         if not self._click_texts(page, CODE_RECEIVE_TEXTS, avoid=CODE_SEND_TEXTS, strict=True):
             self._click_texts(page, CODE_RECEIVE_TEXTS, avoid=CODE_SEND_TEXTS)
         self._shot(page)
+
+        # 进入二次验证这一刻的登录 cookie 指纹。整页的放行判据都拿它当基准：
+        # 只有**换了一份新的**才算登录成功（见 `_login_started_since_code_page`）。
+        self._code_base_sig = self._cookie_signature(ctx)
 
         budget = self._code_budget()
         for attempt in range(1, CODE_MAX_ATTEMPTS + 1):
@@ -1236,6 +1377,55 @@ class QrLoginSession(threading.Thread):
         if not result.get("cookie_names"):
             return head
         return f"{head}，已取到 {len(result['cookie_names'])} 项 Cookie"
+
+    # ---- 守夜线程：卡死的会话必须有人收尾 ----
+    def _start_watchdog(self) -> None:
+        """起守夜线程（只起一次）。它只做一件事：卡死时强杀浏览器，见 `_force_kill`。"""
+        if self._watchdog_started:
+            return
+        self._watchdog_started = True
+        threading.Thread(target=self._watch, name="qr-login-watchdog",
+                         daemon=True).start()
+
+    def _watch(self) -> None:
+        """超过预算还没结束就强制收尾。
+
+        - 正常结束（`_finished_at` 置位）或已经在关浏览器（`_closing`）→ 退出；
+        - 用户取消后 `CANCEL_GRACE_SECONDS` 还没关完 → 强制杀；
+        - 超过 `ttl + WATCHDOG_GRACE_SECONDS` → 强制杀。
+        """
+        while True:
+            time.sleep(2.0)
+            if self._finished_at or self._closing:
+                return
+            now = time.time()
+            limit = self._started_at + self.ttl + WATCHDOG_GRACE_SECONDS
+            reason = "超过时限还没结束"
+            if self._cancel_at:
+                limit = min(limit, self._cancel_at + CANCEL_GRACE_SECONDS)
+                reason = "取消后浏览器没有及时关闭"
+            if now >= limit:
+                self._force_kill(reason)
+                return
+
+    def _force_kill(self, reason: str) -> None:
+        """强杀这个资料目录下的浏览器进程，并把会话置成明确的错误态。"""
+        self._forced = reason
+        self._cancel.set()
+        killed = 0
+        try:
+            import core.browser as browser_mod
+            killed = browser_mod.kill_profile_processes(self.profile_dir)
+        except Exception as exc:                              # noqa: BLE001 —— 守夜不能抛
+            logger.warning(f"[QR] 强制收尾时结束进程失败：{type(exc).__name__}: {exc}")
+        logger.warning(f"[QR] 会话卡住（{reason}），已强制结束 {killed} 个浏览器进程："
+                       f"profile={self.profile_dir}")
+        with self._lock:
+            if self._state in ACTIVE_STATES:
+                self._state = STATE_ERROR
+                self._message = f"会话卡住（{reason}），浏览器已被强制关闭，请重新发起"
+                self._error = reason
+                self._updated_at = time.time()
 
     def _close(self, ctx) -> bool:
         """关浏览器。返回**是否关干净** —— 关不干净就不能去搬它的资料目录。

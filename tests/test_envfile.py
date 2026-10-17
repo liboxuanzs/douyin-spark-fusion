@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -185,6 +186,30 @@ class SaveCookieTests(EnvFileTestCase):
             "拒绝要发生在写之前：原来那份 Cookie 必须一个字都没动",
         )
         self.assertEqual(self.backups(), [], "没写成就不该留下备份")
+
+    def test_refuses_an_expired_login_cookie(self):
+        """名字对、`expires` 已经过去：存下去只会让面板显示"已配置"，发送时才 EXPIRED。
+
+        掉登录之后手工粘一份旧 cookie 就是这个场景（2026-10-11 现场）。
+        """
+        payload = json.dumps([{"name": "sessionid", "value": "dead",
+                               "domain": ".douyin.com", "expires": 1_700_000_000}])
+        result = envfile.save_cookie(UID, payload)
+        self.assertFalse(result["ok"])
+        self.assertIn("过期", result["error"])
+        self.assertEqual(
+            self.value_of("COOKIES_12345678905"),
+            '[{"name":"sessionid","value":"old","domain":".douyin.com"}]',
+            "拒绝要发生在写之前",
+        )
+
+    def test_future_expiry_and_session_cookies_are_fine(self):
+        far = int(time.time()) + 86400
+        for extra in ({"expires": far}, {"expires": -1}, {}):
+            with self.subTest(extra=extra):
+                payload = json.dumps([{"name": "sessionid", "value": "live",
+                                       "domain": ".douyin.com", **extra}])
+                self.assertTrue(envfile.save_cookie(UID, payload)["ok"], extra)
 
     def test_expect_login_false_allows_it(self):
         payload = json.dumps([{"name": "ttwid", "value": "t", "domain": ".douyin.com"}])
@@ -565,6 +590,140 @@ class ReloadTests(EnvFileTestCase):
 
         with mock.patch("utils.config.reload_env", side_effect=RuntimeError("boom")):
             self.assertFalse(envfile.reload())
+
+
+class EnvTmpLeftoverTests(EnvFileTestCase):
+    """python-dotenv 的写盘会在目录里留 `<env>.tmp_*`，而那个文件里是**整份 .env**。
+
+    正常路径下它只活几毫秒；中途被杀（OOM / 断电 / 容器被停）就会留下一个权限可能
+    是 0644、内容却包含全部 `COOKIES_*` 与 `WEBUI_PASSWORD_HASH` 的文件。所以面板
+    每次写盘前后都扫一遍目录：够老的残留先 chmod 0600 再删，刚出现的绝不碰。
+    """
+
+    def _leftover(self, name: str, age_seconds: float, mode: int = 0o644) -> Path:
+        path = self.tmp / name
+        path.write_text(SAMPLE_ENV, encoding="utf-8")
+        os.chmod(path, mode)
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_sweep_deletes_stale_and_keeps_fresh(self):
+        old = self._leftover(".env.tmp_ab12cd", envfile.ENV_TMP_STALE_SECONDS + 60)
+        also_old = self._leftover(".env.tmp", envfile.ENV_TMP_STALE_SECONDS + 1)
+        fresh = self._leftover(".env.tmp_fresh0", 1.0)
+
+        removed = envfile._sweep_env_tmp(self.env)
+
+        self.assertIn(str(old), removed)
+        self.assertIn(str(also_old), removed)
+        self.assertFalse(old.exists(), "够老的残留必须删掉")
+        self.assertFalse(also_old.exists())
+        self.assertTrue(fresh.exists(), "刚出现的中间态是正在写的进程的，删了会打断它")
+        self.assertTrue(self.env.exists(), "只清中间态，不动 .env 本身")
+
+    def test_permissions_are_tightened_before_unlink(self):
+        from unittest import mock
+
+        path = self._leftover(".env.tmp_lockme", envfile.ENV_TMP_STALE_SECONDS + 60, mode=0o644)
+        seen = {}
+        real_unlink = os.unlink
+
+        def spy(target, *args, **kwargs):
+            try:
+                seen[str(target)] = os.stat(target).st_mode & 0o777
+            except OSError:
+                pass
+            return real_unlink(target, *args, **kwargs)
+
+        with mock.patch("os.unlink", spy):
+            envfile._sweep_env_tmp(self.env)
+
+        self.assertEqual(seen.get(str(path)), 0o600, "删之前必须先收紧成 0600（删失败也不能是 0644）")
+
+    def test_a_normal_save_sweeps_stale_leftovers(self):
+        old = self._leftover(".env.tmp_older1", envfile.ENV_TMP_STALE_SECONDS + 60)
+
+        result = envfile.set_account_time(UID, "08:00")
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(old.exists(), "每次写盘前后都要顺手清一遍残留")
+        self.assertIn("TASKS=", self.text())
+
+    def test_sweep_also_removes_dotenvs_real_temp_name(self):
+        """★ python-dotenv 的真中间态叫 `.tmp_xxxxxxxx`（不是 `.env.tmp_*`）。
+
+        `rewrite()` = `NamedTemporaryFile(prefix=".tmp_", dir=<.env 目录>)`：
+        只认 `<env名>.tmp*` 的话，一个真残留都清不掉（它含全部 COOKIES）。
+        """
+        real = self._leftover(".tmp_ab12cd34", envfile.ENV_TMP_STALE_SECONDS + 60)
+        fresh = self._leftover(".tmp_fresh012", 1.0)
+
+        removed = envfile._sweep_env_tmp(self.env)
+
+        self.assertIn(str(real), removed, "真中间态（.tmp_xxxxxxxx）必须清掉")
+        self.assertFalse(real.exists())
+        self.assertTrue(fresh.exists(), "刚出现的还是别人的中间态，不能删")
+
+    def test_sweep_leaves_unrelated_dot_tmp_files_alone(self):
+        """`.tmp_*` 前缀太泛：内容不像 .env 的（二进制 / 别的工具留的）一律不碰。"""
+        binary = self.tmp / ".tmp_binary01"
+        binary.write_bytes(b"\x00\x01\x02\x03" * 100)
+        stamp = time.time() - (envfile.ENV_TMP_STALE_SECONDS + 60)
+        os.utime(binary, (stamp, stamp))
+        text_no_env = self.tmp / ".tmp_notes01"
+        text_no_env.write_text("随手记的一行字\n", encoding="utf-8")
+        os.utime(text_no_env, (stamp, stamp))
+        folder = self.tmp / ".tmp_dir0001"
+        folder.mkdir()
+
+        removed = envfile._sweep_env_tmp(self.env)
+
+        self.assertEqual(removed, [], f"不该删无关文件，实际删了 {removed}")
+        self.assertTrue(binary.exists())
+        self.assertTrue(text_no_env.exists())
+        self.assertTrue(folder.exists())
+
+
+class EnvSymlinkTests(EnvFileTestCase):
+    """`.env` 被用户做成软链时（指向 /etc/... 或用 stash 管理），保存不能把它换成普通文件。
+
+    默认的 python-dotenv 会把软链替换掉：真正被读取的那份配置没改（"改了不生效"），
+    软链指向的文件被悄悄留在原地。所以要么带 `follow_symlinks` 改真身，要么明确拒绝。
+    """
+
+    def _symlinked_env(self):
+        real = self.tmp / "real.env"
+        real.write_text(SAMPLE_ENV, encoding="utf-8")
+        link = self.tmp / "link.env"
+        link.symlink_to(real)
+        os.environ["ENV_FILE"] = str(link)
+        return link, real
+
+    def test_symlink_survives_a_save(self):
+        link, real = self._symlinked_env()
+        supports = envfile._dotenv_supports_follow_symlinks()
+        problem = envfile.symlink_write_problem(link)
+
+        result = envfile.set_account_time(UID, "08:00")
+
+        if supports:
+            self.assertEqual(problem, "", "支持 follow_symlinks 时不该报问题")
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(link.is_symlink(), "软链被换成普通文件了 —— 用户看到的配置将不再生效")
+            self.assertEqual(link.resolve(), real.resolve())
+            self.assertIn("08:00", real.read_text(encoding="utf-8"), "改的必须是软链指向的真身")
+        else:
+            self.assertTrue(problem, "本机 python-dotenv 不支持 follow_symlinks 时必须给出中文原因")
+            self.assertIn("软链", problem)
+            self.assertFalse(result["ok"], "宁可不写，也不能静默换掉用户的软链")
+            self.assertIn("软链", result["error"])
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(real.read_text(encoding="utf-8"), SAMPLE_ENV, "真身一个字节都不该动")
+
+    def test_plain_file_is_unaffected(self):
+        self.assertEqual(envfile.symlink_write_problem(self.env), "")
+        self.assertTrue(envfile.set_account_time(UID, "09:30")["ok"])
 
 
 if __name__ == "__main__":

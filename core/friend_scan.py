@@ -15,6 +15,10 @@
 import threading
 import time
 
+from utils.logger import setup_logger
+
+logger = setup_logger("friend_scan")
+
 STATE_STARTING = "starting"
 STATE_OPENING = "opening"
 STATE_READY = "ready"
@@ -191,8 +195,15 @@ class FriendScanSession(threading.Thread):
         context = None
         page = None
         cancelled = False
+        # 终态**推迟到浏览器关掉之后**才置（见 finally 里的注释）。这里先攒着。
+        final = None
+        # ★ `browser_mod` 必须在 try **外面**绑定：finally 里要用它关浏览器，而
+        #   import 本身失败（顶层会拉 utils.config/logger，`.env` 解析异常即可触发）
+        #   时 finally 会抛 `NameError` —— 原始异常被掩盖、**终态永不落地**，
+        #   会话停在 active、账号一直"忙"到 1200 秒的 reaper 才放行。
+        #   `core/qr_login.py::_close` 踩过同一个坑（2026-10-10 那次事故）。
+        import core.browser as browser_mod
         try:
-            import core.browser as browser_mod
             import core.douyin_im as douyin_im
 
             self._set(STATE_OPENING, "正在打开浏览器（用这个账号自己的配置）")
@@ -212,8 +223,8 @@ class FriendScanSession(threading.Thread):
                 settle_ms=SETTLE_MS, ready_timeout=READY_TIMEOUT_SECONDS)
             res = im.wait_ready() or {}
             if str(res.get("status") or "") != douyin_im.STATUS_READY:
-                self._set(STATE_ERROR, self._ready_error(res),
-                          error=f"gate={res.get('status') or 'UNKNOWN'}")
+                final = (STATE_ERROR, self._ready_error(res),
+                         {"error": f"gate={res.get('status') or 'UNKNOWN'}"})
                 return
             if self.cancelled():
                 raise _Cancelled()
@@ -244,23 +255,36 @@ class FriendScanSession(threading.Thread):
                 self._items = items
             summary = dict(scan)
             summary["truncated"] = bool(scan.get("truncated")) or len(items) >= MAX_ITEMS
-            self._set(STATE_DONE,
-                      f"读到 {len(items)} 个会话"
-                      + ("" if summary.get("scanned_all") else "（没扫到底，可能还有更多）"),
-                      scan=summary)
+            final = (STATE_DONE,
+                     f"读到 {len(items)} 个会话"
+                     + ("" if summary.get("scanned_all") else "（没扫到底，可能还有更多）"),
+                     {"scan": summary})
         except _Cancelled:
             cancelled = True
         except Exception as exc:                              # noqa: BLE001 —— 线程里必须兜住
-            self._set(STATE_ERROR, f"读取失败：{type(exc).__name__}: {exc}",
-                      error=f"{type(exc).__name__}: {exc}")
+            final = (STATE_ERROR, f"读取失败：{type(exc).__name__}: {exc}",
+                     {"error": f"{type(exc).__name__}: {exc}"})
         finally:
             if context is not None:
                 # 关浏览器的同时把 playwright 句柄还回去；close_context 自己吞异常
                 # 并记日志，返回是否关干净（这里不关心：终态下面才置）。
-                browser_mod.close_context(context)
-            # 浏览器真的关掉之后才置终态：面板用 active 判断资料目录有没有被占着。
+                # 再包一层 try：收尾出错也**必须**走到下面置终态 —— 否则面板会
+                # 一直以为这个账号在忙。
+                try:
+                    browser_mod.close_context(context)
+                except Exception as exc:                     # noqa: BLE001
+                    logger.warning(f"[SCAN] 关浏览器时出错（继续置终态）："
+                                   f"{type(exc).__name__}: {exc}")
+            # ★ 终态必须在浏览器真的关掉**之后**才置：面板用 `active` 判断资料目录
+            # 有没有被占着（见 `cancel()` 的注释与 webui 的 `_profile_in_use`）。
+            # 以前 STATE_DONE/STATE_ERROR 是在 try 体里置的、早于这句 close，
+            # 于是"扫完了"和"目录已经空出来"之间有一个窗口 —— 用户在这个窗口里点
+            # 扫码登录，第二个 Chromium 就会去抢同一个 user-data-dir（SingletonLock），
+            # 谁也开不起来，而面板看起来一切正常。
             if cancelled:
                 self._set(STATE_CANCELLED, "已取消")
+            elif final is not None:
+                self._set(final[0], final[1], **final[2])
 
 
 class _Cancelled(Exception):

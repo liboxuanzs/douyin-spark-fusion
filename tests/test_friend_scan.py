@@ -60,7 +60,7 @@ class _Sandbox:
     """把 core.browser / core.douyin_im 换成替身（两处都要塞，见 tests/test_webui.py 的教训）。"""
 
     def __init__(self, im_items=(), status="READY", scan=None, boom=None,
-                 launch_error=None, fake_im_cls=None):
+                 launch_error=None, fake_im_cls=None, on_close=None):
         self.ctx = None
         self.im_kwargs = {}
         self.launch_kwargs = {}
@@ -70,6 +70,8 @@ class _Sandbox:
         self._boom = boom
         self._launch_error = launch_error
         self._fake_im_cls = fake_im_cls
+        # 关浏览器那一刻的回调：用来钉住"终态必须晚于 close_context"（见测试）
+        self._on_close = on_close
         self._saved = {}
 
     def __enter__(self):
@@ -95,6 +97,8 @@ class _Sandbox:
             @staticmethod
             def close_context(target):
                 """core.browser.close_context 的替身：关对象 + 还 playwright 句柄。"""
+                if sandbox._on_close is not None:
+                    sandbox._on_close()
                 if hasattr(target, "close"):
                     target.close()
                 return True
@@ -288,6 +292,31 @@ class RunTests(unittest.TestCase):
         self.assertIn("登录态已失效", snap["message"])
         self.assertEqual(snap["error"], "gate=EXPIRED")
         self.assertEqual(snap["count"], 0)
+
+    def test_terminal_state_waits_for_the_browser_to_close(self):
+        """终态必须在 `close_context()` **之后**才置。
+
+        面板用 `active`（＝state 还在 ACTIVE_STATES 里）判断"资料目录有没有被占着"。
+        以前 STATE_DONE / STATE_ERROR 是在 try 体里置的、早于 `close_context()` ——
+        "扫完了"和"目录真的空出来"之间有一个窗口，用户在这段窗口里点扫码登录，
+        第二个 Chromium 会去抢同一个 user-data-dir（SingletonLock），谁也开不起来。
+        """
+        holder = {}
+
+        def _at_close():
+            snap = session.snapshot()
+            holder["state"] = snap["state"]
+            holder["active"] = snap["active"]
+
+        with _Sandbox(im_items=[_conv(0)], on_close=_at_close):
+            session = friend_scan.FriendScanSession("/tmp/p")
+            session.run()
+        snap = session.snapshot()
+        self.assertEqual(snap["state"], friend_scan.STATE_DONE)
+        self.assertFalse(snap["active"])
+        # 关浏览器那一刻：还没到终态、仍算"占着目录"
+        self.assertNotIn(holder.get("state"), friend_scan.TERMINAL_STATES)
+        self.assertTrue(holder.get("active"), "面板会在这一瞬间以为目录空出来了")
 
     def test_launch_failure_reports_error(self):
         box = _Sandbox(launch_error=RuntimeError("浏览器启动失败 —— 没有这个可执行文件"))

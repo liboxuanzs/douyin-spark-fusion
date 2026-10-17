@@ -165,10 +165,15 @@ COPY VERSION ./VERSION
 # 操作数返回 1，RUN 层非零即失败，于是**整个镜像根本构建不出来**。
 RUN chmod +x /app/docker/entrypoint.sh /app/docker/entrypoint-cron.sh /app/docker/run-task.sh
 
-ENV BROWSER_HEADLESS=true \
-    DISPLAY=:99 \
-    PYTHONUNBUFFERED=1 \
-    IMAGE_VERSION=${IMAGE_VERSION} \
-    CLOAKBROWSER_BINARY_PATH=/opt/cloakbrowser/chrome
+ENV PYTHONUNBUFFERED=1 \
+    CLOAKBROWSER_BINARY_PATH=/opt/cloakbrowser/chrome \
+    DISPLAY=:99
 
+# 这里曾经还有 BROWSER_HEADLESS=true 与 IMAGE_VERSION=${IMAGE_VERSION}：
+# 全仓（含 docs/、docker-compose.yml、webui）**没有任何一处读它们** —— 无头/有头
+# 是 `core/browser.py` 的 launch 参数说了算，镜像版本已经在上面那个
+# `org.opencontainers.image.version` label 里了。留着的唯一效果是"设了以为生效"。
+# DISPLAY 保留：它只在 `--build-arg ENABLE_HEADED=true`（此时才装 Xvfb，
+# 见上面第 58 行那个 if）下有真实含义；默认镜像里 :99 不存在，删掉它又会让
+# headed 模式少一个必需的变量，两害相权保留 + 这条注释。
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

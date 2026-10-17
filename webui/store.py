@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from webui import config
 
 __all__ = [
+    "LOCK_ALIVE_TOO_LONG",
     "LOCK_STALE_AFTER",
     "AccountSnapshot",
     "ConfigSnapshot",
@@ -51,6 +52,11 @@ __all__ = [
 
 # 锁文件里 pid 判断不出来时的兜底：started_at 距今超过这个时长就算过期。
 LOCK_STALE_AFTER = timedelta(hours=2)
+
+# pid 明明还活着、但锁已经这么老 → 也当残留（与 `core.run_ledger.STUCK_LOCK_SECONDS`
+# 同口径）。"活着"有两种：真在跑，以及 pid 被复用 / 面板那条线程卡死了 —— 不设上限
+# 的话「立即运行」会永久 409，只能有人登机器 rm 锁文件。
+LOCK_ALIVE_TOO_LONG = timedelta(hours=6)
 
 # 一次 overview 最多带出多少条运行记录 / 单条记录最多多少条明细。
 MAX_RECORDS = 20
@@ -252,6 +258,7 @@ class RunLockState:
     dry_run: str = "off"
     source: str = ""
     run_id: str = ""
+    accounts: List[str] = field(default_factory=list)
     reason: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -362,7 +369,12 @@ def pid_alive(pid: Any) -> Optional[bool]:
 def read_lock(path: Optional[Path] = None) -> RunLockState:
     """读运行锁。
 
-    判定"正在跑"：文件存在且（pid 仍存活 **或** 无法判断 pid 时 started_at 距今 < 2 小时）。
+    判定"正在跑"：文件存在且（pid 仍存活且 started_at 距今 < 6 小时
+    **或** 无法判断 pid 时 started_at 距今 < 2 小时）。
+
+    两条时间上限是**故意**的：`core.tasks` 的发送轮次真跑两小时很正常，按时间判残留
+    会导致夺锁、两个 Chromium 互踢；但 pid 会被复用、面板那条线程也可能卡死，
+    所以 6 小时是上限（与 `core.run_ledger.STUCK_LOCK_SECONDS` 同口径）。
     """
     target = Path(path) if path is not None else config.run_lock_file()
     state = RunLockState()
@@ -382,11 +394,28 @@ def read_lock(path: Optional[Path] = None) -> RunLockState:
     state.dry_run = (_text(payload.get("dry_run")) or "off").lower()
     state.source = _text(payload.get("source"))
     state.run_id = _text(payload.get("run_id"))
+    raw_accounts = payload.get("accounts")
+    if isinstance(raw_accounts, list):
+        # 锁是核心程序写的（可能来自旧版本、没有这个键），所以一律容错解析。
+        state.accounts = [str(x).strip() for x in raw_accounts if str(x or "").strip()]
     state.pid_alive = pid_alive(state.pid)
     if state.pid_alive is False:
         state.pid = None
 
     if state.pid_alive is True:
+        started = parse_iso(state.started_at)
+        if started is not None:
+            age = _now() - started.astimezone(timezone.utc)
+            if age > LOCK_ALIVE_TOO_LONG:
+                # 与 `core.run_ledger.lock_info()` 的 `alive_too_long` 同口径：活着的
+                # 进程通常不算残留（多账号跑两小时很正常，按时间判残留会引发夺锁、
+                # 两个 Chromium 互踢），但 pid 会被复用、面板那条线程也可能卡死 ——
+                # 超过 6 小时就当残留，否则「立即运行」永久 409。
+                state.reason = (
+                    f"pid {state.pid} 还在，但锁文件已 {fmt_duration(age.total_seconds())}"
+                    f"（> 6 小时），视为残留"
+                )
+                return state
         state.running = True
         state.reason = f"pid {state.pid} 仍在运行"
         return state
@@ -993,7 +1022,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
                 # （每个账号可以有自己的发送时间，见 core/schedule.py，派发器每 5
                 # 分钟只为当时到点的账号跑一轮）。原来这里是"第一条带账号的记录"
                 # 然后 break，于是没赶上最近那一轮的账号，门禁/状态/上次运行全空 ——
-                # 2026-10-07 线上 wheat 那张卡就这么成了"未运行"。
+                # 2026-10-07 线上 示例号 那张卡就这么成了"未运行"。
                 by_unique[key] = account
                 own_run[key] = dict(stamp)
 
@@ -1151,8 +1180,18 @@ class ConfigSnapshot:
         }
 
 
-def refresh_env() -> bool:
+#: 上一次 `refresh_env()` 看到的 `.env` `(mtime_ns, size)`。
+#: 面板**每个请求**都会调 `refresh_env()`（一次 `/api/ops/overview` 实测能到 3 次），
+#: 而它每次都做两遍完整解析（`dotenv_values` + `load_dotenv(override=True)`）并清掉
+#: `get_config()` / `get_userData()` 两份模块缓存。文件没变就没有任何东西需要重载
+#: （2026-10-17 前端审计：这是 10 秒轮询里最大的一笔白工）。
+_ENV_REFRESH_KEY: Optional[Tuple[int, int]] = None
+
+
+def refresh_env(*, force: bool = False) -> bool:
     """让"改了 `.env` 就生效"在常驻进程里成立（见 `utils.config.reload_env`）。
+
+    `force=True` 时无条件重读（写盘之后的路径用它，别依赖 mtime 的精度）。
 
     没有这一步就会出现这样一幕：用户在 `.env` 里填好真实 `TASKS` /
     `COOKIES_<uid>`，回到面板点"立即运行" —— 跑的还是进程启动那一刻的
@@ -1162,14 +1201,32 @@ def refresh_env() -> bool:
     每请求调一次的成本 = 读一个小文件 + 清两个缓存，可以忽略。
     任何异常都吞掉：读不到配置只该让页面显示旧值，不该整页 500。
     """
+    global _ENV_REFRESH_KEY
     try:
         from utils.config import reload_env  # 函数内 import：import 期不产生副作用
     except Exception:
         return False
+    if not force:
+        key = _env_refresh_key()
+        if key is not None and key == _ENV_REFRESH_KEY:
+            return True
     try:
-        return bool(reload_env())
+        ok = bool(reload_env())
     except Exception:
         return False
+    if ok:
+        _ENV_REFRESH_KEY = _env_refresh_key()
+    return ok
+
+
+def _env_refresh_key():
+    """`.env` 的 `(mtime_ns, size)`；取不到（不存在/没权限）返回 None。"""
+    try:
+        from webui import envfile
+        stat = envfile.env_path().stat()
+    except Exception:                                    # noqa: BLE001 —— 判不了就照常重读
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _parse_on_calendar(text: str) -> List[str]:

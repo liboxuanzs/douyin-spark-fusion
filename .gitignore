@@ -6,6 +6,15 @@ logs/
 .DS_Store
 usersData.json
 .env
+# python-dotenv 的 set_key() 是"写临时文件 → os.replace()"，中间态里是**完整的 .env**
+# （含全部 COOKIES_），进程在两步之间被杀掉就会留在仓库里。
+# ⚠️ 临时文件的真实名字是 `.tmp_xxxxxxxx`（不是 `.env.tmp_xxx`）：
+#    `tempfile.NamedTemporaryFile(prefix=".tmp_", dir=<.env 所在目录>)`，实测
+#    python-dotenv 1.2.4（requirements 钉的是 1.2.2）。两套名字都列上防御，
+#    因为 `.env` 这条规则匹配不到它们（gitignore 没有前缀语义）—— 否则会被
+#    git add -A / rsync / 打包一起带走。
+.env.tmp_*
+.tmp_*
 
 # 抓包取证目录：HAR 本身含 cookie（登录凭据）+ 好友昵称/备注/uid，
 # 同目录 <sha1>.dat 是配套的二进制报文体，_*.txt 是分析产物 —— 全都含个人信息。

@@ -307,6 +307,20 @@ def verify_selection(expect: Expectation, *, cur_conv, net_hit=False,
 
 # ---- 发送回执 ------------------------------------------------------------
 
+def _conv_holds_peer(conv_id, peer_uid) -> Optional[bool]:
+    """这个单聊 conv_id 的参与者里有 peer_uid 吗？
+
+    只看 conv id 自己（`0:1:<uidA>:<uidB>`，参与者升序）—— 不依赖 `self_uid`，
+    因为 `self_uid` 也可能取不到（DOM 兜底判登录那种情况），而"收件人是谁"
+    恰恰是回执判定的关键，不能因为少一个参数就跳过核验。
+    不是单聊形状（群聊 / 没取到 id）返回 None：未知就是未知，不许当成"对上了"。
+    """
+    p = str(conv_id or "").split(":")
+    if len(p) != 4 or p[1] != "1" or not peer_uid:
+        return None
+    return str(peer_uid) in (p[2], p[3])
+
+
 def verify_receipt(expect: Expectation, *, before, after,
                    receipts=None, self_uid=None) -> Verdict:
     """判断"消息是否真的发到了目标会话"。
@@ -325,6 +339,9 @@ def verify_receipt(expect: Expectation, *, before, after,
     # 因为只有这一种才是**发错人**的强信号，气泡数没涨只是"没确认"。
     dom_ok: Optional[bool] = None
     dom_conv_off = False
+    # 发送后 DOM 说"现在看的是哪个会话" —— 下面核验收件人时还要用它（HTTP 回执里
+    # 没有收件人字段），所以声明提到分支外面，不能只在 else 里活着。
+    a_conv: Optional[str] = None
     if before is None or after is None:
         reasons.append("DOM 状态缺失")
     else:
@@ -353,6 +370,24 @@ def verify_receipt(expect: Expectation, *, before, after,
                 dom_ok = False
                 reasons.append(f"气泡数没有增加（{b_n} → {a_n}）或最后一条不是自己发的")
 
+    # ---- 收件人能不能核验 ----
+    # "服务端回 ok" 只说明有**一条**消息被收下了：回执里没有收件人字段
+    # （decode_send_resp 只解 code/status/message_id），而 DOM 的气泡计数又是
+    # 全局的（JS_MSG_STATE 数当前会话里自己发的气泡，会话一换就不可比）。
+    # 所以能点名收件人的只有 DOM 报出的 convId；这里先把结论算清楚，
+    # 下面据此决定"回执 ok"配不配叫强证据。
+    # 期望的 convId 优先用扫描时读到的（expect.conv_id）；读不到时用 peer_uid
+    # 反算 —— `self_uid` 这个参数就是为这条兜底路径传进来的。
+    want_conv = expect.conv_id or assemble_conv_id(0, self_uid, expect.peer_uid)
+    recipient_ok: Optional[bool] = None
+    if a_conv:
+        evidence["want_conv"] = want_conv
+        if want_conv:
+            recipient_ok = str(a_conv) == str(want_conv)
+        else:
+            recipient_ok = _conv_holds_peer(a_conv, expect.peer_uid)
+        evidence["recipient_ok"] = recipient_ok
+
     # ---- HTTP 侧 ----
     http_ok: Optional[bool] = None
     good = [r for r in (receipts or []) if r.get("ok")]
@@ -374,7 +409,38 @@ def verify_receipt(expect: Expectation, *, before, after,
     if dom_ok is False and http_ok is False:
         return Verdict(False, LEVEL_CONFLICT, "receipt_failed", "；".join(reasons), evidence)
     if http_ok is True:
-        return Verdict(True, LEVEL_STRONG, "", "HTTP 回执 ok", evidence)
+        # 回执 ok ≠ 强证据：它不带收件人，所以必须再拿 DOM 的"当前会话"去点名
+        # 收件人。点得出（recipient_ok is True）才配叫强；点不出或点错了降级。
+        # 注意这里**不动** ok —— 回答的是"证据够不够硬"，不是"发没发出去"。
+        if recipient_ok is False:
+            return Verdict(True, LEVEL_MEDIUM,
+                           f"HTTP 回执 ok，但发送后当前会话是 {a_conv!r}"
+                           f"（期望 {want_conv or expect.peer_uid!r}）"
+                           f"—— 会话不匹配，回执本身不带收件人",
+                           "HTTP 回执 ok", evidence)
+        if recipient_ok is True:
+            # ★ 判 strong 的**正向**条件只有这一条：回执 ok **且** 能点名收件人
+            #   （发送后当前会话就是目标会话）。
+            #   刻意**不要求**气泡数上涨：虚拟列表不重渲染时气泡数不涨是本项目的
+            #   常态（生产 2026-10-01→10-13 的 81 条成功记录里，DOM 气泡证据一次
+            #   都没出现过），拿它当必要条件等于把每一次发送都判成弱证据，
+            #   面板「强确认」会永远是 0 —— 那只是把口径换个方向失真。
+            #   气泡数仍然记进 evidence，供排查时看。
+            return Verdict(True, LEVEL_STRONG, "", "HTTP 回执 ok", evidence)
+        if dom_ok is True:
+            return Verdict(True, LEVEL_MEDIUM,
+                           "HTTP 回执 ok，DOM 也见到新气泡，但会话 id 取不到、"
+                           "无法确认收件人是目标（回执本身不带收件人）",
+                           "HTTP 回执 ok", evidence)
+        if dom_ok is False:
+            return Verdict(True, LEVEL_MEDIUM,
+                           "HTTP 回执 ok，但 DOM 未见新气泡、会话 id 也取不到，"
+                           "无法确认收件人是目标（回执本身不带收件人）",
+                           "HTTP 回执 ok", evidence)
+        return Verdict(True, LEVEL_MEDIUM,
+                       "HTTP 回执 ok，但 DOM 状态取不到、没有气泡证据"
+                       "（回执本身不带收件人）",
+                       "HTTP 回执 ok", evidence)
     if dom_ok is True:
         return Verdict(True, LEVEL_MEDIUM, "", "DOM 气泡确认（同会话内增加）", evidence)
     return Verdict(False, LEVEL_NONE, "receipt_unconfirmed", "；".join(reasons), evidence)

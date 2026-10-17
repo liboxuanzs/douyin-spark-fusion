@@ -65,6 +65,15 @@ PROFILE_WAIT_SECONDS = 15.0
 # 打开抖音聊天页时愿意等首屏多久（毫秒）。走配套代理时链路抖动很大，给宽些。
 GOTO_TIMEOUT_MS = 180_000
 
+# 「开浏览器」那一次 goto 的等待上限（毫秒，比 GOTO_TIMEOUT_MS 短）。
+#
+# 为什么要单独短一档：这一次 goto 是工作线程**同步**等的，等的时候取不到队列里的
+# shutdown —— 用户点了关窗，要等它返回才开始关浏览器；而登录窗口最多等 6 秒就
+# destroy，浏览器于是变成孤儿进程，profile 目录还留着 SingletonLock，下次登录
+# 直接打不开。60 秒足够覆盖走代理时偏慢的首屏；而且超时**不是**失败：
+# Playwright 只中止「等待」，导航仍在继续，下面照旧继续等页面就绪。
+OPEN_GOTO_TIMEOUT_MS = 60_000
+
 # 只保留这些域下的 Cookie，避免把无关站点的 Cookie 灌进任务
 TARGET_DOMAINS = ("douyin.com", "bytedance.com", "snssdk.com", "iesdouyin.com", "amemv.com")
 
@@ -232,6 +241,12 @@ class BrowserLoginWorker(threading.Thread):
         self.events: queue.Queue = events or queue.Queue()
         self.ctx = None
         self.page = None
+        # 浏览器是否活着的普通布尔：只由工作线程写，别的线程（Tk 主线程）只读。
+        # 不能改成"主线程调 ctx.cookies() 探活" —— ctx 是工作线程创建的，跨线程碰
+        # Playwright 必然抛 greenlet.error: Cannot switch to a different thread，
+        # 再被 except 吞成「没在运行」（抓取按钮永久禁用、关窗确认框永不生效）。
+        # 赋值/读取在 GIL 下是原子的，够用；Playwright 对象一律只在工作线程里碰。
+        self._browser_running = False
         # core.douyin_im 的只读监听：判定登录态要用它（它收的是抖音自己的响应）
         self.mon = None
         # 账号信息拦截状态（只在工作线程里读写）
@@ -252,12 +267,49 @@ class BrowserLoginWorker(threading.Thread):
     def log(self, text: str) -> None:
         self.emit("log", text)
 
+    @property
+    def ctx(self):
+        """Playwright 的 browser context（它的方法只有工作线程能调）。
+
+        为什么做成属性：`is_running()` 必须**不碰任何 Playwright 方法**就能回答
+        "浏览器还在不在"，而"ctx 有没有被赋值"就是这件事的真相 —— 赋值/置空时
+        顺手把 `_browser_running` 摆正，读它写它都只是普通属性操作。
+        """
+        return self._ctx
+
+    @ctx.setter
+    def ctx(self, value) -> None:
+        self._ctx = value
+        self._browser_running = value is not None
+
     def is_running(self) -> bool:
-        """浏览器是否仍存活（用户可能手动关掉了窗口）。"""
-        if self.ctx is None:
+        """浏览器是否仍存活（用户可能手动关掉了窗口）。
+
+        ⚠️ 这里**只读工作线程维护的布尔**，不碰任何 Playwright 对象：`self.ctx`
+        是工作线程创建的，Tk 主线程去调 `ctx.cookies()` 必然抛
+        `greenlet.error: Cannot switch to a different thread`，再被 except 吞成
+        「没在运行」—— 界面表现就是抓取按钮永久禁用、关窗确认框永不生效。
+        真实状态由工作线程维护：`ctx` 赋值/置空（_open / _close / _reset）与
+        `_set_browser_running()`（异常路径、run 收尾）都会把它摆正，主线程只读。
+        """
+        return self._browser_running
+
+    def _set_browser_running(self, alive: bool) -> None:
+        """**只允许工作线程调用**：把「浏览器还活着吗」这个标志摆正。"""
+        self._browser_running = bool(alive)
+
+    def _browser_alive(self) -> bool:
+        """问 Playwright「ctx 还活着吗」——**只能在工作线程里调**。
+
+        探活在主线程做不了（greenlet 报错），所以由工作线程在出错后主动问一次：
+        浏览器被用户手动关掉时 `ctx.cookies()` 会抛，返回 False，界面就能把
+        「抓取」按钮禁掉，而不是一直对着一个死掉的 ctx 发命令。
+        """
+        ctx = self.ctx
+        if ctx is None:
             return False
         try:
-            self.ctx.cookies()
+            ctx.cookies()
             return True
         except Exception:
             return False
@@ -286,12 +338,19 @@ class BrowserLoginWorker(threading.Thread):
                     break
             except Exception as exc:
                 self.emit("error", f"{type(exc).__name__}: {exc}")
+                # 出错的命令可能已经把浏览器拉起来了（例如 new_page / 挂钩子那几步），
+                # 也可能浏览器已经被用户关掉 —— 只有工作线程能问 Playwright，这里探
+                # 一次活再把状态摆正：报成「没在运行」会让界面永远点不了抓取，也会让
+                # 关窗时的确认框失效。
+                self._set_browser_running(self._browser_alive())
         # 线程收尾：不管怎么退出，都别把 gost 留在后台
+        self._set_browser_running(False)
         self._stop_tunnel()
         self.emit("done")
 
     # -- 内部实现 -----------------------------------------------------------
     def _reset(self) -> None:
+        self._set_browser_running(False)
         self.ctx = None
         self.page = None
         self.mon = None
@@ -775,6 +834,10 @@ class BrowserLoginWorker(threading.Thread):
 
         pages = [p for p in self.ctx.pages if not p.is_closed()]
         self.page = pages[0] if pages else self.ctx.new_page()
+        # 页面已经拿到 = 浏览器真的起来了（launch 只负责起进程）。从这里开始
+        # is_running() 必须报 True：下面那次 goto 可能等很久，而界面和关窗逻辑
+        # 都要知道浏览器还开着。
+        self._set_browser_running(True)
 
         # 下面两个钩子都**必须早于 goto**（这是 core/douyin_im 的契约）：
         #   ImMonitor           登录态就写在聊天页首屏的 SSR HTML 里，挂晚了就漏，
@@ -788,15 +851,17 @@ class BrowserLoginWorker(threading.Thread):
         self.log(f"跳转 {target_url}")
         self.emit("status", "正在打开抖音聊天页…（走配套代理，慢的时候要等一会儿）")
         try:
+            # 这一次是工作线程自己在等，用更短的 OPEN_GOTO_TIMEOUT_MS（见常量处的
+            # 说明：关窗要能尽快收尾）。后续导航仍吃 180s 的默认值。
             self.page.goto(
-                target_url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS
+                target_url, wait_until="domcontentloaded", timeout=OPEN_GOTO_TIMEOUT_MS
             )
         except Exception as exc:
             # 超时 ≠ 导航失败：Playwright 只中止「等待」，请求仍在继续，页面随后可能就绪。
             # 这里按致命错误收场的话 opened 事件发不出去，探针就永远不启动。
             reason = " ".join(str(exc).split())      # 异常里带多行 Call log，压成一行
             self.log(
-                f"首屏加载等待超时（{GOTO_TIMEOUT_MS // 1000}s）——"
+                f"首屏加载等待超时（{OPEN_GOTO_TIMEOUT_MS // 1000}s）——"
                 f"导航仍在继续，继续等页面就绪：{reason}"
             )
 
@@ -902,6 +967,9 @@ class BrowserLoginWorker(threading.Thread):
         )
 
     def _close(self) -> None:
+        # 先声明「没在运行」：执行到 _close 就说明这个 worker 不再提供服务了，
+        # 不管下面走哪条分支，界面都不该再认为浏览器开着。
+        self._set_browser_running(False)
         if self.ctx is None:
             self._stop_tunnel()
             return

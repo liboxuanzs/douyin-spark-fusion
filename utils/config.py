@@ -1,7 +1,10 @@
 import os, sys
 from enum import Enum
+import hashlib
 import json
 import logging
+import math
+import time
 from utils.logger import setup_logger
 
 logger = setup_logger(level=logging.DEBUG)
@@ -14,12 +17,84 @@ DEBUG = True if os.environ.get("DEBUG", "").lower() == "true" else False
 config = None
 userData = None
 
+#: 本模块与 `utils.logger`（`LOG_FILE`）共用的"仓库根"。以文件位置回推，
+#: 不依赖 CWD —— systemd unit 的 `WorkingDirectory=`、docker 的 `cd /app`、
+#: 以及"在别的目录里 `python /opt/douyin-spark-fusion/main.py task`"三种起法
+#: 的 CWD 各不相同，用相对路径就会让账本/锁落到别处（锁失效 → 两个浏览器
+#: 同时开同一个账号，重复发送）。
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def _env_int(name, default, minimum=None):
+#: 发送时间表默认时区。宿主是 UTC 而这里是 `Asia/Shanghai` 时，不调 tzset()
+#: 会让整张时间表平移 8 小时（见 `_apply_tz`）。
+DEFAULT_TZ = "Asia/Shanghai"
+
+
+def resolve_path(value):
+    """把配置里的路径落到**仓库根**下：相对路径按仓库根解析，绝对路径原样返回。
+
+    与 `webui.config.resolve_path` 是同一套语义（那边也写了"相对路径按仓库根解析"），
+    这里是给不走 webui 的消费方（`core/run_ledger.py` 的账本/锁等）用的。
+    """
+    if not value:
+        return value
+    expanded = os.path.expanduser(str(value))
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(REPO_ROOT, expanded)
+
+
+#: 上一次已经 `tzset()` 过的 TZ 值；None = 还没有（首次一定执行）。
+_TZ_APPLIED = None
+
+
+def _apply_tz(force=False):
+    """把 `TZ`（默认 `Asia/Shanghai`）落进 libc 的时区缓存：必要时调一次 `time.tzset()`。
+
+    ★ 为什么不能只在"读完了 `.env`"之后调：`.env` 不存在、或者没装 python-dotenv
+    时**照样**要生效。宿主时区是 UTC 的部署机上，不调 tzset() 的后果是整张发送
+    时间表平移 8 小时 —— 面板按 WEBUI_TZ 显示 20:30，真正发车却在 12:30，而
+    这一轮恰好一条日志都不报错，只能靠看时间戳发现。
+
+    ★ 为什么要把 `TZ` **写回** `os.environ`：`tzset()` 认的就是这个变量 —— 它没设时
+    tzset() 按宿主的 `/etc/localtime` 落地（实测：`os.environ.pop("TZ")` 之后
+    `tzset()` 得到的是宿主时区），"默认 Asia/Shanghai"这条就等于没生效，UTC 宿主上
+    照旧平移 8 小时。回写也让子进程（浏览器、cron、`python main.py task`）看到同一个
+    时区，不再各按各的算。
+
+    ★ 为什么默认只在 TZ 变了的时候真调：tzset() 会**重新读一遍 tzdata**，而
+    `load_env_file()` 在常驻的 webui 里每存一次配置都会被调到（见
+    `webui.envfile` → `utils.config.reload_env`），每次多一次系统调用没必要。
+    这里用模块级缓存记住"上一次生效的 TZ"，只有首次或值真的变了才落地 ——
+    同时也让"同一份 .env 连续读两次"在测试里可断言（tzset 只该被调一次）。
+
+    ★ `force=True` 用在**真的读到了 `.env`** 那条路径上（见 `load_env_file` 末尾）：
+    文件是 TZ 的权威来源，而"值比较"分不出"这个值来自宿主/默认"与"这个值刚从 .env
+    里读出来"（`main.py` 在 import 期就先读过一次，缓存此时已经热了）。
+
+    Windows 上没有 `tzset`（项目本身支持 Windows）：直接跳过，否则 import 期就会
+    AttributeError。
+    """
+    global _TZ_APPLIED
+    tz = os.environ.get("TZ") or DEFAULT_TZ
+    if not force and tz == _TZ_APPLIED:
+        return
+    if os.name == "posix" and hasattr(time, "tzset"):
+        os.environ["TZ"] = tz          # 必须先回写：tzset() 认的是它，不是 tz 这个局部量
+        try:
+            time.tzset()
+        except Exception:  # pragma: no cover - 极端环境没有 tzdata 也不能拖垮启动
+            pass
+    _TZ_APPLIED = tz
+
+
+def _env_int(name, default, minimum=None, maximum=None):
     """读一个整数环境变量：写错值不炸配置，回落到默认值并告警一次。
 
     裸 `int(os.getenv(...))` 遇上 `.env` 里手滑写的 `30 分钟` 会抛 ValueError，
     而那是在 `get_config()` 里 —— 整个进程连日志都打不出来就死了。
+
+    非有限值也要挡住：`float("1e999")` 是合法的 inf，`int(inf)` 抛的是
+    **OverflowError**（不是 ValueError），漏掉它同样会在读配置时炸。
     """
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
@@ -27,16 +102,21 @@ def _env_int(name, default, minimum=None):
     else:
         try:
             value = int(float(str(raw).strip()))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             logger.warning(f"环境变量 {name}={raw!r} 不是整数，回落到默认值 {default}")
             value = int(default)
     if minimum is not None and value < minimum:
         logger.warning(f"环境变量 {name}={value} 小于下限 {minimum}，按 {minimum} 处理")
         value = int(minimum)
+    if maximum is not None and value > maximum:
+        # 上限不是洁癖：`LIMIT_COOLDOWN_MINUTES` 写成一个手滑的大数，机器人就
+        # 静悄悄停机到那个时刻（timer exit 0、账本零痕迹），只有面板横幅能看出来。
+        logger.warning(f"环境变量 {name}={value} 超过上限 {maximum}，按 {maximum} 处理")
+        value = int(maximum)
     return value
 
 
-def _env_number(name, default, minimum=None):
+def _env_number(name, default, minimum=None, maximum=None):
     """读一个**可以是小数**的数字环境变量（秒数这类）：写错回落默认值并告警一次。"""
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
@@ -44,12 +124,21 @@ def _env_number(name, default, minimum=None):
     else:
         try:
             value = float(str(raw).strip())
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             logger.warning(f"环境变量 {name}={raw!r} 不是数字，回落到默认值 {default}")
             value = float(default)
+        else:
+            if not math.isfinite(value):
+                # `1e999` → inf / `nan` → nan：都能过 float()，但拿去比大小、
+                # 做间隔、算冷却全是错的（nan 的比较恒为 False，会静默失效）。
+                logger.warning(f"环境变量 {name}={raw!r} 不是有限数字，回落到默认值 {default}")
+                value = float(default)
     if minimum is not None and value < minimum:
         logger.warning(f"环境变量 {name}={value} 小于下限 {minimum}，按 {minimum} 处理")
         value = float(minimum)
+    if maximum is not None and value > maximum:
+        logger.warning(f"环境变量 {name}={value} 超过上限 {maximum}，按 {maximum} 处理")
+        value = float(maximum)
     return value
 
 
@@ -127,7 +216,11 @@ def get_config():
         # 2026-10-11 之前这个键在面板上可改、`core/` 里却 0 处消费，写几都只重试
         # 一次；现在真按它执行（见 core/tasks.py::_retry_budget）。
         "taskRetryTimes": _env_int("TASK_RETRY_TIMES", 1, minimum=0),
-        "logLevel": os.getenv("LOG_LEVEL", "Debug"),  # 日志级别
+        # `Info` 与 main.py 的 `setup_logger(level=os.getenv("LOG_LEVEL", "Info"))`
+        # 以及 configTool/models.DEFAULT_LOG_LEVEL 对齐：以前这里写 "Debug"，
+        # 于是"没设 LOG_LEVEL"的进程按 Debug 落盘（日志量差一个量级），而面板与
+        # 文档都按 Info 说；生产 .env 里显式写了 LOG_LEVEL，不受这一改动影响。
+        "logLevel": os.getenv("LOG_LEVEL", "Info"),  # 日志级别
 
         # ---- 空跑与限流熔断（融合新增，见 FUSION-DESIGN.md §5/§6）----------
         # 空跑档位：off=正常发送 / select=只确认选中 / full=真输入并读回校验。
@@ -137,29 +230,49 @@ def get_config():
         "limitGuardEnabled": os.getenv("LIMIT_GUARD_ENABLED", "true").lower()
         not in ("0", "false", "no", "off"),
         "limitCooldownMinutes": _env_int(
-            "LIMIT_COOLDOWN_MINUTES", 30, minimum=1
-        ),  # 命中熔断后的冷却时长，分钟
+            "LIMIT_COOLDOWN_MINUTES", 30, minimum=1, maximum=1440
+        ),  # 命中熔断后的冷却时长，分钟（上限 24 小时，与面板 settings.py 的 maximum 对齐）
         # "禁跑时间窗"：这段绝对不发，用来避免两个程序抢同一个抖音账号。
-        # 默认 off —— 2026-10-01 起 .172 上只剩这一套在发，窗口没必要；
+        # 默认 off —— 2026-10-01 起 本机 上只剩这一套在发，窗口没必要；
         # 真要用（比如夜里不想发）就写 "HH:MM-HH:MM"；留空 / off / none 表示不限制。
         # 注意：窗口盖住定时器时间会让那一轮整轮跳过，面板会报红。
         "quietWindow": os.getenv("QUIET_WINDOW", "off").strip(),
         # 两次发送之间的最小/最大间隔（秒）。0/0 = 不额外等待（保持 C 的原始节奏）；
         # cloakbrowser 的 humanize 本身就有拟人节奏，这里只是给"明显太快"兜底。
-        "sendIntervalMinSeconds": float(os.getenv("SEND_INTERVAL_MIN_SECONDS", "8")),
-        "sendIntervalMaxSeconds": float(os.getenv("SEND_INTERVAL_MAX_SECONDS", "20")),
-        # 运行账本与运行锁（webui 也读这两个文件，见 core/run_ledger.py）
-        "runLedgerFile": os.getenv("RUN_LEDGER_FILE", os.path.join("logs", "runs.jsonl")),
-        "runLockFile": os.getenv("RUN_LOCK_FILE", os.path.join("logs", "run.lock")),
-        "rateLimitFile": os.getenv("RATE_LIMIT_FILE", os.path.join("logs", "rate_limit.json")),
+        # 这两行曾是全模块最后两处裸 `float(os.getenv(...))`：`.env` 里写成
+        # `8 秒` / `8s` / `1,5`，`get_config()` 直接抛 ValueError —— 而那是**首次
+        # 读配置**的时刻，进程连日志都打不出来就死了（面板也跟着挂）。
+        "sendIntervalMinSeconds": _env_number(
+            "SEND_INTERVAL_MIN_SECONDS", 8, minimum=0, maximum=3600
+        ),
+        "sendIntervalMaxSeconds": _env_number(
+            "SEND_INTERVAL_MAX_SECONDS", 20, minimum=0, maximum=3600
+        ),
+        # 运行账本与运行锁（webui 也读这两个文件，见 core/run_ledger.py）。
+        # 相对路径按**仓库根**解析（与 .env.example 里写的"相对路径按仓库根解析"、
+        # webui.config.resolve_path 一致）：按 CWD 解析时，从别的目录执行
+        # `python /opt/douyin-spark-fusion/main.py task` 会把运行锁落到那个目录，
+        # 锁失效 = 定时任务与手动触发可能同时开两个浏览器发同一个账号。
+        "runLedgerFile": resolve_path(
+            os.getenv("RUN_LEDGER_FILE", os.path.join("logs", "runs.jsonl"))
+        ),
+        "runLockFile": resolve_path(
+            os.getenv("RUN_LOCK_FILE", os.path.join("logs", "run.lock"))
+        ),
+        "rateLimitFile": resolve_path(
+            os.getenv("RATE_LIMIT_FILE", os.path.join("logs", "rate_limit.json"))
+        ),
 
         # ---- 账号级发送时间表（见 core/schedule.py）------------------------
         # 到点之后在这个范围里再抖一下，免得几个账号卡在同一分钟发出去。
         # 0 = 严格按点。它同时决定 systemd timer 敲门的疏密（见 schedule.tick_minutes）。
         "scheduleJitterMinutes": _env_int("SCHEDULE_JITTER_MINUTES", 15, minimum=0),
-        # "今天这个账号发过了"的账本。和 runLockFile 一样是相对 CWD 的路径。
-        "scheduleStateFile": os.getenv(
-            "SCHEDULE_STATE_FILE", os.path.join("logs", "schedule_state.json")
+        # "今天这个账号发过了"的账本。与上面三个同订：相对路径按仓库根解析，
+        # 免得从别的 CWD 起进程时读到另一份"今天还没发过"的状态（= 当天重发）。
+        # ⚠️ 真正写它的是 `core/schedule.py::state_path`（不归本次改动），那边仍按
+        # CWD 解析；只有消费方（webui/面板）读这里时才会被锚到仓库根。
+        "scheduleStateFile": resolve_path(
+            os.getenv("SCHEDULE_STATE_FILE", os.path.join("logs", "schedule_state.json"))
         ),
     }
 
@@ -199,6 +312,17 @@ def load_env_file(path=None, *, override=True, keep=PROCESS_WINS_KEYS):
     global config, userData
 
     path = path or os.getenv("ENV_FILE") or ".env"
+    # 无论文件读没读到（下面两条 return）、dotenv 装没装，时区都要先落地：
+    # 这两条 return 以前在 tzset() **之前**，等价于"没有 .env 就不认 TZ"。
+    #
+    # ⚠️ 这里**只**落地时区，刻意不顺手清 `config`/`userData`：清缓存必须发生在
+    # "真的读到文件"之后（见函数末尾）。理由是 `load_dotenv` 只有新增/覆盖语义、
+    # **没有删除语义** —— 把 `.env` 删掉之后进程环境里仍然留着上一次读进来的
+    # `TASKS`/`COOKIES_*`，所以"文件不在也清缓存"根本不会让账号列表变空，只会让
+    # 每个请求（面板每次请求都 `refresh_env()`）都白解析一遍；而调用方打桩
+    # `utils.config.userData` 的场景（见 tests/test_webui.py 的 `_patch_utils_config`）
+    # 会被无条件清掉，整批面板用例变成"没有账号"。
+    _apply_tz()
     if not os.path.exists(path):
         return None
     try:
@@ -224,6 +348,17 @@ def load_env_file(path=None, *, override=True, keep=PROCESS_WINS_KEYS):
     load_dotenv(path, override=override)
     for key, value in kept.items():  # 启动方的决定原样还回去
         os.environ[key] = value
+
+    # `.env` 里的 TZ 光写进 os.environ 是不够的：libc 把时区缓存在进程里，读完要
+    # 调一次 tzset() 才生效。不调的话调度与日志仍按**宿主**时区算，而面板按
+    # WEBUI_TZ 显示 —— 用户在面板上看到的时间和真正发车的时刻差几个小时，还查不出
+    # 为什么（全仓以前没有一处 tzset，所以这一条在文档里写了却一直没生效）。
+    # 这一次**强制**落地：文件是 TZ 的权威来源，而"值比较"分不出"这个 TZ 来自宿主/
+    # 默认值"与"它刚刚从 .env 里读出来"——`main.py` 在 import 期就先跑过一次
+    # `load_env_file()`，缓存这时已经热了。被"值没变就跳过"挡掉的仍然是**没读到
+    # .env** 的那些调用（上面那一次：常驻 webui 每保存一次配置都会 reload_env()，
+    # 不该每次都重读 tzdata）。
+    _apply_tz(force=True)
 
     config = None
     userData = None
@@ -254,6 +389,46 @@ def sanitize_cookies(cookies):
     return cookies
 
 
+def _brief(raw, limit=160):
+    """把一段用户写的配置原文截断成能进日志的一行（不换行、不过长）。"""
+    text = " ".join(str(raw or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+#: 键名里带这些词的一律当凭据：值不进日志，只报长度与指纹。
+SECRET_KEY_HINTS = ("COOKIE", "PASSWORD", "PASSWD", "SECRET", "TOKEN", "SIGNATURE", "HASH")
+
+
+def _secret_key(key) -> bool:
+    upper = str(key or "").upper()
+    return any(hint in upper for hint in SECRET_KEY_HINTS)
+
+
+def _fingerprint(raw) -> str:
+    """凭据的指纹：长度 + 前 8 位 sha256。用来判断"变没变"，反推不出原文。"""
+    text = str(raw or "")
+    return f"sha256:{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:8]}"
+
+
+def drift_report(drift, limit=160) -> str:
+    """把 `load_env_file()` 的 drift 拼成一句**不泄密**的日志。
+
+    以前这里直接把两侧的原始值打进日志，而 `.env` 里的 `COOKIES_<抖音号>` 是一整份
+    登录凭据（sessionid）—— 等于每启动一次就往 logs/app.log 里抄一份完整登录态。
+    凭据键改报"长度 + 指纹"（足够看出被人改过），其余键照旧报值：像 MESSAGE_TEMPLATE
+    这种正是要靠原始值才能看出被 systemd 吃掉反斜杠的。
+    """
+    parts = []
+    for key, (before, after) in sorted((drift or {}).items()):
+        if _secret_key(key):
+            parts.append(f"{key} 进程=<隐藏 {len(str(before or ''))} 字符 "
+                         f"{_fingerprint(before)}> → 文件=<隐藏 {len(str(after or ''))} 字符 "
+                         f"{_fingerprint(after)}>")
+        else:
+            parts.append(f"{key} 进程={_brief(before, limit)!r} → 文件={_brief(after, limit)!r}")
+    return "；".join(parts)
+
+
 def get_userData():
     """
     获取用户数据目录
@@ -264,14 +439,48 @@ def get_userData():
     if userData:
         return userData
 
-    tasks = json.loads(os.getenv("TASKS", "[]"))
-    
+    # TASKS 是手改 .env 时最容易写坏的一项（中文逗号、少引号、尾逗号），而它是
+    # **整轮任务**的输入：裸 `json.loads` 抛出的 JSONDecodeError 会从本函数直接
+    # 冒到调用方 —— 定时器每 5 分钟 exit 1、`runs.jsonl` 零记录、面板「立即运行」
+    # 503，日志里只有一行 traceback，看不出是 TASKS 的错。这里改成"解析失败 →
+    # 当空名单 + 明确告警"，让轮次照常跑完并留下痕迹（谁都没配 vs 配错了，
+    # 日志里一眼能分）。
+    raw_tasks = os.getenv("TASKS", "[]")
+    try:
+        tasks = json.loads(raw_tasks)
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            f"⛔ TASKS 不是合法 JSON（{exc}）—— 本轮按「没有账号」处理，"
+            f"请在面板或 .env 里修正 TASKS。原文：{_brief(raw_tasks)!r}"
+        )
+        tasks = []
+    if isinstance(tasks, dict):
+        # 只配了一个账号时手写成对象是很自然的写法，顺手兼容掉。
+        tasks = [tasks]
+    if not isinstance(tasks, list):
+        logger.error(
+            f"⛔ TASKS 的顶层必须是数组，实际是 {type(tasks).__name__}，"
+            f"本轮按「没有账号」处理"
+        )
+        tasks = []
+
     if DEBUG:
         logger.info(f"读取到tasks：{tasks}")
 
-    userData = []
+    # ★ 先在**局部**变量里建好，最后一次性赋给全局名。`userData = []` 之后再逐个
+    #   append，等于把半成品挂在全局名上：面板每个请求都会
+    #   `refresh_env()` → `userData = None` → 重新调用本函数，而运行线程也会
+    #   `importlib.reload(core.tasks)`（模块体里就调本函数）—— 两个线程会互相往
+    #   对方刚建的那个 list 里 append，账号名单因此可能重复或缺失
+    #   （重复 = 同一轮里同一个好友收到两条火花）。局部构建没有这个窗口。
+    data = []
 
     for task in tasks:
+        if not isinstance(task, dict):
+            logger.warning(
+                f"TASKS 里有一项不是对象（{type(task).__name__}），已跳过：{_brief(task)!r}"
+            )
+            continue
         username = task.get("username", "未知用户")
         unique_id = task.get("unique_id")
         fingerprint = task.get("fingerprint")
@@ -291,7 +500,18 @@ def get_userData():
             logger.warning(f"{username} 的任务 {cookies_key} 格式不正确，已跳过")
             continue
 
-        userData.append(
+        targets = task.get("targets")
+        if targets is None:
+            # `"targets": null` 是手写 JSON 的常见形态：`list(None)` 会抛 TypeError，
+            # 而它和"写坏了"一样应该只是"这个账号没配目标"。
+            targets = []
+        if isinstance(targets, (str, bytes)) or not isinstance(targets, (list, tuple)):
+            logger.warning(
+                f"{username} 的任务 targets 不是数组（{type(targets).__name__}），已按空处理"
+            )
+            targets = []
+
+        data.append(
             {
                 "unique_id": unique_id,
                 "username": username,
@@ -310,8 +530,9 @@ def get_userData():
                 # 目标列表保持原样（不在这里归一化）。
                 # 归一化统一由 tasks.py 在匹配前做 —— 读取端不做加工，
                 # 配置读出来什么就是什么，避免同一份数据两处变换。
-                "targets": list(task.get("targets", [])),
+                "targets": list(targets),
             }
         )
 
+    userData = data
     return userData

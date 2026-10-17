@@ -6,12 +6,25 @@
 #   sudo bash deploy/install.sh                 # 从源码目录安装到 /opt/douyin-spark-fusion
 #   sudo APP_DIR=/opt/xxx bash deploy/install.sh
 #   sudo SKIP_BROWSER=1 bash deploy/install.sh  # 只装 Python 侧，不碰浏览器
+#   sudo bash deploy/install.sh --dry-run       # 只同步代码/venv/.env，不写 /etc、不重启服务
+#
+# 升级（重复执行）末尾会对**已在运行**的面板做一次 `systemctl restart`：不重启的话
+# 面板进程还跑着上一次装进去的代码，表现为"明明升级了、页面上还是旧行为"。
+# 定时器（daily.timer）**不会**被自动 enable，那是"真的会发消息"的动作。
+#
+# APP_DIR 可以不是默认值：unit 与 logrotate 规则里的绝对路径会在安装时被替换成
+# 真实的 APP_DIR（见下面「渲染并安装 systemd 单元」一段）。代价是安装后的文件与
+# `deploy/` 里的模板不再逐字相同 —— 以 `/etc/systemd/system/` 下的实际文件为准。
 #
 # 做的事：venv → pip 安装依赖 → 确保浏览器可用 → 生成/校验 .env → 安装 systemd 单元。
 # **不会**自动 enable 定时器：那是"真的会发消息"的动作，留给你显式执行（见文末提示）。
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/douyin-spark-fusion}"
+#: 三个交付件（web unit / daily unit / logrotate）里写的默认路径。
+#: 只在"替换成真实 APP_DIR"时当查找目标用，**产品默认值本身没变**：
+#: .env.example 的 OPS_LOG_FILE、docs/ 里的示例都还是这个路径。
+DEFAULT_APP_DIR="/opt/douyin-spark-fusion"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-python3}"
 CLOAK_DIR=/opt/cloakbrowser
@@ -23,8 +36,38 @@ log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# `--dry-run`：只做"拷贝代码 + venv + .env"这些落在 APP_DIR 里的动作，
+# 跳过所有写 /etc 的步骤（systemd 单元、logrotate 规则）与最后的面板重启。
+# 装 systemd 单元本身要求 root，本脚本也强制 root，所以在容器/CI 里预演时
+# 需要一个不碰宿主机配置的开关。
+# ⚠️ 这一段必须放在 log/warn/die **之后**：bash 里函数要先定义再调用，
+#    放在前面时 `--bogus` 会变成"die: 未找到命令"（127），
+#    用户看到的是一句 shell 报错而不是"未知参数"。
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    *) die "未知参数：$arg（只支持 --dry-run）" ;;
+  esac
+done
+
 [ "$(id -u)" = "0" ] || die "请用 root 运行（sudo bash deploy/install.sh）"
 command -v "$PY" >/dev/null || die "找不到 $PY"
+
+# APP_DIR 会被原样拼进 systemd 单元与日志路径：带空格/百分号（systemd 的转义字符）
+# 或换行时，下面的 sed 渲染出来的路径必然与真实目录对不上，装出来的 unit 会指向
+# 一个不存在的目录（表现为"装成功了但服务起不来"）。宁可在安装前就拒绝。
+# `&` 会让 sed 的替换串把匹配到的路径原地重放（路径里出现 /opt/x&y 就会渲染成
+# /opt//opt/x&y），`|` 会提前结束 s||| 的分隔符 —— 两个都拒绝，别让渲染悄悄写坏。
+case "$APP_DIR" in
+  *[[:space:]]*) die "APP_DIR 不能含空白字符：$APP_DIR" ;;
+  *%*)           die "APP_DIR 不能含 %（systemd 的转义字符）：$APP_DIR" ;;
+  *'&'*)         die "APP_DIR 不能含 &（sed 替换串的元字符）：$APP_DIR" ;;
+  *'|'*)         die "APP_DIR 不能含 |（sed 分隔符）：$APP_DIR" ;;
+esac
+for cmd in install sed; do
+  command -v "$cmd" >/dev/null || die "找不到 $cmd（后缀渲染 unit 与 logrotate 规则要用）"
+done
 
 # ---------------------------------------------------------------- 1. 拷贝代码
 if [ "$(readlink -f "$SRC_DIR")" != "$(readlink -f "$APP_DIR" 2>/dev/null || echo -)" ]; then
@@ -33,13 +76,20 @@ if [ "$(readlink -f "$SRC_DIR")" != "$(readlink -f "$APP_DIR" 2>/dev/null || ech
   # 不带 --delete：保留目标机上的 logs/、.env、venv 等运行时产物
   if command -v rsync >/dev/null; then
     rsync -a \
-      --exclude '.venv' --exclude 'logs' --exclude '.env' --exclude 'chrome' \
-      --exclude '__pycache__' --exclude '.git' --exclude 'data' \
+      --exclude '.venv' --exclude 'logs' --exclude '.env' --exclude '.env.tmp_*' \
+      --exclude '.tmp_*' \
+      --exclude 'chrome' --exclude '__pycache__' --exclude '.git' --exclude 'data' \
       "$SRC_DIR"/ "$APP_DIR"/
   else
+    # python-dotenv 的 set_key 是"写临时文件 → os.replace"，中间态里装着**完整的
+    # .env**（含全部 COOKIES_）。真实文件名是 `.tmp_xxxxxxxx`（`NamedTemporaryFile
+    # (prefix=".tmp_", dir=<.env 所在目录>)`，实测 1.2.4；requirements 钉的是 1.2.2），
+    # 早期代码/别处注释里写作 `.env.tmp_*` —— 两套都排除。这种文件平时不存在，但
+    # 保存过程被打断就会留在目录里，不能被同步到生产目录（打包/备份/快照也会带走）。
     tar -C "$SRC_DIR" \
-      --exclude=.venv --exclude=logs --exclude=.env --exclude=chrome \
-      --exclude=__pycache__ --exclude=.git --exclude=data \
+      --exclude=.venv --exclude=logs --exclude=.env --exclude='.env.tmp_*' \
+      --exclude='.tmp_*' \
+      --exclude=chrome --exclude=__pycache__ --exclude=.git --exclude=data \
       -cf - . | tar -C "$APP_DIR" -xf -
   fi
 else
@@ -117,31 +167,109 @@ if [ ! -f "$APP_DIR/.env" ]; then
   sed -i "s|^WEBUI_SESSION_SECRET=.*|WEBUI_SESSION_SECRET=$secret|" "$APP_DIR/.env"
   sed -i "s|^WEBUI_HOST=.*|WEBUI_HOST=0.0.0.0|" "$APP_DIR/.env"
   sed -i "s|^WEBUI_PORT=.*|WEBUI_PORT=8787|" "$APP_DIR/.env"
-  chmod 600 "$APP_DIR/.env"
   warn "请编辑 $APP_DIR/.env：填 TASKS / COOKIES_<unique_id> / WEBUI_PASSWORD 后再启动服务"
 else
   log "已存在 .env，保持不动：$APP_DIR/.env"
 fi
 
-# ---------------------------------------------------------------- 5. systemd
-log "安装 systemd 单元"
-install -m 644 "$APP_DIR/deploy/douyin-spark-fusion-web.service"  /etc/systemd/system/
-install -m 644 "$APP_DIR/deploy/douyin-spark-fusion-daily.service" /etc/systemd/system/
-install -m 644 "$APP_DIR/deploy/douyin-spark-fusion-daily.timer"   /etc/systemd/system/
-systemctl daemon-reload
+# .env 里装着 COOKIES_<unique_id>（就是抖音 sessionid，等于账号本身），必须 600。
+# 这一句以前只写在上面「新装」分支里，而 .env.example 教的是先 `cp .env.example .env`
+# 再跑脚本 —— cp 出来的源文件是 644，于是走 else 分支、.env 永远是 644：同机任何用户
+# 都能把 sessionid 读走，它还会跟着整目录打包/备份/快照一起外泄。所以挪出分支无条件收紧，
+# 升级场景同样管用。文件不存在（从没生成过）就静默跳过；chmod 失败只告警，不中断安装。
+if [ -f "$APP_DIR/.env" ]; then
+  chmod 600 "$APP_DIR/.env" 2>/dev/null \
+    || warn "收紧 $APP_DIR/.env 权限失败，请手动执行：chmod 600 $APP_DIR/.env"
+fi
 
-# 日志轮转（F8）：生产默认 LOG_LEVEL=Debug，两个单元都往同一个文件追加，
+# 扫码登录的资料目录：Chromium 的 Cookies sqlite（sessionid 在里面）与整份登录态，
+# 比 .env 还全，一样只给本用户。目录要扫过码才有，不存在就跳过。
+# 父目录 logs/ 保持 755 不影响：没有 o+x 就进不去 login-profile，连有哪些账号都列不出来。
+if [ -d "$APP_DIR/logs/login-profile" ]; then
+  chmod 700 "$APP_DIR/logs/login-profile" 2>/dev/null \
+    || warn "收紧登录资料目录失败，请手动执行：chmod 700 $APP_DIR/logs/login-profile"
+fi
+
+# ---------------------------------------------------------------- 5. systemd
+# 交付件里的绝对路径是**模板默认值**：`deploy/*.service` 与 `deploy/logrotate.conf`
+# 里每一处都写 /opt/douyin-spark-fusion。APP_DIR 一旦不是默认值，直接 `install`
+# 这两个文件就会装出一套"指错路径的 unit + 一条永远轮转不到日志的规则" ——
+# 服务起不来、日志越写越大，而安装脚本自己一声不响。所以这里渲染成真实路径再装。
+#
+# 为什么选"渲染"而不是"拒绝非默认 APP_DIR"：脚本开头就文档化了 `APP_DIR=/opt/xxx`，
+# 这是既有用户能用的功能，删掉它是行为回退；而渲染只多依赖 sed（已在上面校验存在）。
+# 代价写在文件头：装到 /etc 下的文件与 deploy/ 里的模板不再逐字相同，排查时以
+# `/etc/systemd/system/douyin-spark-fusion-*.service` 的实际内容为准。
+#
+# systemd 侧只替换单元里的路径即可，不需要动 [Service] 的其他字段；
+# logrotate 侧还要把日志目录建出来（没有 o+x 的父目录会让 logrotate 报 missingok 之外
+# 的错误），所以两条渲染路径分开处理。
+render_unit() {  # render_unit <模板文件> <目标文件>
+  if [ "$APP_DIR" = "$DEFAULT_APP_DIR" ]; then
+    install -m 644 "$1" "$2"
+  else
+    sed "s|$DEFAULT_APP_DIR|$APP_DIR|g" "$1" > "$2"
+    chmod 644 "$2"
+  fi
+}
+
+log "安装 systemd 单元"
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] 跳过写 /etc/systemd/system/（web unit / daily unit / daily timer）"
+else
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-web.service"   /etc/systemd/system/douyin-spark-fusion-web.service
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.service" /etc/systemd/system/douyin-spark-fusion-daily.service
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.timer"   /etc/systemd/system/douyin-spark-fusion-daily.timer
+  systemctl daemon-reload
+fi
+
+# 日志轮转（F8）：两个单元都往同一个文件追加，整轮发送的每一步都落盘，
 # 不轮转迟早把磁盘写满。日志目录不存在就先建出来，否则 logrotate 会因为
 # 通配符没匹配到而报错（missingok 只管 rotate 时文件不在的情况）。
 log "安装日志轮转规则"
 mkdir -p "$APP_DIR/logs"
-install -m 644 "$APP_DIR/deploy/logrotate.conf" /etc/logrotate.d/douyin-spark-fusion
-if command -v logrotate >/dev/null 2>&1; then
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] 跳过写 /etc/logrotate.d/douyin-spark-fusion"
+elif [ "$APP_DIR" = "$DEFAULT_APP_DIR" ]; then
+  install -m 644 "$APP_DIR/deploy/logrotate.conf" /etc/logrotate.d/douyin-spark-fusion
+else
+  sed "s|$DEFAULT_APP_DIR|$APP_DIR|g" "$APP_DIR/deploy/logrotate.conf" > /etc/logrotate.d/douyin-spark-fusion
+  chmod 644 /etc/logrotate.d/douyin-spark-fusion
+  # 模板注释里还写着默认路径的说明，替换后原样保留 —— 这里只提示一声
+  log "logrotate 规则已按 APP_DIR 渲染：$APP_DIR/logs/*.log"
+fi
+if [ "$DRY_RUN" != "1" ] && command -v logrotate >/dev/null 2>&1; then
   logrotate -d /etc/logrotate.d/douyin-spark-fusion >/dev/null 2>&1 \
     && log "logrotate 规则自测通过（-d 只演练）" \
     || warn "logrotate -d 自测有告警，请手动看：logrotate -d /etc/logrotate.d/douyin-spark-fusion"
-else
+elif [ "$DRY_RUN" != "1" ]; then
   warn "没找到 logrotate，规则已放在 /etc/logrotate.d/ 但不生效（apt install logrotate）"
+fi
+
+# ---------------------------------------------------------------- 6. 重启面板
+# 升级场景：unit 重装 + daemon-reload 之后，**已在运行**的面板进程仍然跑着旧代码。
+# 不重启的表现是"代码已经是最新的、页面行为还是旧的"，而且日志里没有任何线索。
+#
+# 判定条件刻意保守：单元已被 enable（开机自启）**且此刻 active** 才重启。
+#  - 没装过 → 什么都不做（提示里已有 enable --now 的手动步骤）；
+#  - unit 存在但没 enable，却正在 active：可能是一次性 `systemd-run` 起的，不碰；
+#  - enabled 但 failed/stop：管理员刚手工停过，重启会把它的意图顶掉。
+# 重启失败不致命（面板起不来不该让"代码已同步"这件事回退），只告警。
+log "重启已生效的面板服务（如有）"
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] 跳过 systemctl restart douyin-spark-fusion-web.service"
+elif ! command -v systemctl >/dev/null 2>&1; then
+  warn "没有 systemctl（容器/非 systemd 环境），跳过重启；用 docker compose up -d --build 或手动重启"
+elif [ -f /etc/systemd/system/douyin-spark-fusion-web.service ] \
+     && systemctl is-enabled --quiet douyin-spark-fusion-web.service 2>/dev/null \
+     && systemctl is-active  --quiet douyin-spark-fusion-web.service 2>/dev/null; then
+  if systemctl restart douyin-spark-fusion-web.service; then
+    log "面板已重启：systemctl status douyin-spark-fusion-web.service 可看状态"
+  else
+    warn "面板重启失败 —— 代码已同步，请手动看：systemctl status douyin-spark-fusion-web.service"
+  fi
+else
+  log "面板当前未在运行（或未 enable），跳过重启；启动见下面第 3 步"
 fi
 
 log "完成。接下来（**都没自动做**）："

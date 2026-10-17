@@ -219,7 +219,12 @@ SETTINGS: Tuple[Setting, ...] = (
         "日志级别",
         KIND_SELECT,
         options=("Debug", "Info", "Warning", "Error"),
-        default="Debug",
+        # 与 utils/config.py、configTool、.env.example、docs 的默认值保持一致（都是
+        # Info）。面板这一处是第 5 个"默认值来源"：`.env` 里没这个键时，卡片上显示
+        # 的就是它，写回去的也是它 —— 显示 Debug 而代码兜底 Info 会让"我没设过"的
+        # 用户看到两者不一致（`tests/test_config_tool.py::DefaultsAlignmentTests`
+        # 已把面板这一处也钉进对齐断言）。
+        default="Info",
         restart=True,
         hint="面板自己的日志要重启服务才换级别；定时任务下一轮自动生效",
     ),
@@ -231,6 +236,19 @@ SETTINGS: Tuple[Setting, ...] = (
         hint="面板上的时间戳按它渲染（IANA 名字，如 Asia/Shanghai）。它只管显示："
              "调度与日志时钟走 .env 里的 TZ（面板改不了，改它要重启服务）——"
              "两边填不一样时，面板显示的时间会和实际触发时间差几个小时",
+    ),
+    Setting(
+        "WEBUI_SESSION_MAX_AGE",
+        "登录保持时长",
+        KIND_INT,
+        # 与 webui/config.py 的 DEFAULT_SESSION_MAX_AGE / MAX_SESSION_MAX_AGE 同口径：
+        # 默认 30 天，上限 400 天（Chrome 对 cookie 有效期的硬上限，写更大也会被截断）。
+        minimum=60,
+        maximum=400 * 24 * 3600,
+        default="2592000",
+        hint="秒；默认 30 天（2592000），上限 400 天。它读的时候才生效："
+             "调大之后已经登录的浏览器立刻受益，调小会把超过新时长的会话立刻踢下线。"
+             "改口令永远会作废所有会话，登出会拉黑当前这一份",
     ),
 )
 

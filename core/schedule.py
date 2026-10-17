@@ -34,6 +34,9 @@
    反复踹起来开浏览器，一天 288 次。
    面板的"立即运行"是**强制**的（不受时间表约束），并且同样记账 ——
    这样手动跑过之后再也不会被定时那一轮重复发一遍。
+   `skipped` 是唯一的例外：它表示"一条都没发出去、当天名额还在"，下一次门铃
+   要接着试。但也不是无限试 —— 每条 skipped 记录带 `attempts` 计数，试满
+   `SCHEDULE_SKIP_RETRY_MAX`（默认 6）次之后当天不再重试（见 `select()`）。
 
 ## 和 `TASK_SCHEDULE_TIMES` 的关系
 
@@ -43,10 +46,20 @@
 import hashlib
 import json
 import os
+import tempfile
 import time as _time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from core.util_time import iso, now, parse_iso
+from utils.logger import setup_logger
+
+logger = setup_logger("schedule")
+
+try:                     # POSIX；Windows 上没有 fcntl，退化成"不加锁"（见 _state_lock）
+    import fcntl
+except ImportError:      # pragma: no cover - 只在 Windows 上走到
+    fcntl = None
 
 #: 没配 `TASK_SCHEDULE_TIMES`、账号也没写自己的时间时，用这个点。
 #: 与旧部署 `douyin-spark.service` 的 20:30 保持一致（2026-10-01 用户指定的口径）。
@@ -63,6 +76,14 @@ TICK_MINUTES = 5
 #: 用户填的时间点就没意义了。下限 1 分钟：`OnCalendar` 最细也就到分钟。
 TICK_MIN = 1
 TICK_MAX = 10
+
+#: `skipped` 记录当天最多被门铃重试几次（`SCHEDULE_SKIP_RETRY_MAX` 可覆盖）。
+#: 为什么要有上限：`skipped` 的含义是"当天名额还在、下一次门铃再试"，而门铃
+#: 每 5 分钟响一次 —— 一个一直过不了门禁的账号会被反复踹起来开浏览器，一天
+#: 最多 288 次，这本身就在喂风控。试满 6 次（默认约半小时）就当"今天不再试"，
+#: 记录留着、状态仍是 skipped，用户重新扫码（`retract_mark` 会把计数归零）
+#: 之后当天照样补发。0 = 不限制，退回从前的"一直重试"。
+DEFAULT_SKIP_RETRY_MAX = 6
 
 
 def tick_minutes(jitter=None):
@@ -224,8 +245,21 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
 # ---------------------------------------------------------------------------
 
 def state_path(path=None):
-    """状态文件路径。相对路径按 CWD 解析（与 `RUN_LOCK_FILE` 等保持一致）。"""
-    return str(path or os.getenv("SCHEDULE_STATE_FILE") or DEFAULT_STATE_FILE)
+    """状态文件路径。相对路径按**仓库根**解析（与 `RUN_LOCK_FILE` 等同一套语义）。
+
+    ★ 为什么不能按 CWD 解析：这个文件记的是"今天哪个账号发过了"。从别的目录起
+    进程（`cd /tmp && python /opt/douyin-spark-fusion/main.py task`、docker 换了
+    WORKDIR、systemd 少了 `WorkingDirectory=`）时，相对路径会**另开一份**空状态
+    —— 每个账号当天再发一遍，而且两边都觉得自己是对的。
+    `core/run_ledger.py` 的账本/锁已经这么锚了（见 `utils.config.resolve_path`），
+    这里必须同口径，否则"账本说发过了、状态说没发过"会互相打架。
+
+    `utils.config` 用**函数内** import：`webui` 也会 import 本模块，模块级 import
+    会把 dotenv / 环境变量快照一起拉进面板进程（与 `core/run_ledger.py` 同款写法）。
+    """
+    from utils.config import resolve_path       # noqa: PLC0415  函数内 import：避免 import 期耦合
+
+    return str(resolve_path(path or os.getenv("SCHEDULE_STATE_FILE") or DEFAULT_STATE_FILE))
 
 
 def load_state(path=None):
@@ -245,34 +279,206 @@ def load_state(path=None):
     accounts = data.get("accounts")
     if not isinstance(accounts, dict):
         accounts = {}
+    try:
+        # `int()` 也在这个 try 里：`version` 被写成 `"3.5"` / `"x"` / `1e999` 时
+        # 它会抛 ValueError/OverflowError —— 而在 try 外面抛，之后**每次**
+        # load_state 都炸，等于全账号停发到人工修文件为止。
+        version = int(data.get("version") or STATE_VERSION)
+    except (TypeError, ValueError, OverflowError):
+        version = STATE_VERSION
     return {
-        "version": int(data.get("version") or STATE_VERSION),
+        "version": version,
         "updated_at": data.get("updated_at"),
         "accounts": {str(k): v for k, v in accounts.items() if isinstance(v, dict)},
     }
 
 
+@contextmanager
+def _state_lock(target, timeout=2.0):
+    """给"读-改-写整个状态文件"加一把**跨进程**的小锁（`<状态文件>.lock`）。
+
+    ★ 为什么需要它：`save_marks` 的合并要先读磁盘再写回，如果两个进程（sender
+      收尾 + 面板扫码成功回调）同时做这件事，两边都读到同一份旧文件，各自把
+      自己的改动写进去，最后一个 `os.replace` 赢 —— 另一个进程刚记的账**丢了**。
+      光靠 `os.replace` 的原子性救不了这种情况（原子性只保证文件不会写坏，
+      不保证不丢更新）。
+
+    行为约定：拿不到锁（超时）**不阻塞**发送流程 —— 照样去合并写，只是退回
+    "尽力而为"。宁可偶尔丢一次合并，也不能因为一个锁文件让整轮发送卡死。
+    """
+    if fcntl is None:                    # Windows：没有 flock，尽力而为
+        yield False
+        return
+    lock_path = target + ".lock"
+    handle = None
+    acquired = False
+    try:
+        directory = os.path.dirname(os.path.abspath(lock_path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        handle = open(lock_path, "a+")
+    except OSError as exc:
+        # ★ 拿不到锁文件（目录只读 / 路径上是个普通文件 / 磁盘满 / fd 用尽）时
+        #   **不能抛**：这个上下文管理器裹在 `save_marks` 外面，而 `save_marks`
+        #   跑在 `core/tasks.py` 收尾的 finally 里 —— 从那里抛出去，同一段的
+        #   记账、finished_at、账本追加会被一起带走：整轮发送在面板上**不留任何
+        #   痕迹**（用户看到的是"什么都没发生"），下一轮还会把发过的账号重发一遍。
+        #   契约本来就是"不抛、拿不到锁就尽力而为"（见上面 2 行），退化即可。
+        logger.warning(
+            f"⚠️ 发送时间表拿不到锁（{lock_path}）：{type(exc).__name__}: {exc} —— "
+            f"本次合并写不加锁，可能与面板的改动互相覆盖"
+        )
+        yield False
+        return
+    try:
+        deadline = _time.time() + max(0.0, float(timeout))
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if _time.time() >= deadline:
+                    break
+                _time.sleep(0.05)
+        yield acquired
+    finally:
+        if handle is not None:
+            try:
+                if acquired:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+
+def _stamp(record):
+    """取一条记账的时间戳（用来判新旧）。取不到返回 None = 当成最旧。"""
+    if not isinstance(record, dict):
+        return None
+    for key in ("sent_at", "cleared_at", "updated_at"):
+        moment = parse_iso(record.get(key))
+        if moment is not None:
+            return moment
+    return None
+
+
 def save_state(state, path=None):
-    """原子写：先写 `.tmp` 再 `os.replace`，避免门铃正好撞上写一半的文件。
+    """原子写：先写同目录下的**唯一**临时文件再 `os.replace`。
 
     写失败只返回 False（调用方记警告），不抛 —— 记不上账不该让这一轮发送失败。
+
+    ★ 临时文件名为什么必须唯一：以前是 `target + ".tmp"` 这个**固定**名字，
+      sender 与面板各自的读-改-写窗口重叠时，两个进程用 "w" 打开的是同一个
+      inode，谁先写完谁就被另一个人截断；`os.replace` 只搬得走其中一个，另一个
+      进程可能把**半截 JSON** 搬成正式文件。下次 `load_state` 解析失败会按
+      "还没有记录"处理 —— 于是所有账号"今天已发"的记账一次性清空、全量重发。
     """
     target = state_path(path)
     payload = dict(state or {})
     payload["version"] = STATE_VERSION
     payload["updated_at"] = iso(now())
-    directory = os.path.dirname(os.path.abspath(target))
+    directory = os.path.dirname(os.path.abspath(target)) or "."
+    tmp = ""
     try:
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
+        os.makedirs(directory, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, delete=False,
+            prefix=os.path.basename(target) + ".", suffix=".tmp",
+        )
+        tmp = handle.name
+        with handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+        # NamedTemporaryFile 建出来是 600；这个文件历来是 644（同 logs 目录里的
+        # 其它文件），保持一致，免得非 root 的读取方（旧部署、排障脚本）突然读不到。
+        try:
+            os.chmod(tmp, 0o644)
+        except OSError:
+            pass
         os.replace(tmp, target)
         return True
     except OSError:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         return False
+
+
+def save_marks(state, unique_ids, path=None, *, prune_stale=True):
+    """把 `state` 里**指定这几个账号**的记账合并进磁盘上的最新状态，再原子写。
+
+    ★ 为什么不能直接 `save_state(state)`：`state` 是调用方在**这一轮开始时**读的
+      快照，而 sender 的"读 → 写"窗口等于整轮浏览器操作（分钟级～1 小时）。这
+      中间面板完全可能改过同一个文件（扫码成功回调撤掉当天的记账）。用旧快照
+      整体覆盖 = 把面板刚做的改动抹掉（2026-10-09 示例号 掉登录后当天静默不发），
+      或者把面板刚撤掉的记账复活（当天一条都发不出去）。
+
+    合并规则：
+      * 只动 `unique_ids` 里点名的账号，其余账号一律以磁盘为准；
+      * 同一个账号，**时间戳新的赢**（面板的"撤账墓碑"用的是撤销时刻，见
+        `retract_mark`；sender 用的是本轮开始时刻，所以谁后发生听谁的）；
+      * 顺带把明显过期的记录清掉（`prune`，只减不加）。
+
+    返回是否写成功（与 `save_state` 一样不抛）。
+    """
+    target = state_path(path)
+    wanted = [str(uid or "") for uid in (unique_ids or []) if str(uid or "")]
+    with _state_lock(target) as locked:
+        if not locked:
+            # 锁没拿到也照写：状态记不上的后果（重复发送）比丢一次合并更重。
+            pass
+        disk = load_state(target)
+        if prune_stale:
+            prune(disk)
+        accounts = disk.setdefault("accounts", {})
+        mine = (state or {}).get("accounts") or {}
+        for key in wanted:
+            if key not in mine:
+                continue
+            incoming = mine[key]
+            current = accounts.get(key)
+            if current is not None and _is_relogin_tombstone(current) and _is_real_success(incoming):
+                # ★ 真正的成功比"撤账墓碑"更可信，时间戳不比了。
+                # 场景：面板扫码成功 → 写墓碑（撤销时刻）→ 与此同时 sender 正跑着
+                # 这一轮，收尾时用**本轮开始时刻**写 ok。开局时刻早于墓碑时刻，
+                # 按时间戳合并就会把 ok 改回 skipped，下一次门铃再发一遍
+                # = 同一天两条火花消息。墓碑的用途只是让"没发出去的"那天能补发，
+                # 一旦这一轮真发出去了，墓碑就已经过期了。
+                accounts[key] = incoming
+                continue
+            if current is not None and _newer(current, incoming):
+                continue           # 磁盘上的更新 → 认输，别拿旧快照盖回去
+            accounts[key] = incoming
+        return save_state(disk, target)
+
+
+def _is_relogin_tombstone(record):
+    """这条记录是不是 `retract_mark` 写下的"扫码撤账墓碑"。"""
+    if not isinstance(record, dict):
+        return False
+    return (str(record.get("status") or "") == STATUS_SKIPPED
+            and str(record.get("source") or "") == "relogin")
+
+
+def _is_real_success(record):
+    """这条记录是不是"这一轮真发出去了"。"""
+    if not isinstance(record, dict):
+        return False
+    return str(record.get("status") or "") == STATUS_OK
+
+
+def _newer(left, right):
+    """`left` 是否比 `right` 新。任一侧没有时间戳时判 False（= 不阻止写入）。"""
+    a, b = _stamp(left), _stamp(right)
+    if a is None or b is None:
+        return False
+    return a > b
 
 
 def entry_for(state, unique_id, when=None):
@@ -286,13 +492,26 @@ def entry_for(state, unique_id, when=None):
 
 
 def mark_sent(state, unique_id, *, when=None, plan=None, run_id="", status=STATUS_OK,
-              source="cli", note=""):
-    """记上"这个账号今天办过了"。就地改 `state` 并返回那条记录。"""
+              source="cli", note="", count_attempt=True):
+    """记上"这个账号今天办过了"。就地改 `state` 并返回那条记录。
+
+    `status=skipped`（一条都没发出去）时记录上会带 `attempts`＝"今天第几次没跑
+    起来"和 `last_attempt`：`select()` 靠它给反复过不了门禁的账号踩刹车
+    （见 `skip_retry_exhausted`）。**同一轮里对同一个账号 mark 两次会把计数多加
+    一次**（6 次的上限实际只撑 3 轮），调用方负责一轮只 mark 一次。
+
+    `count_attempt=False` 给"这次跳过根本没开浏览器"用（`TASKS` 里 `targets`
+    是空的那种）：它没有风控成本，而用户补配目标的时刻说不准 —— 那之后**没有
+    任何东西**会把计数归零（只有重新扫码会走 `retract_mark`），计进去等于把这个
+    账号当天静音。这类记录干脆不带 `attempts` 字段。
+    """
     when = when or now()
     plan = dict(plan or {})
+    day = day_of(when)
+    key = str(unique_id or "")
     accounts = state.setdefault("accounts", {})
     record = {
-        "date": day_of(when),
+        "date": day,
         "time": plan.get("time") or "",
         "due_at": iso(plan["due_at"]) if plan.get("due_at") else "",
         "sent_at": iso(when),
@@ -301,7 +520,11 @@ def mark_sent(state, unique_id, *, when=None, plan=None, run_id="", status=STATU
         "source": str(source or ""),
         "note": str(note or "")[:200],
     }
-    accounts[str(unique_id or "")] = record
+    if status == STATUS_SKIPPED and count_attempt:
+        # 按**今天**的记录累加：昨天试过 6 次不该让账号今天一上来就静音。
+        record["attempts"] = _attempts_of(accounts.get(key), day) + 1
+        record["last_attempt"] = iso(when)
+    accounts[key] = record
     return record
 
 
@@ -322,6 +545,48 @@ def clear_mark(state, unique_id, *, when=None):
     if when is not None and str(record.get("date") or "") != day_of(when):
         return False
     accounts.pop(key, None)
+    return True
+
+
+def retract_mark(state, unique_id, *, when=None, note=""):
+    """把"今天办过了"改写成一条 **`skipped` 墓碑**，返回是否真的改了。
+
+    用途与 `clear_mark` 相同（当天一条都没发出去 → 重新登录成功后要让门铃补发），
+    区别是**不删除、改写**：
+
+    ★ 为什么不能删：删掉以后，"面板撤过账"这件事在文件里不留任何时间戳。
+      而 sender 手里可能还攥着几分钟前读到的旧快照，收尾时用 `save_marks` 合并写
+      —— 合并只能比时间戳，没有时间戳就比不出来，于是它会把 error 记录原样写回，
+      当天火花再次静默丢失（2026-10-09 示例号 掉登录就丢在这条路径上）。
+      写成墓碑之后，合并按时间戳一比就知道"面板后来撤过"，会认输。
+
+    `skipped` 的口径与门禁/熔断一致：**一条都没发出去，当天名额还在**
+    （见 `select()` 与 `STATUS_SKIPPED` 的注释），所以下一次门铃会重试它。
+    """
+    when = when or now()
+    accounts = (state or {}).get("accounts")
+    if not isinstance(accounts, dict):
+        return False
+    key = str(unique_id or "")
+    record = accounts.get(key)
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("date") or "") != day_of(when):
+        return False
+    tomb = dict(record)
+    tomb.update({
+        "status": STATUS_SKIPPED,
+        "sent_at": iso(when),
+        "source": "relogin",
+        "note": str(note or "重新登录成功，撤回今天的记账，等下一次门铃补发")[:200],
+        # ★ 重试计数归零：墓碑的意义是"今天这条还没发出去，下一次门铃接着试"。
+        #   重新扫码成功之后，用户等的是**今天**补发 —— 要是把撤账前的 6 次
+        #   失败计数带过来，`select()` 会立刻判成"今天已经试够了"而不再重试，
+        #   当天火花静默丢失（这正是这个模块最怕的形状）。留 0 而不是删字段：
+        #   面板读的时候一眼看得见"这个账号今天从零开始试"。
+        "attempts": 0,
+    })
+    accounts[key] = tomb
     return True
 
 
@@ -348,6 +613,43 @@ def prune(state, *, today=None, keep_days=7):
 # 筛选
 # ---------------------------------------------------------------------------
 
+def _attempts_of(record, day=None):
+    """这条记录"今天已经试过几次"。
+
+    字段缺失（旧版本写的记录）、写坏、写成 `"3"`/`3.0` 都按 0 算 —— 一律当成
+    "还没试过"，也就是**继续按老规矩重试**。宁可多踹一次，也不能因为一个坏字段
+    让账号当天彻底静音（那正是"火花静默断掉"的形状）。
+    """
+    if not isinstance(record, dict):
+        return 0
+    if day is not None and str(record.get("date") or "") != str(day):
+        return 0                      # 昨天的计数不能算到今天头上
+    try:
+        # OverflowError 也要接：`float("1e999")` 是合法的 inf，`int(inf)` 抛的是
+        # OverflowError，漏掉它 = 每次 `select()` 都炸（定时器每 5 分钟一次）。
+        return max(0, int(float(record.get("attempts") or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def skip_retry_exhausted(record, *, limit=None, day=None):
+    """这条 `skipped` 记录是不是"今天已经试够次数了"（= 今天不再试）。
+
+    `day` 不传就按**当前时刻**算；`select()` 传的是它自己那个 `when` 的日期 ——
+    它可能是个"假装的现在"（测试、回放），用真实当前时间比日期会永远对不上。
+
+    面板/日志想解释"为什么这个账号今天不动了"时可以直接用这个判断。
+    """
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("status") or "") != STATUS_SKIPPED:
+        return False
+    cap = skip_retry_max_env() if limit is None else max(0, int(limit))
+    if cap <= 0:
+        return False                  # 0 = 不限制，退回从前的"一直重试"
+    return _attempts_of(record, day_of(now()) if day is None else day) >= cap
+
+
 def select(users, *, when=None, state=None, fallback=None, jitter=None):
     """把账号分成三堆：到点了 / 还没到 / 今天发过了。
 
@@ -361,6 +663,7 @@ def select(users, *, when=None, state=None, fallback=None, jitter=None):
         jitter = jitter_minutes_env()
     due, waiting, sent = [], [], []
     plans = {}
+    today = day_of(when)
     for user in users or []:
         plan = plan_for(user, when=when, fallback=fallback, jitter=jitter)
         uid = plan["unique_id"]
@@ -371,6 +674,14 @@ def select(users, *, when=None, state=None, fallback=None, jitter=None):
         # 门铃继续试（用户可能在白天重新登录）。把它算成「已发」会让这个账号
         # 当天彻底静音，而面板上还写着「已发」。
         if record is not None and str(record.get("status") or "") != STATUS_SKIPPED:
+            sent.append((user, plan, record))
+        elif skip_retry_exhausted(record, day=today):
+            # ★ 试够次数了（默认 6 次，约半小时）：当成"今天不再发"。
+            #   记录**留着**、状态**仍是 skipped** —— 只是今天不再被门铃踹起来：
+            #   一个过不了门禁（超时/掉登录没确认/命中风控）的账号本来每 5 分钟就
+            #   会被重试一次，一天最多 288 次浏览器启动，这本身就在喂风控。
+            #   用户重新扫码后 `retract_mark` 会把 attempts 归零（并把状态写成
+            #   墓碑），当天照样补发 —— 既有功能没被破坏。
             sent.append((user, plan, record))
         elif when >= plan["due_at"]:
             due.append((user, plan))
@@ -394,9 +705,31 @@ def jitter_minutes_env(env=None):
     if raw is None or not str(raw).strip():
         return DEFAULT_JITTER_MINUTES
     try:
+        # OverflowError 也要接：`float("1e999")` 是合法的 inf，而 `int(inf)` 抛的是
+        # OverflowError。这个函数跑在 `select()` 里，漏掉它 = 定时器每 5 分钟
+        # 炸一次（报的还是 OverflowError，看不出是配置写错了）。
         value = int(float(str(raw).strip()))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_JITTER_MINUTES
+    return max(0, value)
+
+
+def skip_retry_max_env(env=None):
+    """读 `SCHEDULE_SKIP_RETRY_MAX`：`skipped` 记录当天最多被重试几次。
+
+    与 `jitter_minutes_env` 同一套口径：空/写坏 → 默认值；负数夹到 0（= 不限制，
+    退回从前的"一直重试"）。**不设上限是危险的默认**，所以默认给
+    `DEFAULT_SKIP_RETRY_MAX`，而不是 0。
+    """
+    raw = (env if env is not None else os.getenv("SCHEDULE_SKIP_RETRY_MAX"))
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SKIP_RETRY_MAX
+    try:
+        # 与 jitter_minutes_env 一样要接 OverflowError（`float("1e999")` → inf）。
+        # 这个函数跑在 `select()` 里，抛出去 = 门铃每 5 分钟炸一次，全部账号停发。
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SKIP_RETRY_MAX
     return max(0, value)
 
 

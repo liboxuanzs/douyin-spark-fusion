@@ -25,7 +25,8 @@ services:
       # 镜像入口 docker/entrypoint.sh 按它分派：cron = 容器内定时跑（云函数上要写 fc）
       # 不写也默认 cron，这里显式声明，免得和云函数那份配置看串
       LAUNCH_MODE: cron
-      GITHUB_ACTIONS: "true"
+      # 这里以前还有 GITHUB_ACTIONS: "true"，全仓 0 处读取（只有这一段自己出现），
+      # 唯一效果是让人以为容器里有 GitHub Actions 相关分支。删掉。
       PYTHONUNBUFFERED: "1"
     volumes:
       # 配置（含 TASKS / COOKIES_* / CRON_HOUR / TZ），只读挂载

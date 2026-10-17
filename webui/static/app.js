@@ -162,7 +162,13 @@
 })();
 
 (() => {
-  document.querySelectorAll("[data-segment-group]").forEach((group) => {
+  // 模板上挂的是 `data-segment-owner`（dashboard 的「空跑档位」、runs 的「目标档位」）。
+  // 这里原来只找 `data-segment-group` —— 全仓没有这个属性，于是整段是死代码：
+  // 点了不切 .active、不切 aria-selected、不切面板的 hidden，`#dry-run-value`
+  // 永远停在服务端默认档（2026-10-17 前端审计）。两个选择器都认，兼容旧写法。
+  document
+    .querySelectorAll("[data-segment-group], [data-segment-owner]")
+    .forEach((group) => {
     const buttons = [...group.querySelectorAll("[data-segment-target]")];
     const owner = group.closest("[data-segment-owner]") || document;
     const panels = [...owner.querySelectorAll("[data-segment-panel]")];
@@ -192,7 +198,6 @@
   const overviewRoots = document.querySelectorAll("[data-overview-root]");
   if (!overviewRoots.length) return;
   let previousRunning = null;
-  let timer = null;
 
   const formatTime = (raw) => {
     if (!raw) return "-";
@@ -267,12 +272,13 @@
           node.style.width = `${weakPct}%`;
         });
         row.querySelectorAll("[data-account-progress-text]").forEach((node) => {
-          // 与服务端模板保持同一句话：空跑必须标出来，不然轮询一刷就看不出来了
+          // 与服务端模板保持同一句话：空跑必须标出来，不然轮询一刷就看不出来了。
+          // "强确认 N" 不重复写 —— 左边那三个数字里已经有了。
           const dry =
             account.dryRun && account.dryRun !== "off"
               ? ` · 上一轮是空跑（${account.dryRunText || account.dryRun}）`
               : "";
-          node.textContent = `已发送 ${strongCount + weakCount}/${accountTotal} · 强确认 ${strongCount}${dry}`;
+          node.textContent = `已发送 ${strongCount + weakCount}/${accountTotal}${dry}`;
         });
       });
     });
@@ -361,17 +367,27 @@
     const armed = schedule.armed !== false;
     // 派发器模式（各账号按自己的发送时间分开跑）：pending 讲的是"上一轮还剩几个
     // 目标没走到"，拿它当"下次触发还有活干"就会谎报 —— 那时候真话是
-    // schedule.nextTriggerText（"下一个 wheat：今天 17:20" / "今天该发的都发完了"），
+    // schedule.nextTriggerText（"下一个 示例号：今天 17:20" / "今天该发的都发完了"），
     // 服务端首屏写的也是它，轮询不能把它改回一个光秃秃的时间。
     const dueText = schedule.nextTriggerText || "";
-    setText(
-      "[data-overview-value='nextTriggerAt']",
-      armed
-        ? schedule.dispatcher && dueText
-          ? dueText
-          : formatTime(schedule.nextTriggerAt)
-        : "不会自动跑",
-    );
+    // 值槽那一行：派发器模式下服务端给的是短句（"示例号 · 已过 17:20"），这里必须
+    // 用同一套回落顺序和同样两个类名，否则轮询一刷字号/句式就跟首屏不一样了。
+    const dueShort = schedule.nextTriggerShort || "";
+    const dueValue = armed
+      ? dueShort ||
+        (schedule.dispatcher && dueText ? dueText : formatTime(schedule.nextTriggerAt)) ||
+        "不会自动跑"
+      : "不会自动跑";
+    document
+      .querySelectorAll("[data-overview-value='nextTriggerAt']")
+      .forEach((node) => {
+        node.textContent = dueValue;
+        node.classList.toggle("overview-value--short", Boolean(armed && dueShort));
+        node.classList.toggle(
+          "overview-value--prose",
+          Boolean(armed && !dueShort && schedule.dispatcher),
+        );
+      });
     setText(
       "[data-overview-value='scheduleLabel']",
       schedule.label || "-",
@@ -382,7 +398,11 @@
       !armed
         ? "只能手动点「立即运行」"
         : schedule.dispatcher
-          ? (dueText ? `按各账号自己的时间发：${dueText}` : "今天该发的都发完了")
+          ? dueShort
+            ? "到点后的下一次门铃就会发它"
+            : dueText
+              ? "按各账号自己的时间发"
+              : "今天该发的都发完了"
           : schedule.hasWorkNextTrigger
             ? `仍有 ${remainingForNext} 个待发送目标`
             : "当前没有待发送目标，下一次触发不会实际发送",
@@ -402,21 +422,51 @@
     });
   };
 
+  // 轮询：同一时刻只允许一个请求在飞（后端在读账本时单次可能超过 10 秒，
+  // 旧写法会让下一个 tick 再发一个，旧响应后到还会覆盖新响应）；失败按
+  // 10→20→40 秒退避（成功复位）；401 要说"登录已过期"，不能只说"更新延迟"
+  // —— 会话过期后整页数字会一直停在旧值，用户却以为只是网络慢（2026-10-17 前端审计）。
+  let inflight = false;
+  let failures = 0;
+  let timer = null;
+  const markStale = (text) => {
+    document.querySelectorAll("[data-overview-live-state]").forEach((node) => {
+      node.textContent = text;
+      node.classList.add("poll-stale");
+    });
+  };
+  const schedule = () => {
+    if (timer) window.clearTimeout(timer);
+    const wait = Math.min(40000, 10000 * 2 ** Math.max(0, failures - 1));
+    timer = window.setTimeout(refresh, wait);
+  };
   const refresh = async () => {
-    if (document.visibilityState !== "visible") return;
+    if (document.visibilityState !== "visible" || inflight) return;
+    inflight = true;
     try {
       const response = await fetch("/api/ops/overview", {
         credentials: "same-origin",
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
+      if (response.status === 401) {
+        markStale("登录已过期，请重新登录");
+        return;
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       render(await response.json());
+      failures = 0;
     } catch {
-      document.querySelectorAll("[data-overview-live-state]").forEach((node) => {
-        node.textContent = "更新延迟";
-        node.classList.add("poll-stale");
-      });
+      failures += 1;
+      if (failures >= 3) {
+        const now = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+        markStale(`更新失败 · 最后一次尝试 ${now}`);
+      } else {
+        markStale("更新延迟");
+      }
+    } finally {
+      inflight = false;
+      schedule();
     }
   };
 
@@ -427,8 +477,10 @@
     if (document.visibilityState === "visible") refresh();
   });
   refresh();
-  timer = window.setInterval(refresh, 10000);
-  window.addEventListener("pagehide", () => window.clearInterval(timer));
+  schedule();
+  window.addEventListener("pagehide", () => {
+    if (timer) window.clearTimeout(timer);
+  });
 })();
 
 // ---------------------------------------------------------------- 融合补充
@@ -774,4 +826,224 @@ window.addEventListener("DOMContentLoaded", () => {
 
   reveal();
   window.addEventListener("hashchange", reveal);
+})();
+
+// 磁盘与资料目录：展开时才去盘点（profile_report 要递归走每个资料目录，并进首页
+// 渲染会把每一次翻页都拖慢），四个按钮 = 清缓存/清孤儿目录 × 预演/执行。
+// 目录名与账号名都来自配置，所以结果一律用 textContent 写进 DOM，绝不拼 HTML。
+(() => {
+  const panel = document.querySelector("[data-maintenance-panel]");
+  if (!panel) return;
+
+  const statusEl = panel.querySelector("[data-maintenance-status]");
+  const tailEl = panel.querySelector("[data-maintenance-disk-tail]");
+  const diskEl = panel.querySelector("[data-maintenance-disk]");
+  const lockedEl = panel.querySelector("[data-maintenance-locked]");
+  const lockedTextEl = panel.querySelector("[data-maintenance-locked-text]");
+  const bodyEl = panel.querySelector("[data-maintenance-body]");
+  const totalsEl = panel.querySelector("[data-maintenance-totals]");
+  const rowsEl = panel.querySelector("[data-maintenance-rows]");
+  const emptyEl = panel.querySelector("[data-maintenance-empty]");
+  const resultEl = panel.querySelector("[data-maintenance-result]");
+  const resultHeadEl = panel.querySelector("[data-maintenance-result-head]");
+  const resultListEl = panel.querySelector("[data-maintenance-result-list]");
+
+  const LABELS = { caches: "清缓存", orphans: "清孤儿目录" };
+  let loading = false;
+
+  const setText = (node, text) => {
+    if (node) node.textContent = text == null ? "" : String(text);
+  };
+
+  const showStatus = (text) => {
+    if (!statusEl) return;
+    setText(statusEl, text || "");
+    statusEl.hidden = !text;
+  };
+
+  const showResult = (head, lines) => {
+    if (!resultEl) return;
+    setText(resultHeadEl, head);
+    if (resultListEl) {
+      resultListEl.replaceChildren();
+      (lines || []).forEach((line) => {
+        const li = document.createElement("li");
+        li.textContent = line;
+        resultListEl.appendChild(li);
+      });
+    }
+    resultEl.hidden = false;
+  };
+
+  const chip = (text, tone) => {
+    const span = document.createElement("span");
+    span.className = "status-chip " + (tone || "");
+    span.textContent = text;
+    return span;
+  };
+
+  const renderDisk = (disk) => {
+    const info = disk || {};
+    setText(tailEl, info.tail || "展开时盘点");
+    if (!diskEl) return;
+    diskEl.hidden = !info.text;
+    diskEl.className = "notice-inline maintenance-" + (info.level || "unknown");
+    setText(diskEl, info.text || "");
+  };
+
+  const renderRows = (rows) => {
+    if (!rowsEl) return;
+    rowsEl.replaceChildren();
+    (rows || []).forEach((item) => {
+      const tr = document.createElement("tr");
+
+      const nameCell = document.createElement("td");
+      const name = document.createElement("strong");
+      name.textContent = item.label || "";
+      nameCell.appendChild(name);
+      nameCell.appendChild(document.createElement("br"));
+      const hint = document.createElement("small");
+      hint.className = "maintenance-hint";
+      hint.textContent = item.hint || "";
+      nameCell.appendChild(hint);
+      tr.appendChild(nameCell);
+
+      [item.human_bytes, item.human_cache_bytes, item.idle_text].forEach((value) => {
+        const td = document.createElement("td");
+        td.textContent = value == null ? "" : String(value);
+        tr.appendChild(td);
+      });
+
+      const tagCell = document.createElement("td");
+      const tags = document.createElement("div");
+      tags.className = "maintenance-tags";
+      (item.tags || []).forEach((tag) => {
+        // 在跑最要紧（清理会跳过它），其次才是孤儿、在册。
+        const tone = item.in_use ? "warning" : item.is_orphan ? "danger" : "success";
+        tags.appendChild(chip(tag, tone));
+      });
+      tagCell.appendChild(tags);
+      tr.appendChild(tagCell);
+
+      rowsEl.appendChild(tr);
+    });
+    if (emptyEl) emptyEl.hidden = (rows || []).length > 0;
+  };
+
+  const render = (data) => {
+    const payload = data || {};
+    const ok = Boolean(payload.ok);
+    showStatus(payload.notice || "");
+    renderDisk(payload.disk);
+    if (lockedEl) lockedEl.hidden = ok;
+    setText(lockedTextEl, payload.error || "");
+    if (bodyEl) bodyEl.hidden = !ok;
+    if (!ok) {
+      // 名单读不到时「孤儿」判断没有意义（在册集合是空的），整张表都不显示，
+      // 只留错误说明与磁盘那一行。执行按钮也随 body 一起藏起来。
+      if (rowsEl) rowsEl.replaceChildren();
+      return;
+    }
+    setText(totalsEl, (payload.totals || {}).text || "");
+    renderRows(payload.rows);
+  };
+
+  const load = async () => {
+    if (loading) return;
+    loading = true;
+    showStatus("正在盘点资料目录…");
+    try {
+      const response = await fetch("/api/ops/maintenance", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data || typeof data.ok !== "boolean") {
+        showStatus((data && data.error) || "盘点失败：面板没能读到资料目录，稍后再展开一次");
+        if (bodyEl) bodyEl.hidden = true;
+        return;
+      }
+      render(data);
+    } catch (error) {
+      showStatus("盘点失败：请求没送到，稍后再展开一次");
+      if (bodyEl) bodyEl.hidden = true;
+    } finally {
+      loading = false;
+    }
+  };
+
+  const describeResult = (payload, what) => {
+    if (!payload.ok) {
+      showResult(`没有动任何文件：${what}失败`, [payload.error || "执行失败"]);
+      return;
+    }
+    const removed = payload.removed || [];
+    const lines = [`释放 ${payload.human_freed || "0 B"}（${removed.length} 项）`];
+    removed.slice(0, 20).forEach((item) => {
+      lines.push(`${item.label || item.name || ""}　${item.human_bytes || ""}`);
+    });
+    if (removed.length > 20) lines.push(`……还有 ${removed.length - 20} 项没列出来`);
+    [
+      ["正在跑（清了会打断发送）", payload.skipped_in_use],
+      [`还在 ${payload.grace_days} 天宽限期内`, payload.skipped_recent],
+      ["符号链接（不跟）", payload.skipped_symlink],
+    ].forEach(([reason, names]) => {
+      if (names && names.length) {
+        lines.push(`跳过 ${names.length} 个 —— ${reason}：${names.join("、")}`);
+      }
+    });
+    lines.push(
+      payload.applied
+        ? "已落盘。空闲时再展开一次，上面的数字会跟着变。"
+        : "这只是预演：一个文件都没删。要真删就点同一行的「执行」。"
+    );
+    showResult(payload.headline || `${what}完成`, lines);
+  };
+
+  const run = async (button) => {
+    const action = button.getAttribute("data-maintenance-action") || "";
+    const apply = button.getAttribute("data-apply") === "1";
+    const what = LABELS[action] || action;
+    if (apply) {
+      // 真删不可逆：确认文案里写清删什么、不删什么，别让人靠猜。
+      const agreed = window.confirm(
+        `确定要真的${what}吗？\n\n` +
+          "这是真删（不是预演）：只删可再生的缓存 / 已不在账号名单里的资料目录，\n" +
+          "在册账号、Cookies、Local Storage、Local State 都不会动。\n\n" +
+          "建议先点「预演」看一眼将删掉什么、能释放多少。"
+      );
+      if (!agreed) return;
+    }
+    button.disabled = true;
+    showResult(`正在${apply ? "执行" : "预演"}：${what}…`, ["预演只读不写；执行按上面的白名单真删。"]);
+    try {
+      const response = await fetch(`/ops/maintenance/${action}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: new URLSearchParams({ apply: apply ? "1" : "0" }),
+      });
+      const data = await response.json().catch(() => ({}));
+      describeResult(data || {}, what);
+      // 数字已经变了，顺手重盘一次（只刷新这一块，不做任何自动清理）。
+      load();
+    } catch (error) {
+      showResult("请求没送到：什么都没删", ["网络断了，重新展开这一块再试一次。"]);
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  // 每次展开都重盘：这里是手动工具，不需要后台轮询。
+  panel.addEventListener("toggle", () => {
+    if (panel.open) load();
+  });
+  if (panel.open) load();
+
+  panel.querySelectorAll("[data-maintenance-action]").forEach((button) => {
+    button.addEventListener("click", () => run(button));
+  });
 })();

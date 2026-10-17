@@ -108,8 +108,15 @@ def detect(*, receipts=(), dom_texts=()):
 # ---- 冷却状态 -------------------------------------------------------------
 
 def default_state_path():
-    """冷却状态文件。放在 `logs/` 下，与运行账本同目录（可被环境变量覆盖）。"""
-    return os.getenv("RATE_LIMIT_FILE", os.path.join("logs", "rate_limit.json"))
+    """冷却状态文件。放在 `logs/` 下，与运行账本同目录（可被环境变量覆盖）。
+
+    相对路径按**仓库根**解析（`utils.config.resolve_path`）：按 CWD 解析时，从别的
+    目录起的进程会读到另一份（不存在的）冷却状态 —— 冷却静默失效，命中风控之后
+    照旧按点发车。`utils.config` 用函数内 import，避免 import 期把 dotenv 拉进来。
+    """
+    from utils.config import resolve_path       # noqa: PLC0415  函数内 import：避免 import 期耦合
+
+    return resolve_path(os.getenv("RATE_LIMIT_FILE") or os.path.join("logs", "rate_limit.json"))
 
 
 class LimitGuard:

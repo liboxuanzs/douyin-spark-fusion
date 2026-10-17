@@ -22,8 +22,10 @@
 - **不碰浏览器依赖**：`webui/` 任何模块都不 import `playwright` / `cloakbrowser`。
   只有真正点"立即运行"时，才在**请求处理函数内部**惰性 `from core.tasks import runTasks`；
   依赖缺失时返回 **503 + 中文说明**，进程不崩（`webui/app.py:171` `missing_browser_modules()`）。
-- **不写 `.env`、不改配置**：面板只读展示配置；改配置请编辑 `.env` 后
-  `systemctl restart douyin-spark-fusion-web.service`（配置在进程内只读一次）。
+- **只改白名单里的键**：面板的配置面板能改 19 个键（发送时间、抖动、超时、
+  日志级别等），保存时**原子替换** `.env` 并留 5 份备份，改完立即生效。白名单之外
+  （`COOKIES_*` / `TASKS` / 口令 / 各种 `*_FILE`）只能手工编辑 `.env`，改完
+  `systemctl restart douyin-spark-fusion-web.service`。
 - **不落 cookie 值**：账号区只显示"已配置 N 项 cookie"，页面与 JSON 里都不会出现 cookie 内容。
 - **零外网资源**：模板与静态文件里没有任何 `http(s)://` 引用，完全离线可用。
 
@@ -50,7 +52,7 @@ cd /opt/douyin-spark-fusion
 | `WEBUI_PASSWORD` | 空 | 明文口令（方便临时用；不建议长期留）。**登录后在首页「访问口令」里就能改** |
 | `WEBUI_PASSWORD_HASH` | 空 | `pbkdf2_sha256$<轮数>$<salt>$<digest>`，**优先于明文**；面板里也能改成存这种形式 |
 | `WEBUI_SESSION_SECRET` | 随机 | 会话 cookie 的**签名密钥**（不是登录口令，也不要在登录框里填它）；缺省时随机生成 + 警告，**重启后会话失效** |
-| `WEBUI_SESSION_MAX_AGE` | `28800` | 会话有效期（秒） |
+| `WEBUI_SESSION_MAX_AGE` | `2592000`（30 天） | 登录保持时长（秒），上限 400 天（浏览器对 cookie 有效期的硬上限）。**读的时候才生效**：调大后已经登录的浏览器立刻受益，调小会把超过新时长的会话踢下线；改口令永远会作废所有会话。面板首页「访问口令」里也能改 |
 | `WEBUI_DEFAULT_DRY_RUN` | `off` | "立即运行"默认选中的档位（`off`/`select`/`full`）；只是默认值，点按钮前仍可在面板上改，非法值回落 `off` |
 | `LOGIN_PROFILE_DIR` | `logs/login-profile` | 扫码登录用的浏览器资料目录（等于凭据，别提交/共享） |
 | `QR_LOGIN_TTL_SECONDS` | `300` | 二维码有效期；超时作废，需重新开始一次 |
@@ -58,7 +60,7 @@ cd /opt/douyin-spark-fusion
 | `WEBUI_COOKIE_NAME` | `dsf_webui_session` | 会话 cookie 名 |
 | `WEBUI_AUTH` | `pass` | 设成 `off` 关闭认证；**只在回环地址上被接受** |
 | `WEBUI_TZ` | `Asia/Shanghai` | 页面上时间戳的显示时区 |
-| `TASK_SCHEDULE_TIMES`（别名 `WEBUI_TASK_SCHEDULE`） | `20:30` | 只是用来在页面上算"下次定时"，不控制真实调度；**要和 timer 的 `OnCalendar` 保持一致** |
+| `TASK_SCHEDULE_TIMES`（别名 `WEBUI_TASK_SCHEDULE`） | `20:30` | **真实调度**：每个账号自己的发送时间（账号单独设了时间就以账号的为准）。派发器每 5 分钟敲一次门，到点才发；页面上算的"下次定时"就是它 |
 | `RUN_LEDGER_FILE` | `logs/runs.jsonl` | 运行账本（面板读它画结果） |
 | `RUN_LOCK_FILE` | `logs/run.lock` | 运行锁（判断"正在运行"） |
 | `RATE_LIMIT_FILE` | `logs/rate_limit.json` | 熔断冷却状态 |
@@ -272,7 +274,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 |---|---|---|
 | 点「移除」账号还在 | 账号已从 `TASKS` 删掉，但上一轮的运行记录（`logs/runs.jsonl`）里还有它，`store.account_snapshots()` 会把它重新变成一张卡；对着这张幽灵卡点移除必然失败 | 幽灵卡带 `orphan=True`，界面标「已不在配置里」、**不给**「移除/重新登录」按钮，也不计入"共 N 个目标/账号被阻断"；`summarize()` 只对非幽灵卡求和 |
 | 页面看着错位（同一份 HTML，CSS 却是旧的） | `StaticFiles` 只发 `ETag` 不发 `Cache-Control`，浏览器按"上次修改时间的 10%"启发式缓存旧 `app.css` | 静态文件加 `Cache-Control: no-cache`；模板里的 `?v=` 改成 `asset_version()`（取 `app.css`/`app.js` 的 mtime，**必须写括号**，不然渲染成函数对象） |
-| 「下次自动触发 12:30」其实不会跑 | 那个时间读的是 `.env` 的 `TASK_SCHEDULE_TIMES`（"打算几点跑"），而真正说了算的是 systemd 定时器；2026-10-01 之前 `.172` 上它是 **disabled**，那天的 12:30 从来没跑过 | `store.timer_state()` 只读 `/etc/systemd/system/**` 判断是否启用、从单元文件读真实 `OnCalendar`；没启用就画红框「不会自动跑」并给出 `systemctl enable --now …`；对不上时以单元时间为准并注明 `.env` 的值 |
+| 「下次自动触发 12:30」其实不会跑 | 那个时间读的是 `.env` 的 `TASK_SCHEDULE_TIMES`（"打算几点跑"），而真正说了算的是 systemd 定时器；2026-10-01 之前 `本机` 上它是 **disabled**，那天的 12:30 从来没跑过 | `store.timer_state()` 只读 `/etc/systemd/system/**` 判断是否启用、从单元文件读真实 `OnCalendar`；没启用就画红框「不会自动跑」并给出 `systemctl enable --now …`；对不上时以单元时间为准并注明 `.env` 的值 |
 | 定时器到点了却一条都没发 | 禁跑时间窗（`QUIET_WINDOW`）把定时器那一刻盖住了 —— 定时任务整轮跳过，账本只有一行 `quiet_window` | `viewmodel._quiet_clash()` 拿 timer 的 `OnCalendar` 逐点对窗口，命中就在首页画红框「禁跑时间窗把定时器的时间盖住了」；默认窗已改成 `off` |
 | 「本轮结论」的数字是今天的合计 | 运行记录页复用了首页的 `data-overview-value` 挂点，而前端总览轮询按这个选择器全局覆盖 | 运行记录页改用 `data-run-value`（只由服务端渲染），`data-overview-value` 只留给首页 |
 | 空跑的"确认成功"看着像真发出去 | 空跑（`DRY_RUN=select/full`）也会走选中/回执流程 | 首页进度处标"空跑"角标 + 「这是空跑的数字，一条都没真发出去」，账号行追加"上一轮是空跑（…）" |
@@ -340,4 +342,4 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | 消息发出去没有换行、行尾多个 `n` | 模板里的字面 `\n` 在配置层被吃了。①`.env` 里消息模板必须写**两个字符** `\n`（不是真回车，真回车会把 `.env` 拆成两行）②`grep -n '^EnvironmentFile' /etc/systemd/system/douyin-spark-fusion-*.service` **必须没有输出**（systemd 按转义序列解析 environment file），改完 `systemctl daemon-reload` 并重启 web 单元。确认：`.venv/bin/python main.py dry-run full`，日志里 `[SEND] 待发送文本 '…\\n…' → 3 行` 才对；面板「运行配置」的模板预览读的就是同一个文件 |
 | `dry-run=full` 里 `已清空=False`（连着重试一次，读回变成两遍文本） | 清空输入框只用了 `execCommand('delete')`：Draft.js 的内容真相在它自己的 EditorState 里，这样**只抹 DOM**。当场判空是空的，可下一次输入 React 重渲染又把旧文本带回来，于是重试时两条消息叠着发。现在 `JS_EDITOR_CLEAR` 先走 Draft 自己的键盘路径（全选 + 合成 Backspace），`_clear_editor()` 清完等 250ms 复查、最多重试 3 轮，还会插一个字符逼它重渲染把藏在 state 里的残留逼出来。日志看 `已清空=True（清空方式=key 或 cmd）`—— 现场两种都出现过，`cmd` 表示"键盘那条路没清干净、靠 `execCommand('delete')` 收尾"，只要 `已清空=True` 且没有 `重试一次` 就是干净的 |
 | 运行记录里"原因"一栏显示英文 | `core` 新增了判定码，而 `webui/viewmodel.py` 的 `REASON_LABELS` 没跟上（`_reason_text()` 找不到就原样显示） | 在 `REASON_LABELS` 里补一条中文（**别在模板里写死**，否则运行记录页和首页会各说各话）；`ReasonLabelCoverageTests` 会替你盯住这件事 |
-| "证据"一栏写着"HTTP 回执（会话回显没等到）"，是不是另一侧没确认？ | 不是。HTTP 回执（抖音自己给的 `code=0` + `message_id`）先到，代码就再等最多 1 秒收工，**没等到**会话回显 ≠ 回显里没有。强/弱由 `strict_verify.verify_receipt()` 合并两侧证据后给（`强确认` 就是它判的） | 想看到两侧都确认，就等一轮"气泡数也涨了"的发送（`via="http+dom"`）；要查某一轮到底怎么判的，看日志里 `[SEND] ✅ HTTP 回执 …` 与 `[SEND] ✅ DOM 确认：消息数 …` 两行是否都出现 |
+| "证据"一栏写着"HTTP 回执（无法确认收件人）"，是不是没发出去？ | 回执是抖音自己给的（`code=0` + `message_id`），它证明**服务端收下了这一条**，但回执里**没有**收件人字段，所以还要靠页面说"现在停在哪个会话"来点名收件人。**强确认** = 回执 ok **且** 发送后当前会话就是目标会话；点不出收件人（会话 id 读不到）或只见到气泡没有回执，都算**弱证据**（账本里 `ok` 仍是 True —— 照旧算发过、当天不重发，只是面板不把它当"铁证"）。刻意**不要求**气泡数上涨：虚拟列表不重渲染时气泡数不涨是常态，拿它当必要条件会把每一次发送都判成弱证据 | 想让强确认变多，别在发送期间切走那个聊天窗口（代码按会话 id 核收件人，切走就核不上）；要查某一轮到底怎么判的，看日志里 `[SEND] ✅ HTTP 回执 …`、`[SEND] ✅ DOM 确认：消息数 …` 以及 `[SEND]` 后面那句降级原因 |

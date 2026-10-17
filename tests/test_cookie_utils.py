@@ -174,6 +174,36 @@ class SmallHelpersTests(unittest.TestCase):
         self.assertFalse(cu.has_login_cookie([cookie(name="ttwid")]))
         self.assertFalse(cu.has_login_cookie([]))
 
+    def test_has_usable_login_cookie_ignores_an_expired_one(self):
+        """名字在、`expires` 已经过去 = 名存实亡。
+
+        掉登录之后留下的那份 `sessionid` 就是这样：名字判据说"有登录态"，面板于是
+        把一份写进去也发不出消息的 cookie 存下来、还报"保存成功"。
+        """
+        now = 1_800_000_000.0
+        self.assertFalse(cu.has_usable_login_cookie(
+            [cookie(expires=now - 60)], now=now), "过期的那份不算数")
+        self.assertTrue(cu.has_usable_login_cookie(
+            [cookie(expires=now + 60)], now=now), "还没过期就算数")
+        self.assertTrue(cu.has_usable_login_cookie([cookie()], now=now),
+                        "没有 expires 字段 → 当会话 cookie，仍算数")
+        self.assertTrue(cu.has_usable_login_cookie([cookie(expires=-1)], now=now),
+                        "Playwright 的 -1 = 会话 cookie，不能当成过期")
+        self.assertTrue(cu.has_usable_login_cookie([cookie(expires=0)], now=now))
+        self.assertTrue(cu.has_usable_login_cookie([cookie(expires="说不清")], now=now),
+                        "解不出来的值按「没过期」处理，别把能用的判死")
+        self.assertFalse(cu.has_usable_login_cookie([cookie(name="ttwid", expires=now - 1)],
+                                                    now=now),
+                         "非登录 cookie 过期不作数")
+        self.assertFalse(cu.has_usable_login_cookie([], now=now))
+
+    def test_has_usable_login_cookie_takes_any_of_the_login_names(self):
+        now = 1_800_000_000.0
+        self.assertTrue(cu.has_usable_login_cookie(
+            [cookie(name="sessionid", expires=now - 1),
+             cookie(name="sid_tt", value="v2", expires=now + 600)], now=now),
+            "一份过期、另一份还有效 → 还有效")
+
     def test_login_cookie_signature_changes_when_the_value_changes(self):
         """名字一样、值换了 = 换了一份新的登录态（扫码成功就是这个样子）。
 

@@ -44,11 +44,45 @@ DEFAULT_IM_READY_TIMEOUT = 120
 DEFAULT_FRIEND_LIST_WAIT_TIME = 3
 DEFAULT_IM_MAX_STEPS = 200
 DEFAULT_TASK_RETRY_TIMES = 1
-# ⚠️ 大小写与 LOG_LEVEL_OPTIONS 保持一致（"Debug" 而非 "DEBUG"）：
+# ⚠️ 大小写与 LOG_LEVEL_OPTIONS 保持一致（"Info" 而非 "INFO"）：
 # tkinter Combobox 对不在 values 里的值不会高亮匹配项 → 框看着是空的。
 # utils.logger.resolve_log_level 内部 level.lower()，所以两种写法日志行为相同，
 # 这里只为 GUI 显示正确。
-DEFAULT_LOG_LEVEL = "Debug"
+# 默认值 "Info"（2026-10 改，原 "Debug"）：与 utils/config.py 的
+# `os.getenv("LOG_LEVEL", "Info")`、main.py 的兜底、.env.example、docs 网页版
+# 四处对齐（tests/test_config_tool.py::test_log_level_aligned 四处逐字断言）。
+# 以前默认 "Debug"，于是"没动过这一项"的用户被写进一份 Debug 的 .env，
+# 与代码侧默认不一致；Debug 仍是下拉里的可选项，只是不再作为默认值。
+DEFAULT_LOG_LEVEL = "Info"
+# 发送时刻的抖动窗口（分钟）：每个账号在基准时刻前后再随机偏移一点，
+# 账号多了不至于整点齐刷刷一起发。0 = 不抖动。
+# ⚠️ 必须与 utils/config.py 的 `_env_int("SCHEDULE_JITTER_MINUTES", 15, minimum=0)`
+#    以及 .env.example / docs 保持一致（tests/test_config_tool.py 四处对齐用例）。
+DEFAULT_SCHEDULE_JITTER_MINUTES = 15
+
+# 抖动窗口的取值范围：**只有下限是真的**（utils/config.py 那侧也只有 `minimum=0`，
+# 没有上限），上限取一天纯粹是给 number() 一个夹紧边界 —— 手滑把量级写错
+# （比如把秒当分钟填成 1800）时夹到一天比原样写回更容易看出问题。
+SCHEDULE_JITTER_RANGE = (0, 1440)
+# "门禁没过/命中风控"（skipped）的账号当天最多被门铃重试几次。
+# ⚠️ 必须与 core/schedule.py 的 `DEFAULT_SKIP_RETRY_MAX`、.env.example 一致
+#    （tests/test_config_tool.py::SkipRetryKeyTests 把三处钉在一起）。
+# 为什么默认 6：skipped 的语义是"下一次门铃再试"，而门铃 5 分钟一次 ——
+# 不设上限的账号一天会被踹起来 288 次，等于持续喂风控。0 = 不限制。
+DEFAULT_SCHEDULE_SKIP_RETRY_MAX = 6
+
+# 重试上限的取值范围：288 = 一天最多能被敲到的次数（24h × 60 / 5 分钟刻度），
+# 再大等价于"不限制"。用 max 夹一下能挡住手滑多打几位（0 与非 0 的语义不会变）。
+SCHEDULE_SKIP_RETRY_RANGE = (0, 288)
+
+# 定时器顺带做磁盘维护的间隔（小时）：默认 168（一周），0 = 关闭。
+# ⚠️ 必须与 core/maintenance.py 的 `DEFAULT_AUTO_PRUNE_HOURS`、.env.example 一致
+#    （tests/test_config_tool.py::AutoPruneKeyTests 把三处钉在一起）。
+# 为什么要有它：Chrome 缓存只涨不落（实测约 180 MB/天/账号），磁盘满 = 发送直接失败。
+DEFAULT_MAINTENANCE_AUTO_PRUNE_HOURS = 168
+
+# 间隔的取值范围：8760 = 一年，再大等价于关闭（core/maintenance.py 也会夹）。
+MAINTENANCE_AUTO_PRUNE_HOURS_RANGE = (0, 8760)
 
 # 单位统一为秒
 BROWSER_ACTION_TIMEOUT_RANGE = (5, 300)
@@ -61,6 +95,10 @@ RETRY_TIMES_RANGE = (0, 5)   # 0 = 不重试（与面板 webui/settings.py 的 m
 # 写进 .env 的键顺序：先基础变量，再按账户顺序追加 COOKIES_*
 BASE_ENV_KEYS = [
     "PROXY_ADDRESS",
+    # CRON_* 只有 Docker 定时器（docker/entrypoint-cron.sh）读，
+    # 但它就是"到点了叫醒程序"的那个闹钟，删了 Docker 部署就不发消息了 → 保留。
+    # ⚠️ 光有 CRON_* 不够：程序内的发送闸门只认 TASK_SCHEDULE_TIMES（见下），
+    #    systemd 部署更是完全不看 CRON_*。两者必须一起写。
     "CRON_HOUR",
     "CRON_MINUTE",
     "CRON_SECOND",
@@ -74,6 +112,14 @@ BASE_ENV_KEYS = [
     "IM_MAX_STEPS",
     "TASK_RETRY_TIMES",
     "LOG_LEVEL",
+    "TASK_SCHEDULE_TIMES",
+    "SCHEDULE_JITTER_MINUTES",
+    # 门铃重试上限：程序内直读（core/schedule.py::skip_retry_max_env），
+    # 界面上没有输入框，但读回来再写回去 —— 用户手改的 0（= 不限制）不该被保存动作抹掉。
+    "SCHEDULE_SKIP_RETRY_MAX",
+    # 自动清理间隔：同样是程序内直读（core/maintenance.py::auto_prune_hours），
+    # 界面没有输入框；读回来再写回去，用户手改的 0（= 关闭）不该被保存动作抹掉。
+    "MAINTENANCE_AUTO_PRUNE_HOURS",
     "TASKS",
 ]
 
@@ -105,6 +151,40 @@ def build_run_time(hour, minute, second) -> str:
         return max(0, min(top, number))
 
     return f"{clamp(hour, 23):02d}:{clamp(minute, 59):02d}:{clamp(second, 59):02d}"
+
+
+def parse_schedule_times(value) -> tuple:
+    """`TASK_SCHEDULE_TIMES` 的第一个可用时刻 → `("HH:MM:SS", 秒是不是写出来的)`。
+
+    认不出来返回 `("", False)`。
+
+    `TASK_SCHEDULE_TIMES` 才是程序内真正说了算的那个键（core/tasks.py →
+    core/schedule.py::fallback_time 取**第一项**），`CRON_*` 只有 Docker 定时器读。
+    以前 `from_env_map()` 只认 `CRON_*`，于是用户在面板里把发送时间改成 20:30，
+    回头在 GUI 里随便改个字段、1.5 秒后的自动保存就把它按 `CRON_HOUR` 改回 09:00
+    —— 静默、无报错（本次修的缺陷）。
+
+    分隔口径与 `core/schedule.py::_as_list()` 对齐（**逗号**分隔、逐项 strip）：
+    多写的时刻只取第一项，因为界面上只有一个时间输入框，"跟哪个点"必须只有一个
+    答案。接受 `HH:MM`（秒补 00）与 `HH:MM:SS`；非数字、越界（25:99）都算认不出来。
+    第二个返回值说明"秒是文件里写出来的，还是我替它补的 0" —— `HH:MM` 补出来的 0
+    不该盖掉用户在 `CRON_SECOND` 里设的秒（见 from_env_map）。
+    """
+    for item in str(value or "").split(","):
+        chunks = [chunk.strip() for chunk in item.split(":")]
+        explicit_seconds = len(chunks) == 3
+        if len(chunks) == 2:
+            chunks.append("0")
+        if len(chunks) != 3:
+            continue
+        try:
+            hour, minute, second = (int(chunk) for chunk in chunks)
+        except ValueError:
+            continue
+        if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+            continue
+        return f"{hour:02d}:{minute:02d}:{second:02d}", explicit_seconds
+    return "", False
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +333,31 @@ class Config:
     im_max_steps: int = DEFAULT_IM_MAX_STEPS
     task_retry_times: int = DEFAULT_TASK_RETRY_TIMES
     log_level: str = DEFAULT_LOG_LEVEL
+    # 门铃重试上限（见 DEFAULT_SCHEDULE_SKIP_RETRY_MAX）。与上面的抖动键不同，
+    # 这个键**要读回来**：0 是有意义的值（= 不限制），保存一次就被写回 6 会让人
+    # 莫名其妙地"改不动"。
+    schedule_skip_retry_max: int = DEFAULT_SCHEDULE_SKIP_RETRY_MAX
+    # 发送抖动窗口（分钟，见 DEFAULT_SCHEDULE_JITTER_MINUTES，0 = 严格按点）。
+    # 同 SCHEDULE_SKIP_RETRY_MAX：界面里没有输入框、但面板（webui）有，而且
+    # **0 是有意义的值** —— 必须从 .env 读回来再原样写回去，否则保存一次就把
+    # 用户在面板里设的 40 分钟抹回默认的 15（本次修的缺陷）。
+    schedule_jitter_minutes: int = DEFAULT_SCHEDULE_JITTER_MINUTES
+    # 自动清理间隔（见 DEFAULT_MAINTENANCE_AUTO_PRUNE_HOURS）。同 SCHEDULE_SKIP_RETRY_MAX：
+    # 0 是有意义的值（= 关闭），必须读回来再写回去。
+    maintenance_auto_prune_hours: int = DEFAULT_MAINTENANCE_AUTO_PRUNE_HOURS
     accounts: list = field(default_factory=list)
 
     # -- 序列化 -------------------------------------------------------------
+    def schedule_times_text(self) -> str:
+        """界面上那个 HH:MM:SS 时刻 → `TASK_SCHEDULE_TIMES` 要的 `HH:MM`。
+
+        与 `CRON_*` 同源（都来自 `self.run_time`），所以面板里改时间时两者
+        不会各说各话 —— 这正是本次要修的缺陷：以前只写了 `CRON_*`，
+        程序内的发送闸门读不到，界面里设的 09:00 被静默忽略成默认的 20:30。
+        """
+        hour, minute, _second = split_run_time(self.run_time)
+        return f"{hour}:{minute}"
+
     def to_env_map(self) -> dict:
         """生成 键 -> 值 的映射，值已经是能直接写进 .env 的形态。"""
         hour, minute, second = split_run_time(self.run_time)
@@ -274,6 +376,8 @@ class Config:
 
         env = {
             "PROXY_ADDRESS": self.proxy_address or "",
+            # ① Docker 闹钟：docker/entrypoint-cron.sh 生成 cron 表达式时读这三个。
+            #    ⚠️ systemd 部署下**完全无效**（没有任何 systemd 单元读它们）。
             "CRON_HOUR": hour,
             "CRON_MINUTE": minute,
             "CRON_SECOND": second,
@@ -289,6 +393,23 @@ class Config:
             "IM_MAX_STEPS": str(int(self.im_max_steps)),
             "TASK_RETRY_TIMES": str(int(self.task_retry_times)),
             "LOG_LEVEL": self.log_level or DEFAULT_LOG_LEVEL,
+            # ② 程序内的发送闸门（core/tasks.py → core/schedule.py）：**只认这一个键**。
+            #    取 HH:MM 是因为 schedule.parse_time 会把 "09:00:00" 判为非法并回落到
+            #    默认的 20:30 —— 用户界面里设的 09:00 会被静默吃掉（本次修的缺陷）。
+            #    秒级差异无关紧要：调度刻度是 5 分钟（schedule.TICK_MINUTES）。
+            #    它同时也是界面时刻的来源：from_env_map 优先按这个键重建 run_time，
+            #    面板里设的 20:30 读回来、再原样写回去，保存动作绝不覆盖它。
+            "TASK_SCHEDULE_TIMES": self.schedule_times_text(),
+            # ③ 抖动窗口：界面里没有输入框，但面板（webui）有，而且值是从 .env
+            #    读回来的（含 0 = 严格按点）—— 读回来再写回去，绝不覆盖用户/面板
+            #    的手改值。
+            "SCHEDULE_JITTER_MINUTES": str(int(self.schedule_jitter_minutes)),
+            # ④ 门铃重试上限：core/schedule.py 直读，界面没有输入框，
+            #    但值是从 .env 读回来的（含 0），保存不会覆盖用户的手改值。
+            "SCHEDULE_SKIP_RETRY_MAX": str(int(self.schedule_skip_retry_max)),
+            # ⑤ 自动清理间隔：core/maintenance.py 直读，界面没有输入框，
+            #    值从 .env 读回来（含 0 = 关闭），保存不会覆盖用户的手改值。
+            "MAINTENANCE_AUTO_PRUNE_HOURS": str(int(self.maintenance_auto_prune_hours)),
             # TASKS 不走 unicode_escape，保持中文可读（与 index.html / .env.example 一致）
             "TASKS": json.dumps(
                 [account.to_task() for account in self.accounts],
@@ -299,8 +420,15 @@ class Config:
 
         for account in self.accounts:
             # 抖音号为空时没有合法键名，跳过（校验环节会报错提醒）
-            if account.unique_id.strip():
-                env[account.cookies_key] = (account.cookies or "").strip()
+            if not account.unique_id.strip():
+                continue
+            # Cookie 为空时**不写**这个键：写出 `COOKIES_x=`（空串）会让面板/
+            # 本工具把"已配置"显示成真，而主程序每轮都会跳过没有 Cookie 的账号
+            # —— 用户会在"看起来配好了、其实一条都不发"的状态里干等。
+            # 有值的照写；想清空请用「清理旧变量」，别用空串顶掉。
+            cookies = (account.cookies or "").strip()
+            if cookies:
+                env[account.cookies_key] = cookies
 
         return env
 
@@ -318,7 +446,10 @@ class Config:
         def number(key: str, default: int, low: int, high: int) -> int:
             try:
                 value = int(float(text(key, str(default)).strip() or default))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError 也要接：`float("1e999")` 是合法的 inf，`int(inf)`
+                # 抛的却是 OverflowError —— 漏掉它，手写一个天文数字会让整个配置
+                # 读不进来（GUI 打开就崩），而这条路径本该"坏值回落默认值"。
                 return default
             return max(low, min(high, value))
 
@@ -377,11 +508,29 @@ class Config:
                 )
             )
 
-        run_time = build_run_time(
+        # 界面时刻的来源（按优先级）：
+        #   ① `TASK_SCHEDULE_TIMES` 的第一个时刻 —— 程序内真正生效、面板也在改的键；
+        #   ② `CRON_*` —— 只有 Docker 定时器读它，这里当老 .env 的兼容兜底；
+        #   ③ 两个都认不出来才用 DEFAULT_RUN_TIME。
+        # 以前这里**只**看 CRON_*：面板里设的 20:30 会在下一次保存时被改回 09:00。
+        cron_time = build_run_time(
             text("CRON_HOUR", split_run_time(DEFAULT_RUN_TIME)[0]),
             text("CRON_MINUTE", split_run_time(DEFAULT_RUN_TIME)[1]),
             text("CRON_SECOND", split_run_time(DEFAULT_RUN_TIME)[2]),
         )
+        schedule_time, schedule_has_seconds = parse_schedule_times(
+            text("TASK_SCHEDULE_TIMES", "")
+        )
+        if not schedule_time:
+            run_time = cron_time
+        elif schedule_has_seconds or cron_time[:5] != schedule_time[:5]:
+            run_time = schedule_time
+        else:
+            # `TASK_SCHEDULE_TIMES` 只存到分钟，界面上那个框却是 HH:MM:SS ——
+            # 两个键的 HH:MM 一致时（= 它们本来就是同一个时刻写出来的）把秒继承
+            # 回来，否则"改个别的字段保存一次"就会把用户设的 00:05:30 变成 00:05:00。
+            # 不一致说明时间是被面板/手改过的，`CRON_SECOND` 是旧值，不能要。
+            run_time = f"{schedule_time[:5]}:{cron_time[6:]}"
 
         try:
             hitokoto = json.loads(text("HITOKOTO_TYPES", "[]") or "[]")
@@ -423,6 +572,22 @@ class Config:
                 "TASK_RETRY_TIMES", DEFAULT_TASK_RETRY_TIMES, *RETRY_TIMES_RANGE
             ),
             log_level=text("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL,
+            # 负数夹到 0（与 core/schedule.py::skip_retry_max_env 同口径），
+            # 空/非数字回落默认值 6。
+            schedule_skip_retry_max=number(
+                "SCHEDULE_SKIP_RETRY_MAX", DEFAULT_SCHEDULE_SKIP_RETRY_MAX,
+                *SCHEDULE_SKIP_RETRY_RANGE
+            ),
+            # 0 = 严格按点（有意义的值），空/非数字回落默认值 15，负数夹到 0。
+            schedule_jitter_minutes=number(
+                "SCHEDULE_JITTER_MINUTES", DEFAULT_SCHEDULE_JITTER_MINUTES,
+                *SCHEDULE_JITTER_RANGE
+            ),
+            # 0 = 关闭（有意义的值），空/非数字回落默认值 168。
+            maintenance_auto_prune_hours=number(
+                "MAINTENANCE_AUTO_PRUNE_HOURS", DEFAULT_MAINTENANCE_AUTO_PRUNE_HOURS,
+                *MAINTENANCE_AUTO_PRUNE_HOURS_RANGE
+            ),
             accounts=accounts,
         )
 

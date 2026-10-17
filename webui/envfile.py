@@ -14,7 +14,9 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import os
 import random
 import re
@@ -180,10 +182,208 @@ def _lock_down(target: Path) -> None:
         pass
 
 
+#: `.env.tmp*` 残留多久算"上一个进程死在这儿了"（秒）。
+#:
+#: python-dotenv 落盘是「写 `<env>.tmp_<随机>` → chmod 成原权限 → os.replace」，
+#: 那个中间态只活几毫秒；5 分钟这个门槛足够把"正在写的进程"与"上次被杀的残留"
+#: 分开。**门槛不能短**：面板和 configTool 可能同时改这份 `.env`，删掉别人刚
+#: 建出来的中间态会让对方那一次保存直接失败 —— 那比慢一点清理糟得多。
+ENV_TMP_STALE_SECONDS = 300.0
+
+#: `follow_symlinks` 是 python-dotenv 后加的形参（本项目 requirements 钉的是
+#: 1.2.2，但部署机上那份可能是旧的），所以按**真实签名**判断，不写死。
+_FOLLOW_SYMLINKS = "follow_symlinks"
+
+
+class EnvWriteRefused(RuntimeError):
+    """这次写盘会破坏用户的 `.env`（例如把软链接换成普通文件）→ 直接拒绝。"""
+
+
+def _warn(message: str) -> None:
+    """记一条中文 warning（走项目自己的日志器；记日志本身出问题也绝不让写盘失败）。"""
+    try:
+        from utils.logger import setup_logger
+
+        setup_logger(level=os.getenv("LOG_LEVEL", "Info")).warning(
+            f"[webui/envfile] {message}"
+        )
+    except Exception:                                            # noqa: BLE001
+        try:
+            logging.getLogger(__name__).warning("%s", message)
+        except Exception:                                        # noqa: BLE001
+            pass
+
+
+def _is_symlink(target: Path) -> bool:
+    try:
+        return target.is_symlink()
+    except OSError:                                              # pragma: no cover
+        return False
+
+
+def _env_dirs(target: Path) -> list:
+    """`.env` 自己和（若是软链）真身所在的目录。
+
+    dotenv 的中间态建在 `<env>` 旁边；跟着软链写时它也可能建在真身旁边，
+    两边都扫一遍才不会漏。
+    """
+    out = [target.parent]
+    if _is_symlink(target):
+        real = Path(os.path.realpath(str(target))).parent
+        if real != target.parent:
+            out.append(real)
+    return out
+
+
+def _looks_like_env_temp(path: Path) -> bool:
+    """`.tmp_*` 这个前缀太泛，删之前先确认"它真是一份 .env 的中间态"。
+
+    python-dotenv 1.2.x 的 `rewrite()` 是
+    `NamedTemporaryFile(prefix=".tmp_", dir=<.env 所在目录>)`，所以真名是
+    `.tmp_xxxxxxxx`（**不是** `.env.tmp_*`）—— 仓库根目录下任何别的工具留下的
+    `.tmp_*` 都可能撞上这个前缀，删错文件的代价比漏删大，所以再加两道门槛：
+    内容是文本、且带 `KEY=` 形状的行（`.env` 全是这个形状）。
+    """
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:    # 一份 .env 不该这么大
+            return False
+        head = path.read_bytes()[:4096]
+    except OSError:
+        return False
+    if b"\x00" in head:                              # 二进制文件，不是文本配置
+        return False
+    for line in head.splitlines():
+        text = line.strip()
+        if not text or text.startswith(b"#"):
+            continue
+        if b"=" in text and text.split(b"=", 1)[0].strip():
+            return True
+    return False
+
+
+def _sweep_env_tmp(target: Path) -> list:
+    """清掉 `<env>.tmp*` / `.tmp_*` 残留 —— 那些文件里是**完整的 .env**（含 Cookie 与口令哈希）。
+
+    为什么需要这一步：python-dotenv 的写盘流程是「写临时文件 → `chmod(tmp, 原权限)`
+    → `os.replace(tmp, <env>)`」。在 chmod 与 replace 之间被 kill（OOM、断电、
+    容器被停）就会留下一个权限可能是 0644、内容却是整份 `.env` 的文件躺在仓库根
+    目录里 —— 那是所有账号的 Cookie 加上面板口令。面板每保存一次配置都会走那条路，
+    所以每次写盘前后各扫一次。
+
+    ⚠️ 临时文件的**真名**是 `.tmp_xxxxxxxx`（`NamedTemporaryFile(prefix=".tmp_",
+    dir=<.env 目录>)`，实测 python-dotenv 1.2.4；仓库 requirements 钉的是 1.2.2）。
+    从前只匹配 `<env名>.tmp*`，等于一个真中间态都清不掉 —— 两个前缀都认。
+    `.tmp_*` 太泛，所以那一路还要过 `_looks_like_env_temp()`（内容得像 .env）。
+
+    **只删够老的**（ENV_TMP_STALE_SECONDS）：刚出现的那个正是本次写盘（或别的
+    进程的写盘）的中间态，删了会打断写入。删除前先把权限收紧成 0600 ——
+    这样"删失败"也至少不再是 0644。返回被删掉的文件名列表。
+    """
+    prefixes = (target.name + ".tmp", ".tmp_")
+    now = time.time()
+    removed: list = []
+    for folder in _env_dirs(target):
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            if not item.name.startswith(prefixes):
+                continue
+            try:
+                if item.is_dir():                # 只可能是普通文件；目录不动
+                    continue
+                age = now - item.stat().st_mtime
+            except OSError:                      # 刚好被别人删了/改不动，跳过
+                continue
+            if age < ENV_TMP_STALE_SECONDS:
+                continue
+            if not item.name.startswith(target.name + ".tmp") and not _looks_like_env_temp(item):
+                continue                         # 泛前缀 + 内容不像 .env → 不是我们的中间态
+            try:
+                if os.name != "nt":
+                    os.chmod(item, 0o600)        # 先收紧；万一 unlink 失败也不再是 0644
+                item.unlink()
+            except OSError as exc:
+                _warn(f"清理残留中间文件 {item} 失败：{type(exc).__name__}: {exc}")
+                continue
+            removed.append(str(item))
+            _warn(
+                f"清掉了一个残留的中间文件 {item}（{int(age)} 秒前留下的）："
+                f"它里面有 Cookie / 口令哈希，是 python-dotenv 写盘被中断的痕迹；"
+                f"已先 chmod 600 再删除"
+            )
+    return removed
+
+
+def _dotenv_supports_follow_symlinks() -> bool:
+    """本机这份 python-dotenv 的 `set_key` / `unset_key` 认不认 `follow_symlinks`？"""
+    for func in (set_key, unset_key):
+        try:
+            params = inspect.signature(func).parameters
+        except (TypeError, ValueError):          # 读不到签名（C 实现/装饰器）就按不支持
+            return False
+        if _FOLLOW_SYMLINKS not in params:
+            return False
+    return True
+
+
+def symlink_write_problem(target: Path) -> str:
+    """`.env` 是软链、而本机 dotenv 改不动软链时，返回中文原因（否则空串）。
+
+    为什么要专门拦这一下：python-dotenv 默认 `follow_symlinks=False`，它最后
+    那步是 `os.replace(tmp, <env>)` —— 对软链来说这一步会把**软链本身换成普通
+    文件**。用户把 `.env` 软链到 `/etc/...`、或用 stash 这类工具管着配置时，
+    真正的配置在别处：面板"保存成功"了，被读取的还是老文件（于是"改了配置不
+    生效"），软链指向的真身被悄悄留在原地。要么带上 `follow_symlinks` 去改
+    真身，要么明确拒绝 —— 绝不静默换掉用户的软链。
+    """
+    if not _is_symlink(target):
+        return ""
+    if _dotenv_supports_follow_symlinks():
+        return ""
+    try:
+        real = os.path.realpath(str(target))
+    except OSError:                                              # pragma: no cover
+        real = "?"
+    return (
+        f"{target} 是一个软链接（指向 {real}），而本机安装的 python-dotenv "
+        f"不认识 follow_symlinks 参数：按默认写法保存会把软链接替换成普通文件，"
+        f"真正被读取的那份配置其实没改（面板上看起来「保存了却不生效」）。"
+        f"请把 python-dotenv 升级到支持 follow_symlinks 的版本"
+        f"（requirements.txt 里钉的是 1.2.2），或者直接把配置写进 {real}"
+    )
+
+
+def _write_kwargs(target: Path) -> dict:
+    """软链要跟着真身写时给 dotenv 的额外参数；本机不支持就抛 EnvWriteRefused。"""
+    problem = symlink_write_problem(target)
+    if problem:
+        raise EnvWriteRefused(problem)
+    return {_FOLLOW_SYMLINKS: True} if _is_symlink(target) else {}
+
+
 def _set_key(target: Path, key: str, value: str) -> None:
     # quote_mode="never"：与 .env.example 一致不加引号；加了引号反而会让
     # JSON 值里的转义在别处被二次解释（Docker env_file / unicode_escape 都会踩）。
-    set_key(str(target), key, value, quote_mode="never", encoding="utf-8")
+    kwargs = _write_kwargs(target)
+    _sweep_env_tmp(target)          # 上一次被杀的进程可能在这里留了一整份 .env
+    try:
+        set_key(str(target), key, value, quote_mode="never", encoding="utf-8", **kwargs)
+    finally:
+        # 兜底：本次写盘半路出事时留下的中间态，够老的话这里顺手清掉。
+        # 够新的一律不碰 —— 那可能是另一个进程（configTool）正在写的中间态。
+        _sweep_env_tmp(target)
+
+
+def _unset_key(target: Path, key: str) -> None:
+    """删掉 `.env` 里的一行（`remove_account` 删 Cookie 用）；软链同样跟着真身写。"""
+    kwargs = _write_kwargs(target)
+    _sweep_env_tmp(target)
+    try:
+        unset_key(str(target), key, quote_mode="never", encoding="utf-8", **kwargs)
+    finally:
+        _sweep_env_tmp(target)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +402,10 @@ def update_settings(values, *, path=None) -> dict:
     target = env_path(path)
     if not target.exists():
         return {"ok": False, "error": f"找不到 {target}，无法写入", "changed": {}}
+    # 软链 + 本机 dotenv 改不动软链：宁可不写，也不能把用户的软链换成普通文件。
+    problem = symlink_write_problem(target)
+    if problem:
+        return {"ok": False, "error": problem, "changed": {}}
 
     wanted = {
         str(key): str(value if value is not None else "")
@@ -260,7 +464,12 @@ def _set_key_quoted(target: Path, key: str, value: str) -> None:
     枚举，加引号反而会被别处二次解释。口令不一样 —— 它可能带 `#`、空格、`$`，
     不加引号会被 dotenv 当成注释开头或变量展开截断，于是"设了口令却登不上"。
     """
-    set_key(str(target), key, value, quote_mode="always", encoding="utf-8")
+    kwargs = _write_kwargs(target)
+    _sweep_env_tmp(target)
+    try:
+        set_key(str(target), key, value, quote_mode="always", encoding="utf-8", **kwargs)
+    finally:
+        _sweep_env_tmp(target)
 
 
 def password_mode(*, path=None) -> str:
@@ -296,6 +505,9 @@ def set_webui_password(password_value, *, store=PASSWORD_MODE_PLAIN, path=None) 
         return {"ok": False, "error": problem, "changed": [], "mode": mode}
     if not target.exists():
         return {"ok": False, "error": f"找不到 {target}，无法写入", "changed": [], "mode": mode}
+    problem = symlink_write_problem(target)
+    if problem:
+        return {"ok": False, "error": problem, "changed": [], "mode": mode}
 
     value = str(password_value)
     wanted = {
@@ -369,6 +581,12 @@ def save_cookie(unique_id, cookies_json, *, path=None, expect_login=True) -> dic
         return {"ok": False, "error": f"Cookie 不是合法 JSON：{error}"}
     if expect_login and not cookie_utils.has_login_cookie(cookies):
         return {"ok": False, "error": "这份 Cookie 里没有 sessionid，写进去也发不出消息"}
+    if expect_login and not cookie_utils.has_usable_login_cookie(cookies):
+        # 名字对、但 expires 已经写在过去：存下去只会让面板显示"已配置"，发送时
+        # 拿到 EXPIRED。宁可现在就说清楚，也别让用户以为保存成功了。
+        return {"ok": False,
+                "error": "这份 Cookie 的 sessionid 已经过期了（expires 是过去时间），"
+                         "写进去也发不出消息；请重新扫码登录拿一份新的"}
     reason = dotenv_hazard(text)
     if reason:
         # 值本身解得出 JSON，但原样写进 .env 之后会被 dotenv 改坏 ——
@@ -378,6 +596,9 @@ def save_cookie(unique_id, cookies_json, *, path=None, expect_login=True) -> dic
     target = env_path(path)
     if not target.exists():
         return {"ok": False, "error": f"找不到 {target}，无法写入"}
+    problem = symlink_write_problem(target)
+    if problem:
+        return {"ok": False, "error": problem}
     saved = backup(target)
 
     key = cookie_utils.env_key_for(uid)
@@ -437,6 +658,9 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
     target = env_path(path)
     if not target.exists():
         return {"ok": False, "error": f"找不到 {target}，无法写入"}
+    problem = symlink_write_problem(target)
+    if problem:
+        return {"ok": False, "error": problem}
 
     try:
         tasks = read_tasks(target)
@@ -770,6 +994,9 @@ def remove_account(unique_id, *, keep_cookie=False, path=None) -> dict:
     target = env_path(path)
     if not uid or not target.exists():
         return {"ok": False, "error": "没有这个账号"}
+    problem = symlink_write_problem(target)
+    if problem:
+        return {"ok": False, "error": problem}
     try:
         tasks = read_tasks(target)
     except ValueError as exc:
@@ -791,7 +1018,7 @@ def remove_account(unique_id, *, keep_cookie=False, path=None) -> dict:
     _set_key(target, "TASKS", json.dumps(left, ensure_ascii=False, separators=(",", ":")))
     if not keep_cookie:
         try:
-            unset_key(str(target), cookie_utils.env_key_for(uid), quote_mode="never", encoding="utf-8")
+            _unset_key(target, cookie_utils.env_key_for(uid))
         except Exception:                                        # noqa: BLE001
             pass
     _lock_down(target)

@@ -4,6 +4,7 @@
 假模块再 import `core.tasks`；`DouyinIM` 与 `get_browser` 都用假对象替换，
 只保留 `tasks` 真正用到的那些方法 —— 这些用例里**不会**启动任何浏览器。
 """
+import itertools
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ import types
 import unittest
 from datetime import datetime
 from datetime import time as dt_time
+from datetime import timedelta
 from unittest import mock
 
 if "cloakbrowser" not in sys.modules:      # core.browser 是模块级 import cloakbrowser
@@ -192,6 +194,15 @@ class _TasksCase(unittest.TestCase):
         clock.start()
         self.addCleanup(clock.stop)
 
+        # 时间表模块的"现在"也得钉住：`save_marks()` 拿**真实现在**算 prune 的保留窗口
+        # （只留最近 7 天），而这些用例的数据都写在 2026-10-07 —— 不钉住的话，
+        # 用例跑在几天之后的机器上时，刚写下的记账会被当成陈旧数据删掉，
+        # 失败信息（"账本/状态里没有这条"）跟被测行为毫无关系。
+        from core import schedule as schedule_mod
+        schedule_clock = mock.patch.object(schedule_mod, "now", lambda: self.FIXED_NOW)
+        schedule_clock.start()
+        self.addCleanup(schedule_clock.stop)
+
         _FakeIM.instances = []
         _FakeIM.ready = {"status": "READY", "user_id": "100", "nickname": "测试号"}
         _FakeIM.result = None
@@ -234,6 +245,43 @@ class _TasksCase(unittest.TestCase):
 
     def _runs(self):
         return ledger.read_runs(path=self.ledger_file)
+
+
+class _RaisingIM(_FakeIM):
+    """第一个好友的输入环节抛异常（真机现场：输入通道打不进去时 `_type_real` 拒发）。"""
+
+    def type_and_send(self, friend, message, dry_run="off", **kw):
+        if friend["display"] == "甲同学":
+            raise RuntimeError("可信输入与 JS 合成输入都没把消息打进输入框，拒绝发送")
+        return super().type_and_send(friend, message, dry_run=dry_run, **kw)
+
+
+class InputFailureIsolationTests(_TasksCase):
+    """输入环节抛异常只算**这一条**失败，不能把整个账号带崩。
+
+    ★ 修复前 `core/tasks.py` 的首个 `type_and_send` 是裸调用：异常冒到
+      `do_user_task` 的外层 except，账号剩下的好友**一条都不发**，账本里只有一条
+      含糊的账号级 error（面板上看不出"后面的好友被吞了"）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(tasks_mod, "DouyinIM", _RaisingIM)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_one_bad_target_does_not_kill_the_rest(self):
+        self._set_users(self.users)                 # 甲账号的两个好友：甲同学、乙同学
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        im = _FakeIM.instances[0]
+        self.assertEqual([c[0] for c in im.calls], ["乙同学"])   # 后面的目标照发
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["sent_ok"], 1)
+        self.assertEqual(acct["sent_fail"], 1)
+        entry = [e for e in acct["entries"] if e["target"] == "甲同学"][0]
+        self.assertFalse(entry["ok"])
+        self.assertTrue(entry["reason"].startswith("input_failed:"),
+                        f"失败原因应带 input_failed 前缀：{entry['reason']!r}")
 
 
 class DryRunPlumbingTests(_TasksCase):
@@ -363,7 +411,7 @@ class GateAndErrorTests(_TasksCase):
     def test_dead_session_at_the_gate_is_error_not_skipped(self):
         """门禁就判出「登录态已死」：记 error（占掉当天名额、当天不再重试）。
 
-        2026-10-10 wheat 的真实事故：sessionid 被服务端作废之后，每 5 分钟的
+        2026-10-10 示例号 的真实事故：sessionid 被服务端作废之后，每 5 分钟的
         门铃仍然会把它敲门一次，每次都真的开一只浏览器 + goto /chat ——
         一天 100 次实测（理论上限 288），全是同一个形状的 EXPIRED。
         对一个正在被风控盯着的账号，这些重复请求只有坏处。
@@ -761,11 +809,18 @@ class ScheduleGateTests(_TasksCase):
                                 lambda: {"messageTemplate": "续火花"})
         cfg.start()
         self.addCleanup(cfg.stop)
+        # cookie 必须带 domain：`core/cookie_utils.clean_cookie` 会把"空 domain"
+        # 的条目当成不可用丢掉（Playwright 的 add_cookies 是整批语义，一条空域
+        # 就让整批注入失败）。这里从前写的是 `{"name": "sessionid", "value": "x"}`，
+        # 于是 `do_user_task` 在注入前就抛"cookie 全部不可用"、浏览器根本没起来
+        # —— 下面所有断言失败的原因都指向夹具，而不是被测的那段逻辑。
         self.early = [{"username": "账号甲", "unique_id": "111", "fingerprint": None,
-                       "cookies": [{"name": "sessionid", "value": "x"}],
+                       "cookies": [{"name": "sessionid", "value": "x",
+                                    "domain": ".douyin.com", "path": "/"}],
                        "targets": ["甲同学"], "time": "08:00"}]
         self.late = [{"username": "账号晚", "unique_id": "222", "fingerprint": None,
-                      "cookies": [{"name": "sessionid", "value": "x"}],
+                      "cookies": [{"name": "sessionid", "value": "x",
+                                   "domain": ".douyin.com", "path": "/"}],
                       "targets": ["甲同学"], "time": "20:30"}]
 
     def _state(self):
@@ -890,7 +945,7 @@ class ScheduleGateTests(_TasksCase):
 class RuntimeLoginLostTests(_TasksCase):
     """运行期掉登录：账号级结论必须记 error，并且立刻停掉剩余目标。
 
-    2026-10-09 wheat 的真实事故：网页登录态失效之后，页面仍然长着 IM 的样子，
+    2026-10-09 示例号 的真实事故：网页登录态失效之后，页面仍然长着 IM 的样子，
     点击发送"成功"、回执永远不来，4 个目标被记成「发送失败」，而整轮按
     `status=ok` 记账 —— 等于"今天已发"，当天不再重试，面板上也没有任何提示。
     这条用例钉住：掉登录要 break、账号级 status=error、记账写进时间表的是 error。
@@ -925,7 +980,7 @@ class RuntimeLoginLostTests(_TasksCase):
     def test_all_sends_failing_is_not_recorded_as_success(self):
         """**一条都没送达**绝不能记成 ok。
 
-        2026-10-10 🌈LBX🌈：门禁 READY、选中 strong、输入 63/63 都对，三个目标
+        2026-10-10 🌈示例号🌈：门禁 READY、选中 strong、输入 63/63 都对，三个目标
         全部拿不到回执 —— 账本却记 `status=ok`，时间表当成"今天已发"，
         面板显示一切正常，用户第二天才发现朋友根本没收到。
         重试行为不变（每个目标仍试两次），但账号级结论必须是 error。
@@ -941,7 +996,7 @@ class RuntimeLoginLostTests(_TasksCase):
         acct = rec["accounts"][0]
         self.assertEqual(acct["status"], "error")
         self.assertIn("nothing_sent", acct["error"])
-        self.assertIn("重新登录", acct["error"])
+        self.assertIn("重新扫码登录", acct["error"])
         self.assertEqual(acct["sent_ok"], 0)
         self.assertEqual(acct["sent_fail"], 2)          # 两个目标各失败一次
         # 每个目标都重试了一次：4 次调用（2 目标 × 2 次）
@@ -1013,6 +1068,9 @@ class RetryBudgetTests(_TasksCase):
         self.assertEqual(tasks_mod._retry_budget(999), tasks_mod.RETRY_TIMES_MAX)
         self.assertEqual(tasks_mod._retry_budget("三次"), 1)    # 写错按默认 1 次
         self.assertEqual(tasks_mod._retry_budget(None), 1)
+        # "1e999" 是合法数字但 int(float(...)) 抛 OverflowError：漏掉它 =
+        # 整个账号变成账号级异常，一个好友都发不出去（而且报错信息与配置无关）
+        self.assertEqual(tasks_mod._retry_budget("1e999"), 1)
 
     def test_retry_times_decides_the_extra_attempts(self):
         self._set_users(self.users)
@@ -1070,6 +1128,216 @@ class RetryBudgetTests(_TasksCase):
         # 首发 + 一次重试（默认 1）就停：不再去试第二个目标
         self.assertEqual(len(_RetryLostIM.instances[0].messages), 2)
         self.assertEqual(acct["sent_fail"], 1)
+
+
+class NoTargetsTests(_TasksCase):
+    """TASKS 里 `targets` 为空（漏写 / 面板上全取消勾选 / 写成了 `null`）。
+
+    以前这种账号会一路走到"开浏览器 → 白等一轮超时"，最后被 `_mark_status`
+    兜成 ok —— 时间表写「今天已发」、面板写「尚未运行」，用户第二天才发现
+    朋友根本没收到。
+    """
+
+    def test_account_without_targets_is_not_sent_and_keeps_the_day(self):
+        from core import schedule
+        users = [dict(self.users[0], targets=[])]
+        self._set_users(users)
+        rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("no_targets", acct["error"])
+        # 不开浏览器：开了也只会白等一轮超时，而门铃每 5 分钟就把它踹起来一次
+        self.assertEqual(self.browsers, [])
+        state = schedule.load_state(path=self.schedule_file)
+        # 时间表必须记 skipped —— 只有 skipped 才"当天名额还在"，等到用户把目标
+        # 加回来，下一个门铃就会补发；记成 error/ok 都会让今天彻底静音。
+        self.assertEqual(state["accounts"]["111"]["status"], schedule.STATUS_SKIPPED)
+        again = schedule.select(users, state=state, fallback="00:00", jitter=0)
+        self.assertEqual([plan["unique_id"] for _user, plan in again["due"]], ["111"])
+
+    def test_null_targets_is_treated_as_empty(self):
+        """`"targets": null` 是手改 .env 的常见写法（json 里合法，代码里不是 list）。"""
+        users = [dict(self.users[0], targets=None)]
+        self._set_users(users)
+        rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(rec["accounts"][0]["status"], "error")
+        self.assertIn("no_targets", rec["accounts"][0]["error"])
+
+    def test_six_empty_target_rounds_do_not_mute_the_account(self):
+        """没配目标**不算**"踹过风控"（这条路径压根没开浏览器）。
+
+        算进去的话：用户半小时后把目标补回来，账号已经被静音到第二天 ——
+        而它连一次请求都没发出去，限制它没有任何收益。
+        """
+        from core import schedule
+        users = [dict(self.users[0], targets=[])]
+        self._set_users(users)
+        for _ in range(schedule.DEFAULT_SKIP_RETRY_MAX):
+            tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(self.browsers, [])
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertNotIn("attempts", state["accounts"]["111"])
+        again = schedule.select(users, state=state, fallback="00:00", jitter=0)
+        self.assertEqual([plan["unique_id"] for _user, plan in again["due"]], ["111"])
+
+
+class PerAccountFlushTests(_TasksCase):
+    """★ 每个账号跑完**立刻**落盘 —— 中途被 SIGKILL/断电也不能重发。
+
+    以前所有记账都压在整轮收尾的那一次 `save_marks` 里：进程在"两个账号中间"
+    被杀（systemd 重启、机器断电、容器被 kill -9），刚发出去的那个账号在文件里
+    一个字都没有 → 下一个门铃认为"今天还没发" → 好友收到第二条。
+    """
+
+    def test_each_account_is_on_disk_before_the_next_one_starts(self):
+        from core import schedule
+        case = self
+        seen = []
+
+        class _SnapIM(_FakeIM):
+            def __init__(self, page, **kw):
+                super().__init__(page, **kw)
+                # 每个账号开工的瞬间看一眼状态文件：上一个账号的账必须已经在了
+                if os.path.exists(case.schedule_file):
+                    with open(case.schedule_file, encoding="utf-8") as handle:
+                        seen.append(json.load(handle).get("accounts") or {})
+                else:
+                    seen.append({})
+
+        self._set_users([dict(self.users[0]),
+                         dict(self.users[0], username="账号乙", unique_id="222")])
+        with mock.patch.object(tasks_mod, "DouyinIM", _SnapIM):
+            tasks_mod.runTasks(dry_run="off", source="timer")
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], {}, "第一个账号开工时不该有别人的账")
+        self.assertEqual(seen[1].get("111", {}).get("status"), "ok", "上一个账号没落盘")
+        self.assertNotIn("222", seen[1])
+        # 收尾那次合并写照旧保留（幂等），两个账号最终都在
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(sorted(state["accounts"]), ["111", "222"])
+
+    def test_the_flushed_record_keeps_the_round_start_time(self):
+        """跨零点的口径不能变：整轮用**开始时**的时刻记账。
+
+        23:58 起跑、00:03 才收尾（两个账号、几十个好友，一轮几分钟很正常）。
+        如果按"写完那一刻"记，这条账会落在 10-08 —— 用户眼里的"今天"还是 10-07，
+        门铃随后判"10-07 没发过"再发一条。
+        """
+        from core import schedule
+        start = datetime.strptime("2026-10-07 23:58:00", "%Y-%m-%d %H:%M:%S").astimezone()
+        ticks = itertools.count()
+
+        def _clock():
+            return start + timedelta(minutes=5 * next(ticks))
+
+        self._set_users(self.users)
+        with mock.patch.object(tasks_mod, "now", _clock):
+            tasks_mod.runTasks(dry_run="off", source="timer")
+
+        record = schedule.load_state(path=self.schedule_file)["accounts"]["111"]
+        self.assertEqual(record["date"], "2026-10-07")      # 本轮开始那天
+        self.assertEqual(record["sent_at"], iso(start))     # 不是收尾时刻
+        self.assertEqual(record["status"], "ok")
+
+    def test_a_skipped_account_counts_one_attempt_per_round(self):
+        """一轮只记一次 attempts。
+
+        每账号落盘 + 收尾合并写如果都记一次，上限 6 实际只撑 3 轮 ——
+        深夜那半个晚上照样每 5 分钟被踹一次，等于没修。
+        """
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.ready = {"status": "TIMEOUT", "user_id": None, "nickname": None}
+        tasks_mod.runTasks(dry_run="off", source="timer")
+        tasks_mod.runTasks(dry_run="off", source="timer")
+        record = schedule.load_state(path=self.schedule_file)["accounts"]["111"]
+        self.assertEqual(record["status"], schedule.STATUS_SKIPPED)
+        self.assertEqual(record["attempts"], 2)
+        self.assertEqual(record["last_attempt"], iso(self.FIXED_NOW))
+
+    def test_six_skipped_rounds_stop_the_doorbell_for_the_day(self):
+        """★ 试满 `SCHEDULE_SKIP_RETRY_MAX`（默认 6）之后，当天不再开浏览器。
+
+        一个门禁过不去的账号，原来一天被踹起 288 次（每次都是真浏览器 + goto），
+        而它今天根本发不出去 —— 这些重复请求对正在被风控盯的账号只有坏处。
+        """
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.ready = {"status": "TIMEOUT", "user_id": None, "nickname": None}
+        for _ in range(schedule.DEFAULT_SKIP_RETRY_MAX):
+            tasks_mod.runTasks(dry_run="off", source="timer")
+        opened = len(self.browsers)
+        self.assertEqual(opened, 6, "前几轮该照旧重试")
+
+        state = schedule.load_state(path=self.schedule_file)
+        record = state["accounts"]["111"]
+        self.assertEqual(record["attempts"], 6)
+        self.assertEqual(record["status"], schedule.STATUS_SKIPPED)   # 不许改写成 ok
+
+        rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(len(self.browsers), opened, "试满之后不该再起浏览器")
+        self.assertTrue(rec["nothing_due"])
+        # 早退不入账本：不然一天 288 条空记录会把真正的运行记录淹掉
+        self.assertEqual(len(self._runs()), 6)
+        # 记录留着、状态没变 → 面板照旧显示"今天试过但没发出去"，
+        # 用户重新扫码（retract_mark 归零）之后当天还能补发
+        self.assertEqual(schedule.load_state(path=self.schedule_file)["accounts"]["111"]["attempts"], 6)
+
+    def test_a_failed_state_write_does_not_break_the_round(self):
+        """状态文件写不进去（磁盘满 / 只读挂载）不能让这一轮整批作废。
+
+        记账是附加动作：它失败最坏是"下一个门铃重复一次"，而抛出去会把这一轮的
+        账本行也一起丢掉 —— 那才是真的查不出发生了什么。
+        """
+        from core import schedule
+        self._set_users(self.users)
+        with mock.patch.object(schedule, "save_marks", lambda *a, **kw: False):
+            rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(rec["accounts"][0]["status"], "ok")
+        self.assertEqual(rec["accounts"][0]["sent_ok"], 2)
+        self.assertFalse(os.path.exists(self.schedule_file))
+        self.assertEqual(len(self._runs()), 1, "账本行不能因为状态写失败而丢")
+
+
+class SigtermAccountingTests(_TasksCase):
+    """systemd 超时（`TimeoutStartSec=3600`）先发 SIGTERM，`main.py` 把它变成 SystemExit。
+
+    这条用例不需要真进程和真信号：`SystemExit` 从发送中途抛出来，与"handler
+    在那一瞬间把 SystemExit 抛进当前栈"走的是同一条展开路径 —— 关键就是
+    `core/tasks.py` 收尾那段的记账必须在锁放掉**之前**跑完。
+    """
+
+    def test_completed_accounts_are_accounted_before_the_process_dies(self):
+        from core import schedule
+        users = [
+            dict(self.users[0]),
+            {"username": "账号乙", "unique_id": "222", "fingerprint": None,
+             "cookies": [{"name": "sessionid", "value": "y", "domain": ".douyin.com",
+                          "path": "/"}],
+             "targets": ["第二个好友"]},
+        ]
+        self._set_users(users)
+
+        class _ExitIM(_FakeIM):
+            def type_and_send(self, friend, message, dry_run="off", **kw):
+                if friend["display"] == "第二个好友":
+                    # 与 main.py 的 handler 同形：把信号变成一次正常的栈展开
+                    raise SystemExit(128 + 15)
+                return super().type_and_send(friend, message, dry_run=dry_run, **kw)
+
+        with mock.patch.object(tasks_mod, "DouyinIM", _ExitIM):
+            with self.assertRaises(SystemExit):
+                tasks_mod.runTasks(dry_run="off", source="timer")
+
+        state = schedule.load_state(path=self.schedule_file)
+        # ★ 已经发出去的那一个账号必须记上账：不记 → 下一个门铃就当"今天还没发"，
+        #   原样再发一遍，好友收到第二条。
+        self.assertEqual(state["accounts"]["111"]["status"], schedule.STATUS_OK)
+        # 没跑完的账号不记账（它一个目标都没发出去）。
+        self.assertNotIn("222", state["accounts"])
+        # 锁也得放掉，否则下一次敲门会被 RunLocked 一直挡着。
+        self.assertIsNone(ledger.lock_info())
 
 
 if __name__ == "__main__":

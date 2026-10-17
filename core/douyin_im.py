@@ -28,6 +28,7 @@
 import time
 import traceback
 import json
+import math
 import re
 import unicodedata
 from urllib.parse import unquote
@@ -96,6 +97,32 @@ def line_list(text):
             if line]
 
 
+def _norm_all(s):
+    """把所有空白折叠掉（判"是不是同一段文字"用，容忍排版差异）。"""
+    return "".join(str(s).split())
+
+
+def _same_text(got, want_lines):
+    """读回内容与期望是否一致：**逐行**比，退化时才整体折叠比。
+
+    ★ 为什么不用老判据"读回不短于期望"：2026-10-15 真机实测可信输入会**掉字**
+      （`page.keyboard.type` 打 `<`/`>` 进不去，8 字消息只剩 6 字），"不短于"会把
+      残缺消息判成落地成功、直接发出去。
+    ★ 为什么留一档"整体折叠"：这套编辑器（字节 EditorKit）的换行在不同版本里渲染成
+      `<br>`/软换行/独立块，逐行比会在"换行表现不同"时误判 —— 那时至少要确认
+      "文字全在、没有叠字"。两档都不容忍字符差异（掉字、叠字、多字一律 False）。
+    """
+    want = "\n".join(str(x) for x in want_lines)
+
+    def norm_lines(s):
+        return [re.sub(r"[ \t\u3000]+", " ", x).strip()
+                for x in str(s).replace("\r\n", "\n").split("\n")]
+
+    if norm_lines(got) == norm_lines(want):
+        return True
+    return _norm_all(got) == _norm_all(want)
+
+
 def _readback_matches(expected_lines, got_text):
     """编辑器读回的内容是否等于"应该输入的行" → (是否匹配, 实际读回的原文)。
 
@@ -119,9 +146,9 @@ def _squash(text) -> str:
 
 
 def _bare(seg: str) -> str:
-    """去掉一段两端的**装饰性**字符（emoji / 符号 / 标点）—— `🌈lbx🌈` → `lbx`。
+    """去掉一段两端的**装饰性**字符（emoji / 符号 / 标点）—— `🌈示例号🌈` → `示例号`。
 
-    给子串兜底用：好友昵称上挂 emoji 是常态（本项目自己的号就叫 `🌈LBX🌈`），
+    给子串兜底用：好友昵称上挂 emoji 是常态（本项目自己的号就叫 `🌈示例号🌈`），
     手写的目标名不会带装饰。只削两端，中间的字符一个不动，所以
     `我是小明明` 削完还是 `我是小明明`，不会退化成任意子串匹配。
     """
@@ -159,6 +186,69 @@ def _residue_echo(expected_lines, got_text):
     return n > due, n
 
 
+# 气泡文本比较前要删掉的不可见字符：零宽族（复用 ZERO_WIDTH_CHARS）+ 变体选择符。
+# U+FE0E / U+FE0F 是"文字呈现 / emoji 呈现"的选择符，各端会随手加，肉眼完全看不见，
+# 却能让两个"看起来一模一样"的字符串判不相等。
+_DOM_INVISIBLE = ZERO_WIDTH_CHARS + "\ufe0e\ufe0f"
+
+
+def _dom_norm(text) -> str:
+    """气泡文本归一化：删掉所有空白（含 `\\n` `\\t` 全角空格）与不可见字符。
+
+    ★ 为什么不复用 `_norm`：`_norm` 是给**人名匹配**用的（还做 NFKC + 转小写）。这里
+    比的是"同一条消息的原文"，NFKC 会把全角字母改形（`Ａ`→`A`），小写化会改英文大小写
+    —— 两侧都改、判等虽然不受影响，但日志里贴出来的对照文本会"看着不一样"，白添排查成本。
+    """
+    v = str(text if text is not None else "")
+    for ch in _DOM_INVISIBLE:
+        v = v.replace(ch, "")
+    # `str.isspace()` 覆盖 \n \t \r \xa0 \u3000 与各种 Unicode 空白
+    return "".join(ch for ch in v if not ch.isspace())
+
+
+def _is_pictograph(ch) -> bool:
+    """这个字符在气泡里可能是 `<img>`（emoji）—— 那样 textContent 里读不到它。"""
+    if ch.isascii():
+        return False            # `#` `*` `0-9` 是 emoji 序列的零件，本身不是图形
+    if unicodedata.category(ch) in ("So", "Sk"):
+        return True             # So=🎉🌈☀…；Sk=肤色修饰符 🏻…
+    cp = ord(ch)
+    return 0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF
+
+
+def _dom_text_matches(text, last_text) -> bool:
+    """DOM 气泡里的文本是否对得上**本条消息**（两侧各自归一化后比前缀）。
+
+    ★ 为什么不能再用 `last_text.startswith(text[:8])` —— 两个"永远不匹配"的输入：
+    ① 多行模板（`"早上好\\n晚安"`）的 head 里有 `\\n`，而气泡的 `textContent` 不含换行
+       （Draft.js 的块边界在 textContent 里是直接相接的）→ 永远 False；
+    ② 模板以 emoji 开头时，emoji 在抖音气泡里被画成 `<img>`，`textContent` 里没有它
+       → 永远 False。
+    这两种"永远 False"的后果一样糟：消息其实**已经发出去了**，只是 DOM 侧确认不了；
+    没有 HTTP 回执时（WS 通道）判失败 → 任务层重发同一条 → 好友收到两条，
+    正是本项目最忌讳的失败形态。
+
+    返回 True 只代表"文本这一条证据对得上"，**不代表发送成功**：气泡数增加与
+    `lastFromMe` 两个条件由调用方 `_wait_receipt` 原样保留，这里不越权放宽。
+    """
+    want = _dom_norm(text)
+    # 把"可能在 DOM 上被画成 <img>、textContent 里读不到"的图形字符摘掉再取 head：
+    # emoji 开头时若连 emoji 一起比，就又回到上面②那个"永远不匹配"。
+    core = "".join(ch for ch in want if not _is_pictograph(ch))
+    if not core:
+        # 整条都是 emoji / 空白 / 零宽：textContent 本来就读不到东西，文本给不出结论
+        # → 返回 True，把判定交回给「气泡数增加 + lastFromMe」两个条件，不凭空判成功。
+        return True
+    got = _dom_norm(last_text)
+    if not got:
+        return False            # 气泡里一个字都读不到：这是"没证据"，不是"匹配"
+    if got.startswith(core[:8]):
+        return True
+    # 不含图形字符的模板 core == want，上面那一比就是原来那条判据（行为不变）；
+    # 含 emoji 的再试一次"带图形的原样" —— DOM 若把 emoji 画成了文字也得对得上。
+    return got.startswith(want[:8])
+
+
 def _brief(exc) -> str:
     """异常压成一行（Playwright 的异常常带多行 Call log）。"""
     return f"{type(exc).__name__}: {' '.join(str(exc).split())}"
@@ -174,6 +264,44 @@ CHAT_URL = "https://www.douyin.com/chat"
 
 # 会话项行高（CSS 实测 height:67px），用于按 data-index 估算 scrollTop
 ROW_HEIGHT = 67
+
+
+def _nonneg_int(value):
+    """非负整数就返回它，其余（None / 负数 / NaN / 字符串乱值 / 列表）一律返回 None。
+
+    ★ 为什么单独有这一层：`JS_COLLECT` 里是 `dataIndex: holder ? Number(...) : null`
+    —— **键一定存在、值可能是 null**，所以 `dict.get("data_index", 0)` 的默认值根本
+    不生效。取来当乘数之前必须先判"能不能用"。
+    """
+    if value is None or isinstance(value, bool):
+        return None                 # True 是 int 的子类，但不是合法的下标
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num) or num < 0:      # NaN / ±∞ / 负数
+        return None
+    return int(num)
+
+
+def _scroll_top_for(item, row_height=ROW_HEIGHT):
+    """估算「滚到这条会话能被渲染出来」的 scrollTop（像素）。
+
+    ★ 为什么不能直接写 `item.get("data_index", 0) * ROW_HEIGHT`：如上，`data_index`
+    可能是 None，`None * 67` 抛 TypeError；这一行在 `iter_find_and_select` 里没有任何
+    try 兜着，异常会一路穿到 core/tasks.py 的账号级 except —— 整轮被记成 error，
+    排在后面的好友一个都收不到（2026-xx 线上隐患，四条修复之一）。
+
+    取值顺序：`data_index`（非负整数）→ `dom_index`（同一窗口里的渲染序号）→ 0
+    （退回列表顶部：虚拟列表会按这个位置重新渲染目标所在的窗口，最多多滚一次）。
+    负数同样按"不可用"处理：浏览器会把负 scrollTop 夹到 0，但日志里留一个 -67
+    只会把排查带偏。
+    """
+    for key in ("data_index", "dom_index"):
+        n = _nonneg_int((item or {}).get(key))
+        if n is not None:
+            return n * row_height
+    return 0
 
 # 会话列表的独立容器。主容器之外还有折叠组与陌生人组，
 # 它们各自是独立滚动容器，主容器扫不到 —— 见 DouyinIM.fold_groups。
@@ -217,7 +345,7 @@ JS_LOGIN_DOM = """(() => {
   const box = document.querySelector('[data-e2e="login-container"]');
   const boxVisible = shown(box);
   // 2026-10 新版登录弹窗没有 data-e2e，只有 class / 组件 id。
-  // 线上 wheat 掉登录那天：页面上明摆着画着这个弹窗，旧选择器一个都没命中，
+  // 线上 示例号 掉登录那天：页面上明摆着画着这个弹窗，旧选择器一个都没命中，
   // 于是门禁判成"等待超时"，用户看到的是"超时"而不是"去重新登录"。
   const fresh = document.querySelector('.douyin_login_new_class')
              || document.querySelector('#douyin_login_comp_mobile_code')
@@ -595,6 +723,75 @@ JS_TYPE_LINE = """((p) => {
   res.len = ((pick() || ed).textContent || '').length;
   return res;
 })"""
+
+# 全选编辑器内容（只动选区、不插字）。
+#
+# 用途：可信输入（CDP `Input.insertText`）与 JS 合成输入都是**在选区处插入**，
+# 先全选再插 = 覆盖式重打 —— 不需要"清空"这个动作。2026-10-15 真机实测：
+# 这个编辑器（字节 EditorKit）的清空不可信，`_clear_editor` 判"已清空"且读回为空，
+# 下一次输入时旧文本又从编辑器自己的 state 里冒出来（叠成 `续火花续火花˵ㅿ`）；
+# 而"全选 + insertText"能精确替换选区内容（`ABC<>xyz` → 全选 → 插入目标消息 = 精确一致）。
+JS_SELECT_ALL = """(() => {
+""" + JS_EDITOR_SELECTORS + """
+  const ed = pick();
+  if (!ed) return null;
+  try { ed.focus(); } catch (e) {}
+  const r = document.createRange();
+  r.selectNodeContents(ed);
+  const s = window.getSelection();
+  s.removeAllRanges();
+  s.addRange(r);
+  return String(s.toString());
+})()"""
+
+# JS 合成输入的**覆盖式**版本：先做浏览器原生全选，再用 execCommand 替换选区。
+#
+# ★ 2026-10-16 真机取证：这条通道**不可靠**，只能当"尽力而为"的兜底，成败一律由
+#   调用方的读回校验决定：
+#     * `/tmp/ml_probe2.py`：裸 `document.execCommand('selectAll')` +
+#       `document.execCommand('insertText', false, "JS1\nJS2")` 成功过一次（多行也精确）；
+#     * `/tmp/ml_probe5.py`（四组：同一次 evaluate / 拆两次 / 中间加 50ms / 中间读一次）
+#       与 `/tmp/ml_probe7.py`（三组，含 pick 链）**全部失败** —— 返回 ok:false，
+#       `sel_in` 为 true（原生全选确实落在编辑器里）而内容一个字符都没变；
+#     * `/tmp/ml_probe6.py`（裸 JS、传字符串参数）却四组全成。
+#   ⇒ 同一段逻辑在不同会话里时灵时不灵，说明它依赖我们控不住的前置状态。
+#   **别把它当可信通道**；可信通道是 CDP 的 `insert_text`（见 `_type_real`）。
+# ★ 另一个坑（`/tmp/ml_probe8.py`）：这个函数的参数是**对象** `{text: …}`；若调用方
+#   传成裸字符串、或把对象传给期望字符串的 JS，`insertText` 会把 `String(对象)`
+#   = `"[object Object]"` 插进输入框 —— 看着 ins:true，内容全错。
+# ★ "元素级选区 + execCommand('insertText')"**完全无效**（probe2）：`Range.selectNodeContents`
+#   造出的选区锚在编辑器根节点上，execCommand 返回 false 且内容不变 —— 这正是第一版
+#   兜底路径的死因。而原生全选**不能**配 CDP 的 `insert_text`（实测得到错乱内容
+#   `JS11\nCDP2`）：两条通道各自的选区口径不同，别混用。
+JS_REPLACE_TEXT = """((p) => {
+""" + JS_EDITOR_SELECTORS + """
+  const ed = pick();
+  if (!ed) return {err: 'no-editor'};
+  try { ed.focus(); } catch (e) {}
+  const sel = window.getSelection();
+  let selIn = false;
+  try {
+    document.execCommand('selectAll');
+    const a = sel && sel.anchorNode;
+    selIn = !!(a && (a === ed || ed.contains(a)));
+  } catch (e) {}
+  if (!selIn) {
+    // 原生全选没落在编辑器里：退回元素级选区。它配 execCommand 多半是 no-op，
+    // 但至少把选区停在编辑器上，成败交给调用方的读回校验。
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(ed);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch (e) {}
+  }
+  const read = () => ((typeof ed.innerText === 'string' && ed.innerText) || ed.textContent || '');
+  const before = read().length;
+  let ok = false;
+  try { ok = document.execCommand('insertText', false, p.text); } catch (e) {}
+  const after = read().length;
+  return {ok: !!ok, sel_in: selIn, before: before, after: after};
+})()"""
 
 JS_CLICK_SEND = """(() => {
   const b = document.querySelector('.messageMsgInputpublishBtn.messageMsgInputpublishRedBtn')
@@ -1209,7 +1406,7 @@ class ImMonitor:
             self.errors.append((url, str(e)))
             return
         if not body:
-            # 空响应体以前是**静默丢弃**的：2026-10-09 wheat 掉登录那一轮，4 条发送
+            # 空响应体以前是**静默丢弃**的：2026-10-09 示例号 掉登录那一轮，4 条发送
             # 请求里有 3 条的响应体是空的，日志上一行痕迹都没有，事后只能靠"没有回执"
             # 反推。发送路由的空响应是**失败信号本身**，按 warning 记；其它路由 debug。
             (logger.warning if route == "send" else logger.debug)(
@@ -1250,7 +1447,7 @@ class ImMonitor:
         if not r["ok"]:
             # 解不出来的时候把**原始响应体**（截断）打出来：只剩 `code=None status=""`
             # 一行，事后完全无从判断对面到底说了什么、还是压根没说话
-            # （2026-10-09 wheat / 2026-10-10 🌈LBX🌈 的发送失败就卡在这里）。
+            # （2026-10-09 示例号 / 2026-10-10 🌈示例号🌈 的发送失败就卡在这里）。
             try:
                 raw = bytes(body or b"").decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
@@ -1454,7 +1651,7 @@ class DouyinIM:
         self._editor_dirty = False
         # 发送全都没回执时**复检**出来的"登录已失效"（见 recheck_login）。
         # 一旦置位，本轮剩下的目标不再白等 20 秒超时 —— 已经没登录了，
-        # 继续点发送只会让风控更难看（2026-10-09 wheat 掉登录那次就是这么烧的）。
+        # 继续点发送只会让风控更难看（2026-10-09 示例号 掉登录那次就是这么烧的）。
         self._login_dead = False
         self._login_dead_reason = ""
 
@@ -1521,7 +1718,7 @@ class DouyinIM:
     def recheck_login(self):
         """发送拿不到回执时**主动复检**登录态，返回 `check_login()` 的结论。
 
-        为什么必须在发送失败时再查一次：2026-10-09 wheat 的事故里，网页登录态失效
+        为什么必须在发送失败时再查一次：2026-10-09 示例号 的事故里，网页登录态失效
         之后页面**仍然长着 IM 的样子**（会话列表、输入框、发送按钮一应俱全），于是
         点击照样"成功"、回执永远不来，4 个目标被记成「发送失败」而不是「登录失效」，
         整轮还按 `status=ok` 写进时间表 —— 面板上一切正常，人却在那边干等消息，
@@ -1554,7 +1751,7 @@ class DouyinIM:
             # 列表等不到**不等于**超时：登录失效时页面既没有会话列表，也可能
             # 没有我们认得出的登录框（2026-10 新版弹窗）。再判一次登录态，
             # 把"登录已失效"从"等待超时"里分出来 —— 面板上"超时"没法告诉用户
-            # 该去重新扫码，而 wheat 2026-10-09 那天正是被报成超时的。
+            # 该去重新扫码，而 示例号 2026-10-09 那天正是被报成超时的。
             again = ls.get("login_recheck") or {}
             again_state = str(again.get("state") or "")
             if again_state in ("NOT_LOGGED_IN", "EXPIRED"):
@@ -1830,7 +2027,19 @@ class DouyinIM:
             if not finished and stopped == "exhausted":
                 stopped = "caller-break"
             self._scan_cache = seen
-            self._walk_stat = {"stopped": stopped, "steps": steps, "seen": seen}
+            stat = {"stopped": stopped, "steps": steps, "seen": seen}
+            # ★ 步数用尽（finished + exhausted）的含义是"我还没扫完就没步数了"，
+            #   不是"列表到底了"：它同样不能算扫全，但下边**确实可能还有会话**。
+            #   顺手把"还剩多远"记下来（虚拟列表的 scrollHeight 就是整列总高，
+            #   减掉当前滚动位置就是没滚到的部分），_finish_scan 据此告警，
+            #   免得日志只留一句"用尽了"、没人知道可能漏了多少。
+            if finished and stopped == "exhausted":
+                probe = self._scroll_probe() or {}
+                sh = _nonneg_int(probe.get("scrollHeight")) or 0
+                top = _nonneg_int(probe.get("scrollTop")) or 0
+                ch = _nonneg_int(probe.get("clientHeight")) or 0
+                stat["remain_rows"] = int(round(max(0, sh - top - ch) / ROW_HEIGHT))
+            self._walk_stat = stat
 
     def _finish_scan(self, found, missing):
         """统一组装 last_scan（两种扫描共用）。"""
@@ -1838,7 +2047,12 @@ class DouyinIM:
         seen = st["seen"]
         stopped = st["stopped"]
         # all-found 是调用方提前 break 时写进去的，同样算「扫全了」
-        scanned_all = stopped in ("reach-bottom", "all-found", "no-move", "exhausted")
+        # ★ 为什么**不再**包含 exhausted（本行是四条修复之一）：它是
+        #   `while steps < self.max_steps` 的步数条件跑干（自然退出）留下的结论，
+        #   含义是"我还没扫完就没步数了"，不是"列表到底了"。上游把它算进 scanned_all
+        #   → 没找到的目标被汇报成"确实不在列表里"（面板不报警）→ 静默漏发。
+        #   no-move 保持原样：连续 3 轮 scrollTop 不动是刻意的"到底了"启发式。
+        scanned_all = stopped in ("reach-bottom", "all-found", "no-move")
         # note 要数据驱动：主列表扫完并不代表"漏了折叠组"，
         # 这个账号可能压根没有折叠组/陌生人组（实测就是 0），
         # 无条件写一句"未覆盖折叠组/陌生人组"会让人以为读漏了。
@@ -1853,6 +2067,19 @@ class DouyinIM:
                         f"（{sum(counts)} 个分组）")
             else:
                 note = ""                              # 确实没有，不用吓人
+        if stopped == "exhausted":
+            # ★ 这里必须有人喊一声（本行是四条修复之一）：停下来是因为步数用尽，
+            #   列表下边还有没有会话**没人知道**。不打这条 warning，日志里只有一行
+            #   `stopped=exhausted scanned_all=False`，没人会去 diff 它。
+            limit = getattr(self, "max_steps", None)
+            rest = st.get("remain_rows")
+            rest_txt = (f"列表下边还剩约 {rest} 个会话的高度没滚到"
+                        if rest else "列表下边还有没滚到的部分（剩多少读不出来）")
+            logger.warning(
+                f"[SCAN] ⚠️ 步数用尽停下（imMaxSteps={limit}，已走 {st['steps']} 步）："
+                f"{rest_txt}；这次只看了 {len(seen)} 个会话。"
+                f"没找到的 {len(missing)} 个目标**不能**当作「不在列表里」"
+                f"（missing={missing}）—— 把 IM_MAX_STEPS 从 {limit} 调大再跑一次。")
         self.last_scan = {
             "found": found,
             "missing": missing,
@@ -1860,6 +2087,9 @@ class DouyinIM:
             "scanned_all": scanned_all,
             "steps": st["steps"],
             "stopped": stopped,
+            # 机器可读的停止原因：与 `stopped` 同一个值，语义不变 —— 调用方要把它
+            # 写进日志/账本 note 时用这个字段，不必去翻译 stopped 里的自由文本。
+            "scan_stop": stopped,
             "visited": len(seen),
             "note": note,
         }
@@ -1884,7 +2114,9 @@ class DouyinIM:
         is_group / unread / is_muted / data_index。
 
         按 conv_id 去重，虚拟列表的重叠窗口不会重复产出。
-        结束后查 `last_scan`：`scanned_all=False` 表示没扫完，结果只是「已扫到的」。
+        结束后查 `last_scan`：`scanned_all=False` 表示没扫完，结果只是「已扫到的」；
+        停止原因（机器可读）是 `scan_stop`，与 `stopped` 同值 —— 调用方直接把它
+        写进日志/账本 note 即可。
         """
         self._select_failed = []
         logger.info("─" * 64)
@@ -2014,7 +2246,7 @@ class DouyinIM:
         joined = " ".join(_norm(item.get(f) or "") for f in
                           ("display", "title", "nickname", "remark"))
         segs = {s for s in (_norm(part) for part in _FUZZY_SPLIT.split(joined)) if s}
-        # 昵称两端的 emoji/符号不算数（「🌈LBX🌈」 这种），中间的一个不动
+        # 昵称两端的 emoji/符号不算数（「🌈示例号🌈」 这种），中间的一个不动
         segs |= {b for b in (_bare(s) for s in segs) if b}
         hits = [n for n in pending
                 if n and not n.startswith(("conv:", "uid:")) and n in segs]
@@ -2078,8 +2310,9 @@ class DouyinIM:
         """
         want = item.get("conv_id")
         self.last_select_verdict = None      # 每次调用都从干净状态开始
-        modes = (("jsclick", "cdp", "mouse") if self._input_mode() == "synth"
-                 else ("mouse", "elclick", "jsclick"))
+        # 点击方式与输入方式解耦：见 PREFER_TRUSTED_CLICK 的注释。
+        modes = (("mouse", "elclick", "jsclick") if self.PREFER_TRUSTED_CLICK
+                 else ("jsclick", "cdp", "mouse"))
         if attempts is not None:
             modes = modes[:attempts]
 
@@ -2108,7 +2341,9 @@ class DouyinIM:
                 t0 = time.time()
                 idx = self._dom_index_of(want)
                 if idx is None:
-                    self._scroll_to(item.get("data_index", 0) * ROW_HEIGHT)
+                    # data_index 可能是 None（`holder ? Number(...) : null`）→ 走
+                    # `_scroll_top_for` 的兜底链，绝不能拿 None 直接乘（见其文档）
+                    self._scroll_to(_scroll_top_for(item))
                     self.page.wait_for_timeout(1200)
                     idx = self._dom_index_of(want)
                     if idx is None:
@@ -2228,11 +2463,38 @@ class DouyinIM:
       return 'hooked:' + String(!!window.__imevHooked);
     })()"""
 
+    # 事件探针钩子（**只当日志证据，不参与决策**，见 `_log_input_evidence`）。
+    # 刻意与 JS_INPUT_HOOK 分开：后者服务于选中链路的点击诊断，只记按下/抬起/点击；
+    # 而"环境到底吞不吞可信事件"必须看**移动**事件 —— CDP 的 `page.mouse.move()`
+    # 只产生 mousemove/pointermove。用独立数组名（__improbe）是为了不污染选中诊断。
+    # ★ 2026-10-15 真机结论：这个探针**判不准** —— 真实 /chat 页面上 CDP 的鼠标/按键
+    #   事件根本到不了页面（只有登录遮罩被打掉的一瞬间收到过一批），老版拿它当判据，
+    #   于是永远判 synth、真实输入从上线起就没走过。现在改由落地校验决定输入方式。
+    JS_INPUT_PROBE = """(() => {
+      if (window.__improbeHooked) return 'hooked';
+      window.__improbeHooked = true;
+      window.__improbe = [];
+      const want = ['pointermove', 'mousemove', 'pointerdown', 'mousedown', 'click'];
+      const rec = (e) => {
+        try { window.__improbe.push({t: e.type, trusted: !!e.isTrusted}); } catch (err) {}
+      };
+      for (const t of want) window.addEventListener(t, rec, true);
+      return 'hooked';
+    })()"""
+
     def _mouse_select(self, index, mode="mouse"):
         """按指定方式选中第 index 个会话。"""
         try:
             hook_state = self.page.evaluate(self.JS_INPUT_HOOK)
-            logger.warning(f"[SEL][HOOK] 安装={hook_state}")
+            # ★ 为什么 None 要降到 debug：JS 第一句就是
+            #   `if (window.__imevHooked) return;` —— 钩子**早已装好**时第二次调用
+            #   返回 undefined（Python 侧 None）。这是正常路径，以前却和真失败一样
+            #   刷 warning（每轮每个目标一条"安装=None"），把真正的失败淹在噪音里。
+            #   有值 = 本次真的装上了 / 装了但状态异常，按原样报。
+            if hook_state is None:
+                logger.debug("[SEL][HOOK] 安装=None（钩子此前已装好，JS 直接 return）")
+            else:
+                logger.warning(f"[SEL][HOOK] 安装={hook_state}")
         except Exception as e:
             logger.warning(f"[SEL][HOOK] 安装失败：{_brief(e)}")
 
@@ -2286,29 +2548,272 @@ class DouyinIM:
         probe = None
         return {"x": x, "y": y, "box": dict(box), "mode": mode}
 
-    def _input_mode(self):
-        """探测真实输入事件能否送达页面。
+    #: 选中会话 / 点发送按钮时，是否优先用「可信点击」（CDP 真实鼠标）。
+    #:
+    #: ★ 2026-10-15 真机实测（dry-run 零发送验证）：
+    #:   * 可信鼠标点在**虚拟化会话列表**上会点错会话（`identity_mismatch` 反证拦住了，
+    #:     但每次都要白试两轮）；
+    #:   * JS 合成点击在列表上稳定命中（生产一直在用）；
+    #:   * 发送按钮的可信点击**尚未验证**（本轮不冒险）。
+    #: 所以固定 False —— 打字方式（见 `_input_mode`）与点击方式分开决策，互不牵连。
+    PREFER_TRUSTED_CLICK = False
 
-        抖音在某些环境（本次是 Linux 容器 / 无头）下会在 document 捕获阶段吞掉
-        所有 trusted 输入事件：CDP 的 mouse/keyboard 全部石沉大海，页面 0 事件。
-        探测一次即可决定后续走 real 还是 synth（JS 合成事件）。
+    #: 点编辑器时的超时（毫秒）。不给超时就会用上下文默认的 `browserActionTimeout`
+    #: （生产 .env 里配了几十秒），"编辑器不可点"的退化情况下每个目标都要白等一遍。
+    EDITOR_CLICK_TIMEOUT_MS = 5000
+
+    #: 落地校验读回的次数与间隔：state 重渲染需要时间，一次读回就判死会白拒一条。
+    READBACK_ATTEMPTS = 3
+    READBACK_SETTLE_MS = 150
+
+    def _input_mode(self):
+        """本次进程用哪种输入方式："real"（CDP 可信输入）/"jsreplace"（JS 原生全选 +
+        `execCommand('insertText')` 覆盖重打）/"synth"（老 JS 合成输入，**追加式**，
+        只在退化时用，见 `_type_synth` 的叠发守卫）。
+
+        ★ 2026-10-15 真机实测推翻了"先探测再决定"这条路（事件探针还在，但只当日志
+        证据、不参与决策）：
+          * 在这个环境的真实 /chat 页面上，CDP 的**按键**事件根本到不了页面 ——
+            `page.keyboard.type()` 打 ASCII 一个字都进不去，鼠标移动也收不到
+            （只有登录遮罩被打掉的那一瞬间收到过一次性的一批 64 条）；
+          * 但 CDP 的 `Input.insertText` 可靠：`<>`、CJK、换行都能原样进去
+            （Playwright 对没有键位映射的字符本来就是降级用它 —— 所以中文一直能进，
+            而 `<`/`>` 走被吞掉的按键通道，这正是老路径"中文进得去、符号丢了"的原因）；
+          * JS 合成输入（`execCommand('insertText')`）依旧可用，是生产一直在走的路。
+
+        所以改成**乐观地先试可信输入**：`_type_real` 全选 + `insert_text` 打进去、
+        当场读回校验，落地失败立刻用 JS 合成输入**覆盖式**重打（不是追加），并把
+        结论缓存到本进程。没缓存时一律先试 "real" —— 试错的代价只是多一次读回。
         """
         mode = getattr(self, "_input_mode_cache", None)
         if mode:
             return mode
+        if not getattr(self, "_input_evidence_logged", False):
+            self._input_evidence_logged = True
+            self._log_input_evidence()
+        return "real"
+
+    def _log_input_evidence(self):
+        """打一行"这个环境收不收可信事件"的日志：**只当证据，不参与决策**。
+
+        真机上它通常是 0 条 —— 那正是我们不再拿它当判据的原因（见 `_input_mode`）。
+        每进程只跑一次；异常一律吞掉，不影响发送。
+        """
         try:
-            self.page.evaluate(self.JS_INPUT_HOOK)
-            self.page.evaluate("() => { window.__imev = []; }")
+            self.page.evaluate(self.JS_INPUT_PROBE)
+            self.page.evaluate("() => { window.__improbe = []; }")
             self.page.mouse.move(2, 2)
+            self.page.mouse.move(6, 6)
             self.page.wait_for_timeout(300)
-            ev = self.page.evaluate("() => (window.__imev || []).splice(0)") or []
-            mode = "real" if ev else "synth"
+            ev = self.page.evaluate("() => (window.__improbe || []).splice(0)") or []
+            trusted = [e for e in ev if isinstance(e, dict) and e.get("trusted")]
+            logger.debug(f"[IM] 事件探针：可信事件 {len(trusted)} 条"
+                         "（只作证据；输入方式由落地校验决定）")
+        except Exception as exc:                                    # noqa: BLE001
+            logger.debug(f"[IM] 事件探针异常：{_brief(exc)}")
+
+    def _type_synth(self, lines, dry):
+        """JS 合成输入（老路径，`isTrusted=false`）。语义与改造前逐字一致。
+
+        只在 synth 模式、或可信输入当场被判"没落地"时使用（见 `_type_real`）。
+        """
+        ready = False
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                if self.page.evaluate(JS_EDITOR_EXISTS):
+                    ready = True
+                    break
+            except Exception:
+                pass
+            self.page.wait_for_timeout(200)
+        logger.debug(f"[SEND] 编辑器就绪={ready}")
+        # ★ 逐行调用、行间留 250ms：Draft.js 每收一次 beforeinput 都会重渲染
+        # contenteditable 并丢掉 DOM 选区，在一个 JS 循环里连插会让第 2 行起
+        # 静默 no-op（症状：只有第一行 + 后面全空行）。详见 JS_TYPE_LINE 的注释。
+        steps = []
+        for i, line in enumerate(lines):
+            steps.append(self.page.evaluate(JS_TYPE_LINE, {
+                "text": line,
+                "enter": i != len(lines) - 1,
+            }))
+            self.page.wait_for_timeout(250)
+        try:
+            empty_now = self.page.evaluate(JS_EDITOR_EMPTY)
         except Exception:
-            mode = "synth"
-        self._input_mode_cache = mode
-        logger.warning(f"[IM] 输入模式探测结果 = {mode}"
-                       + ("（真实输入被页面吞掉，改用 JS 合成事件）" if mode == "synth" else ""))
-        return mode
+            empty_now = None
+        typed = sum(int(s.get("grew", 0)) for s in steps if isinstance(s, dict))
+        want_len = sum(len(l) for l in lines)
+        logger.debug(f"[SEND] 合成输入={steps}  已键入={typed}/{want_len}  输入框为空={empty_now}")
+        # 换行没插进去（三种退化办法都没让行数变多）：文字会全挤在一行。
+        # 不抛异常 —— 宁可发出去一行也不要漏掉这次续火花，但绝不能不说。
+        brk_none = sum(1 for s in steps if isinstance(s, dict) and s.get("brk") == "none")
+        if brk_none:
+            logger.warning(f"[SEND] ⚠️ {brk_none} 处换行没插进去（brk=none）："
+                           f"这条消息会挤成一行（模板里写的换行没生效）")
+        if typed < want_len:
+            logger.warning(f"[SEND] ⚠️ 合成输入缺行：已键入 {typed} 字，应为 {want_len} 字"
+                           f"（lines={lines}）")
+            if typed == 0:
+                if dry == DRY_RUN_FULL:
+                    # dry-run 里不抛：空跑的目的就是**报告**问题而不是炸掉整轮
+                    logger.warning("[DRY] 合成输入一行都没进去（dry-run 不发送）")
+                else:
+                    raise RuntimeError("合成输入一行都没进去，拒绝发送空消息")
+        # ★ 叠发守卫（追加式输入的唯一防线）：`JS_TYPE_LINE` 是"把光标挪到末尾再插"，
+        #   编辑器里有残留时会把上一条 + 这一条叠成一条发出去。判据要**窄**：只有
+        #   "期望文本整段出现在读回里、而读回并不等于期望"才是叠发特征；掉字是另一
+        #   回事，按上面的老口径只告警（产品取舍：宁可发一行也不漏）。
+        if typed:
+            got = self._editor_probe().get("text")
+            if (got is not None and not _same_text(got, lines)
+                    and _norm_all("\n".join(lines)) in _norm_all(got)):
+                raise RuntimeError("合成输入把消息叠在残留文本后面了，拒绝发送"
+                                   "（避免叠发两条）")
+
+    def _select_all(self, editor=None):
+        """把编辑器内容全选（JS 选区），失败返回 False。
+
+        只动选区、不插字，所以失败也无害；真正的判据是打完以后的读回校验。
+
+        ★ 这是**元素级**选区（`Range.selectNodeContents`），它只对 CDP 的
+          `page.keyboard.insert_text()` 有效；JS 的 `execCommand('insertText')` 必须配
+          浏览器原生全选（见 `JS_REPLACE_TEXT` 的注释与 `_type_js_replace`），
+          两者混用会得到错乱内容 —— 别把这里的选区当成通用做法。
+        """
+        try:
+            return self.page.evaluate(JS_SELECT_ALL) is not None
+        except Exception as exc:                                    # noqa: BLE001
+            logger.debug(f"[SEND] 全选编辑器失败：{_brief(exc)}")
+            return False
+
+    def _typing_landed(self, lines):
+        """打完以后读回一次：内容是不是**一字不差**地进了编辑器。
+
+        ★ 判据是"精确相等"（逐行比，见 `_same_text`），不是老版的"不短于期望"：
+        2026-10-15 真机实测，可信输入这条路**会掉字**（`page.keyboard.type` 打
+        `<`/`>` 就是进不去，8 字消息只剩 6 字），"不短于"会把残缺消息判成落地成功、
+        直接发出去。
+        ★ 读回要**重试几拍**：`insert_text` 之后编辑器的 state 未必立刻重渲染完，
+          一次读回就判死会把"其实打进去了"误判成没落地 —— 白退一次、甚至白拒一条。
+        ★ 读不回来（页面退化）不算反证 —— 与 `_residue_echo` 同一个取舍，但必须留痕。
+        """
+        got = None
+        attempts = max(1, int(self.READBACK_ATTEMPTS))
+        for i in range(attempts):
+            probe = self._editor_probe()
+            if probe.get("exists") is False:
+                # 编辑器**确定不存在**：字不可能在里面 —— 这是反证，不是"读不到"。
+                logger.warning("[SEND] ⚠️ 输入校验：编辑器不存在（字不可能打进去）")
+                return False
+            got = probe.get("text")
+            if got is not None and _same_text(got, lines):
+                return True
+            if i + 1 < attempts:
+                try:
+                    self.page.wait_for_timeout(self.READBACK_SETTLE_MS)
+                except Exception:
+                    break
+        if got is None:
+            logger.warning("[SEND] ⚠️ 输入读回取不到（页面退化）：无法确认这一条打进去了，"
+                           "按「读不回来不算反证」继续（与 _residue_echo 同一取舍）")
+            return True
+        logger.warning(f"[SEND] ⚠️ 输入读回不一致：期望 {lines!r}"
+                       f" / 实际 {line_list(got)!r}")
+        return False
+
+    def _try_trusted_typing(self, editor, lines):
+        """可信输入一轮：真点编辑器 → 全选 → `insert_text` → 读回校验。
+
+        返回 True 只表示**读回确认**期望文本已经精确落在输入框里；任何一步失败都返回
+        False（由调用方决定重试还是换通道），不抛异常 —— 于是"再试一次"变成一行调用。
+        """
+        if editor is None:
+            return False
+        text = "\n".join(lines)
+        # 先真点一下编辑器：JS 的 focus() 只改焦点，而"用户正在输入"这个信号
+        # （发送按钮变红可点）历来是靠真实点击带出来的 —— 老路径一直这么做。
+        try:
+            # ★ 必须写 self.：类常量在方法体里裸写会变成**全局名查找** →
+            #   NameError，被下面的 except 吞掉后表现为「点了但超时没传下去」
+            #   （真机上就这么错过一次：点击一直用上下文默认的几十秒超时）。
+            editor.click(timeout=self.EDITOR_CLICK_TIMEOUT_MS)
+        except Exception as exc:                                # noqa: BLE001
+            logger.debug(f"[SEND] 点击编辑器失败：{_brief(exc)}")
+        if not self._select_all(editor):
+            logger.warning("[SEND] ⚠️ 编辑器全选失败")
+            return False
+        try:
+            self.page.keyboard.insert_text(text)
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(f"[SEND] ⚠️ 可信输入异常：{_brief(exc)}")
+            return False
+        return self._typing_landed(lines)
+
+    def _type_real(self, editor, lines, dry):
+        """可信输入（CDP）：**全选 → `insert_text` 覆盖** → 读回校验。
+
+        ★ 为什么是"全选 + 覆盖"而不是老设计的"清空 + 重打"：2026-10-15 真机实测，
+          这个编辑器（字节 EditorKit，不是 Draft）的清空**不可信** —— `_clear_editor`
+          当场判"已清空"、读回也是空的，可下一次输入时旧文本又从编辑器自己的 state
+          里冒出来（`清空 "XYZ"` 后打 "TAIL" 得到 "TAXY"；老退回路径实测叠成了
+          `续火花续火花˵ㅿ`）。而"JS 全选 + 可信 insertText"能**替换**选区内容，
+          一次就把输入框变成期望的那条消息，根本不需要清空。
+        ★ 落地校验不过就当场退回 JS 合成输入（同样全选 + 覆盖，不是追加），并把结论
+          缓存到本进程；两条路都打不进去时**拒绝发送** —— 发一条残缺/重复的消息比
+          漏发一条更糟（与 `_residue_echo` 同一个取舍）。
+        """
+        if self._try_trusted_typing(editor, lines):
+            self._input_mode_cache = "real"
+            return True
+        # 兜底①：**再试一次可信输入**。真机上"没落地"多半是焦点/选区还没生效
+        #   （刚切过来的会话、上一轮的选区还挂在旧节点上），重试一次的代价远小于
+        #   漏发一条 —— 而"漏发"正是这个项目最痛的事故形态。重新取一次编辑器，
+        #   因为上一轮的节点可能已经被 React 换掉了。
+        logger.warning("[SEND] ⚠️ 可信输入没落地 → 重新点一次编辑器再试一遍")
+        editor2 = self._editor()
+        if editor2 is not None and self._try_trusted_typing(editor2, lines):
+            self._input_mode_cache = "real"
+            return True
+        # 兜底②：JS 合成输入覆盖。**尽力而为**，不是可靠通道（见其注释里的真机取证）；
+        #   它成功与否由 `_type_js_replace` 自己的读回校验决定，失败就抛（拒发）。
+        logger.warning("[SEND] ⚠️ 可信输入两次都没落地 → 改用 JS 合成输入覆盖重打一遍"
+                       "（后续目标也走 jsreplace，不再重复试错）")
+        self._input_mode_cache = "jsreplace"
+        return self._type_js_replace(lines, dry)
+
+    def _type_js_replace(self, lines, dry):
+        """JS 合成输入的**覆盖式**版本：原生全选 → `execCommand('insertText')` 替换。
+
+        ★ 与老 `_type_synth` 的区别：老路径把光标挪到末尾再插（**追加**），编辑器里
+          有残留时会把上一条 + 这一条叠成一条发出去；这条是"先全选再插"（**替换**）。
+        ★ 真机取证：这条通道在本编辑器上**不可靠**（`/tmp/ml_probe5.py`、
+          `/tmp/ml_probe7.py` 用正确的对象形式全挂：ok:false、内容不变；
+          `/tmp/ml_probe2.py` 成功过一次），所以它只是"尽力而为"的**第二**兜底 ——
+          第一兜底是**再试一次可信输入**（见 `_type_real`）；成败一律由读回校验决定。
+        ★ 两条安全线：
+          ① 全选失败时，只有在**确认编辑器是空的**情况下才敢直接插（否则就是追加）；
+          ② 覆盖完必须读回校验，不过就抛 —— 宁可不发，也不发残缺/叠字的消息。
+        """
+        text = "\n".join(lines)
+        if not self._select_all():
+            try:
+                empty = self.page.evaluate(JS_EDITOR_EMPTY)
+            except Exception:                                       # noqa: BLE001
+                empty = None
+            if empty is not True:
+                raise RuntimeError("编辑器全选失败且不能确认它是空的，拒绝发送（避免叠发两条）")
+            logger.debug("[SEND] 编辑器全选失败但确认为空：直接覆盖输入")
+        try:
+            r = self.page.evaluate(JS_REPLACE_TEXT, {"text": text})
+            if isinstance(r, dict) and r.get("sel_in") is False:
+                logger.debug("[SEND] JS 覆盖输入：原生全选没落在编辑器里（已退回元素级选区）")
+        except Exception as exc:                                    # noqa: BLE001
+            logger.warning(f"[SEND] ⚠️ JS 覆盖输入异常：{_brief(exc)}")
+        if self._typing_landed(lines):
+            return True
+        raise RuntimeError("JS 合成输入没把消息打进输入框，拒绝发送（避免发出残缺消息）")
+
 
     def _js_click_send(self):
         try:
@@ -2348,9 +2853,11 @@ class DouyinIM:
                       dry_run=DRY_RUN_OFF):
         """给「已选中」的会话输入并发送。
 
-        输入走真实键盘事件（Draft.js 依赖 beforeinput/keydown 序列更新 EditorState，
-        直接改 DOM 或只派发 input 事件都不可靠）。拟人节奏由 cloakbrowser humanize 负责，
-        这里不重复加延迟。
+        输入走「全选 + 可信 insertText」：CDP 的 `Input.insertText` 走浏览器自己的输入
+        管线（2026-10-15 真机实测可靠：`<>`、CJK、换行都能原样进去），先全选则保证是
+        **覆盖**而不是追加。老路（`page.keyboard.type` 的按键序列 / 直接派发合成事件）
+        在这套页面上要么被吞、要么不进编辑器 state —— 取证与设计见 `_type_real`。
+        拟人节奏由 cloakbrowser humanize 负责，这里不重复加延迟。
 
         `dry_run` 三档（见 `norm_dry_run`）：
         * `off`    —— 正常发送
@@ -2436,50 +2943,15 @@ class DouyinIM:
         logger.debug(f"[SEND] 待发送文本 {text!r} → {len(lines)} 行：{lines!r}")
         if text != "\n".join(lines):
             logger.debug(f"[SEND] 换行归一：{text!r} → {lines!r}")
-        if self._input_mode() == "synth":
-            ready = False
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline:
-                try:
-                    if self.page.evaluate(JS_EDITOR_EXISTS):
-                        ready = True
-                        break
-                except Exception:
-                    pass
-                self.page.wait_for_timeout(200)
-            logger.debug(f"[SEND] 编辑器就绪={ready}")
-            # ★ 逐行调用、行间留 250ms：Draft.js 每收一次 beforeinput 都会重渲染
-            # contenteditable 并丢掉 DOM 选区，在一个 JS 循环里连插会让第 2 行起
-            # 静默 no-op（症状：只有第一行 + 后面全空行）。详见 JS_TYPE_LINE 的注释。
-            steps = []
-            for i, line in enumerate(lines):
-                steps.append(self.page.evaluate(JS_TYPE_LINE, {
-                    "text": line,
-                    "enter": i != len(lines) - 1,
-                }))
-                self.page.wait_for_timeout(250)
-            try:
-                empty_now = self.page.evaluate(JS_EDITOR_EMPTY)
-            except Exception:
-                empty_now = None
-            typed = sum(int(s.get("grew", 0)) for s in steps if isinstance(s, dict))
-            want_len = sum(len(l) for l in lines)
-            logger.debug(f"[SEND] 合成输入={steps}  已键入={typed}/{want_len}  输入框为空={empty_now}")
-            # 换行没插进去（三种退化办法都没让行数变多）：文字会全挤在一行。
-            # 不抛异常 —— 宁可发出去一行也不要漏掉这次续火花，但绝不能不说。
-            brk_none = sum(1 for s in steps if isinstance(s, dict) and s.get("brk") == "none")
-            if brk_none:
-                logger.warning(f"[SEND] ⚠️ {brk_none} 处换行没插进去（brk=none）："
-                               f"这条消息会挤成一行（模板里写的换行没生效）")
-            if typed < want_len:
-                logger.warning(f"[SEND] ⚠️ 合成输入缺行：已键入 {typed} 字，应为 {want_len} 字"
-                               f"（lines={lines}）")
-                if typed == 0:
-                    if dry == DRY_RUN_FULL:
-                        # dry-run 里不抛：空跑的目的就是**报告**问题而不是炸掉整轮
-                        logger.warning("[DRY] 合成输入一行都没进去（dry-run 不发送）")
-                    else:
-                        raise RuntimeError("合成输入一行都没进去，拒绝发送空消息")
+        # ★ 记账必须在**尝试输入之前**：输入本身就可能把字留在编辑器里（哪怕随后
+        #   抛异常），放到输入之后会让"输入失败"的那一轮以为编辑器还是干净的，
+        #   下一个目标就可能把残留一起发出去。
+        self._editor_dirty = True
+        mode = self._input_mode()
+        if mode == "synth":
+            self._type_synth(lines, dry)
+        elif mode == "jsreplace":
+            self._type_js_replace(lines, dry)
         else:
             editor = self._editor()
             if editor is None:
@@ -2491,16 +2963,7 @@ class DouyinIM:
                                 "text_len": len(text)})
                     return out
                 raise RuntimeError("找不到聊天输入框")
-            editor.click()
-            for i, line in enumerate(lines):
-                if line:
-                    self.page.keyboard.type(line)
-                if i != len(lines) - 1:
-                    self.page.keyboard.press("Shift+Enter")
-
-        # 从这一刻起编辑器里有我们写的字 —— 不论后面发没发成功都得记着：Draft 的
-        # "DOM 看着空了、state 还留着"只有本进程能记账（见 _clear_editor）。
-        self._editor_dirty = True
+            self._type_real(editor, lines, dry)
 
         # ④ dry-run=full：读回校验 + 清空编辑器，不点发送
         if dry == DRY_RUN_FULL:
@@ -2558,11 +3021,21 @@ class DouyinIM:
         msg_before = self._msg_state()
 
         # ⑤ 发送：按钮优先（有内容时变红可点），退化到回车
-        how = self._js_click_send() if self._input_mode() == 'synth' else self._click_send()
+        # 点击方式与输入方式解耦：见 PREFER_TRUSTED_CLICK 的注释。
+        how = self._click_send() if self.PREFER_TRUSTED_CLICK else self._js_click_send()
         logger.debug(f"[SEND] 发送方式={how}  conv_id={hit.get('conv_id')}")
 
         if not wait_receipt:
-            return dict(base, ok=True, via=how)
+            # `how` 就是"点下去过"的凭据：synth 模式下 `_js_click_send()` 找不到按钮
+            # 或 JS 抛异常时返回 None，`_click_send()` 也可能拿不到按钮。以前这里
+            # 无条件 ok=True —— 于是**一个字符都没出去**也会记成"已发送"，当天不再
+            # 重试，朋友那边火花照断，而账本/面板上写着成功。拿不到凭据只能算失败。
+            ok = bool(how)
+            if not ok:
+                logger.warning("[SEND] ⚠️ 没拿到发送凭据（发送按钮没找到或 JS 点击抛异常）："
+                               "这一条按失败记账，不能当已发送")
+            return dict(base, ok=ok, via=how,
+                        reason="" if ok else "没拿到发送凭据（按钮没找到或点击失败）")
 
         rc = self._wait_receipt(sends_before, msg_before, text, timeout, hit=hit)
         if rc["http"]:
@@ -2582,7 +3055,7 @@ class DouyinIM:
             # 没有回执 ≠ 发送失败：也可能登录态已经没了（页面还是 IM 的样子）。
             # 复检一次，把「掉登录」从「发送失败」里分出来 —— 不做这一步，掉登录
             # 会被记成"跑了但 4 个目标失败"，整轮照样按 ok 记账，当天不再重试，
-            # 面板上也没有任何提示（2026-10-09 wheat 的真实事故）。
+            # 面板上也没有任何提示（2026-10-09 示例号 的真实事故）。
             lg = self.recheck_login()
             if str((lg or {}).get("state") or "") != "LOGGED_IN":
                 logger.error(f"[SEND] ⛔ 放弃发送：登录已失效"
@@ -2714,9 +3187,19 @@ class DouyinIM:
 
 
     def _editor(self):
+        """编辑器节点（Locator）。
+
+        ★ 选择器顺序**必须与 `JS_EDITOR_SELECTORS.pick()` 一致**（那个常量的注释里
+          就是这么约定的）：读回文本的、判空的、全选的、打字的必须是**同一个节点**，
+          否则就是"点的是 A、选的是 B"。以前这里多一条
+          `.messageEditorimChatEditorContainer`，真机上它命中的是外层容器
+          （`.editor-kit-container` 那一层）而不是 contenteditable 本体。
+        """
         for sel in ('[data-e2e="msg-input"] .public-DraftEditor-content',
                     '.DraftEditor-root [contenteditable="true"]',
-                    '.messageEditorimChatEditorContainer'):
+                    '.messageMsgInput [contenteditable="true"]',
+                    '[data-e2e="msg-input"] [contenteditable="true"]',
+                    '[contenteditable="true"]'):
             try:
                 loc = self.page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible():
@@ -2773,8 +3256,8 @@ class DouyinIM:
         http = dom = None
         last_http = None          # 最后一条响应（可能是失败的，用来解释原因）
         dom_conv_off = False
+        last_conv = None          # 最后**读到过**的"当前会话 id"（气泡没涨也要留着）
         want = (hit or {}).get("conv_id")
-        head = (text or "")[:8]
 
         while time.time() - t0 < timeout:
             for rec in self.mon.sends[sends_before:]:
@@ -2784,13 +3267,19 @@ class DouyinIM:
             if dom is None:
                 st = self._msg_state()
                 st_conv = st.get("convId")
+                if st_conv:
+                    # 气泡数涨不涨都要留档：收件人能不能点名全靠它。
+                    last_conv = st_conv
                 if want and st_conv and st_conv != want:
                     # 发送后当前会话变成了别人 → 立刻停，这比"没发出去"严重
                     dom_conv_off = True
                     break
                 if (st.get("count", 0) > msg_before.get("count", 0)
                         and st.get("lastFromMe")):
-                    if not head or (st.get("lastText") or "").startswith(head):
+                    # 文本这一条证据交给 `_dom_text_matches` 归一化后比（多行模板 /
+                    # emoji 开头以前永远比不中 → 已发成功却判失败 → 重发成两条）。
+                    # 「气泡数增加」与「lastFromMe」两个条件原样保留在上面，不放宽。
+                    if _dom_text_matches(text, st.get("lastText")):
                         dom = st
             if http and dom:
                 break
@@ -2808,13 +3297,13 @@ class DouyinIM:
             except Exception:
                 after = {}
         if not after.get("convId"):
-            # DOM 没给出 convId 时**不要**凭空填目标 id，否则会把"看不到"
-            # 伪装成"确认了目标" —— 这正是上游的漏洞形态。但也不能留一个
-            # 空的 convId：`verify_receipt` 只有在真拿到 id 时才敢判"发错人"，
-            # 看不到就是看不到，让判定落到"没确认"上。
+            # 气泡没涨时 `dom` 是空的，但"发送后当前会话是哪一个"这个读数往往拿得到
+            # （`JS_CURRENT_CONV` 在选中链路上一直可用），所以填**真读到过**的
+            # `last_conv`。绝不凭空填目标 id：把"看不到"伪装成"确认了目标"正是上游
+            # 的漏洞形态；真的没读到就是 None，让判定落到"没确认收件人"上。
             after.setdefault("count", (dom or {}).get("count", 0))
             after.setdefault("lastFromMe", (dom or {}).get("lastFromMe", False))
-            after["convId"] = None
+            after["convId"] = last_conv
 
         receipts = list(self.mon.sends[sends_before:])
         if last_http is not None and not any(r is last_http for r in receipts):

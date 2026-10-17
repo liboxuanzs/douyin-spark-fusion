@@ -17,19 +17,42 @@
 
 {% block content %}
 <style>
+  /* 工具栏排成两行：上面一行控件（行数 / 自动刷新 / 搜索 / 刷新 / 下载），下面
+     一行状态（最近更新 / 行数 / 文件异常）。原来挤成一行时，宽度不够就自己
+     折成三行、宽窄还各不相同 —— 现在无论窗口多宽都是同一副样子。 */
   .logs-toolbar {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    flex-wrap: wrap;
+    gap: 10px;
     margin-bottom: 16px;
   }
-  .logs-toolbar__left {
+  .logs-toolbar__controls,
+  .logs-toolbar__status {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+    min-width: 0;
+  }
+  .logs-toolbar__controls .button {
+    flex: 0 0 auto;
+  }
+  #logs-filter {
+    flex: 1 1 220px;
+    min-width: 160px;
+    max-width: 420px;
+  }
+  @media (max-width: 640px) {
+    /* 手机上：搜索框独占一行、两个按钮对半分一行，别各占一行留大片空白 */
+    #logs-filter {
+      flex: 1 1 100%;
+      max-width: none;
+    }
+    .logs-toolbar__controls .button {
+      flex: 1 1 auto;
+      justify-content: center;
+    }
   }
   .logs-meta {
     display: inline-flex;
@@ -146,24 +169,7 @@
   </div>
 
   <div class="logs-toolbar">
-    <div class="logs-toolbar__left">
-      <span class="logs-meta">
-        <span class="dot" id="logs-live-dot"></span>
-        <span id="logs-status-text">最近更新：刚刚</span>
-      </span>
-      <span class="logs-meta">
-        <span class="dot"></span>
-        <span id="logs-line-count">{{ (log_tail.as_text()|trim).splitlines()|length }} 行</span>
-      </span>
-      {% if not log_tail.exists %}
-      <span class="status-chip danger">文件不存在</span>
-      {% elif log_tail.error %}
-      <span class="status-chip danger">{{ log_tail.error }}</span>
-      {% elif log_tail.truncated %}
-      <span class="status-chip warning">已按字节上限截断</span>
-      {% endif %}
-    </div>
-    <div class="logs-toolbar__left">
+    <div class="logs-toolbar__controls">
       <label class="logs-meta" for="logs-lines">行数
         <select class="logs-select" id="logs-lines">
           {% for option in [50, 100, 300, 800, 2000] %}
@@ -183,6 +189,23 @@
       <a class="button button-quiet" id="logs-download-btn" href="/ops/logs/download">
         <i data-lucide="download"></i><span>下载日志</span>
       </a>
+    </div>
+    <div class="logs-toolbar__status">
+      <span class="logs-meta">
+        <span class="dot" id="logs-live-dot"></span>
+        <span id="logs-status-text">最近更新：刚刚</span>
+      </span>
+      <span class="logs-meta">
+        <span class="dot"></span>
+        <span id="logs-line-count">{{ (log_tail.as_text()|trim).splitlines()|length }} 行</span>
+      </span>
+      {% if not log_tail.exists %}
+      <span class="status-chip danger">文件不存在</span>
+      {% elif log_tail.error %}
+      <span class="status-chip danger">{{ log_tail.error }}</span>
+      {% elif log_tail.truncated %}
+      <span class="status-chip warning">已按字节上限截断</span>
+      {% endif %}
     </div>
   </div>
 
@@ -258,18 +281,28 @@
         const html = await res.text();
         const doc = new DOMParser().parseFromString(html, "text/html");
         const body = doc.getElementById("log-body");
-        renderBody(body ? body.textContent : "");
+        if (!body) {
+          // 会话过期时 `/ops/log-tail` 是 303 跳 /login，fetch 自动跟随拿到登录页
+          // （`res.ok` 为真）—— 老代码会把日志清空并报"刷新成功"（2026-10-17 前端审计）。
+          throw new Error("登录已过期（请重新登录）");
+        }
+        renderBody(body.textContent);
         if (statusEl) statusEl.textContent = fmtTime();
       } catch (err) {
         if (statusEl) statusEl.textContent = `刷新失败：${err.message}`;
       }
     };
 
+    const refreshIfVisible = () => {
+      // 手机上开着自动刷新后切走/锁屏时，没必要每 5 秒拉一次 512KB 日志尾部。
+      if (document.visibilityState === "visible") refresh();
+    };
+
     const setLive = (on) => {
       if (liveDot) liveDot.classList.toggle("live", on);
       if (timer) { clearInterval(timer); timer = null; }
       if (on) {
-        timer = setInterval(refresh, 5000);
+        timer = setInterval(refreshIfVisible, 5000);
         refresh();
       }
     };
@@ -279,6 +312,12 @@
     if (linesEl) linesEl.addEventListener("change", refresh);
     if (filterEl) filterEl.addEventListener("input", applyFilter);
     if (statusEl) statusEl.textContent = fmtTime();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && toggle && toggle.checked) refresh();
+    });
+    window.addEventListener("pagehide", () => {
+      if (timer) { clearInterval(timer); timer = null; }
+    });
   })();
 </script>
 {% endblock %}

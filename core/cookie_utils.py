@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 
 # 只保留这些域下的 Cookie，避免把无关站点的 Cookie 灌进任务
 TARGET_DOMAINS = ("douyin.com", "bytedance.com", "snssdk.com", "iesdouyin.com", "amemv.com")
@@ -127,6 +128,43 @@ def parse_cookies(text: str):
 def has_login_cookie(cookies) -> bool:
     """本地这份 cookie 里有没有登录态条目（决定存下来有没有用）。"""
     return any(str((c or {}).get("name") or "") in LOGIN_COOKIE_NAMES for c in (cookies or []))
+
+
+def _cookie_expired(item, now=None) -> bool:
+    """这条 cookie 的 `expires` 是不是已经过去了。
+
+    Playwright / storage_state 里的 `expires` 是 Unix 秒；`-1`（以及缺失、0）表示
+    **会话 cookie**（浏览器关掉才没），一律当作还没过期。值解不出来时也当没过期：
+    "少判一次过期"是保守方向，不会把能用的 cookie 判死。
+    """
+    raw = (item or {}).get("expires")
+    if raw is None:
+        return False
+    try:
+        exp = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if exp <= 0:
+        return False
+    return exp <= (time.time() if now is None else float(now))
+
+
+def has_usable_login_cookie(cookies, *, now=None) -> bool:
+    """有没有**还没过期**的登录 cookie。
+
+    与 `has_login_cookie` 只差一条：`expires` 已经是过去时间的不算数。掉登录之后
+    留下的那份 `sessionid` 往往还带着上一次的 `expires`，名字判据会把它当成
+    "有登录态"（面板于是把一份写进去也发不出消息的 cookie 存下来、还说保存成功）。
+    "还认不认"最终仍由服务端说了算，这里只排除**明确写着已经过期**的那种。
+    """
+    for item in cookies or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "") not in LOGIN_COOKIE_NAMES:
+            continue
+        if not _cookie_expired(item, now):
+            return True
+    return False
 
 
 def login_cookie_signature(cookies) -> tuple:

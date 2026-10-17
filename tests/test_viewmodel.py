@@ -264,28 +264,28 @@ class PerAccountRunTests(unittest.TestCase):
     """每个账号可以有自己的发送时间（`core/schedule.py` 的派发器每 5 分钟只为当时到点
     的账号跑一轮），所以"全局最近一轮"里通常只有一两个账号。
 
-    2026-10-07 线上就是这么谎报的：wheat 17:35 已经 4/4 强确认，20:35 那一轮只跑了
-    另一个账号，wheat 的卡立刻变成「未尝试 4 / 还没跑过」。
+    2026-10-07 线上就是这么谎报的：示例号 17:35 已经 4/4 强确认，20:35 那一轮只跑了
+    另一个账号，示例号 的卡立刻变成「未尝试 4 / 还没跑过」。
     """
 
-    WHEAT_TARGETS = ["全都去", "^ω^, 我先鼠了…", "🌈LBX🌈", "·7"]
+    WHEAT_TARGETS = ["好友A", "好友B", "🌈示例号🌈", "好友C"]
 
     def _snapshots(self):
         return [
-            _snapshot(username="wheat", unique_id="10050yi",
+            _snapshot(username="示例号", unique_id="11223344556",
                       targets=list(self.WHEAT_TARGETS), target_count=4),
-            _snapshot(username="🌈LBX🌈", unique_id="76998876121",
+            _snapshot(username="🌈示例号🌈", unique_id="12345678905",
                       targets=["甲", "乙", "丙"], target_count=3),
         ]
 
-    def _wheat_run(self):
-        """wheat 17:35 那一轮：4 个目标全部强确认。"""
+    def _示例号_run(self):
+        """示例号 17:35 那一轮：4 个目标全部强确认。"""
         return _record(
             run_id="20261007-173500-tmr1",
             started_text="2026-10-07 17:35:00",
             accounts=[
                 _account(
-                    username="wheat", unique_id="10050yi",
+                    username="示例号", unique_id="11223344556",
                     targets=list(self.WHEAT_TARGETS), sent_ok=4,
                     entries=[_entry(name) for name in self.WHEAT_TARGETS],
                 )
@@ -293,13 +293,13 @@ class PerAccountRunTests(unittest.TestCase):
         )
 
     def _other_run(self):
-        """20:35 那一轮：只有另一个账号（wheat 不在这里面）。"""
+        """20:35 那一轮：只有另一个账号（示例号 不在这里面）。"""
         return _record(
             run_id="20261007-203500-tmr2",
             started_text="2026-10-07 20:35:00",
             accounts=[
                 _account(
-                    username="🌈LBX🌈", unique_id="76998876121",
+                    username="🌈示例号🌈", unique_id="12345678905",
                     targets=["甲", "乙", "丙"], sent_ok=3,
                     entries=[_entry("甲"), _entry("乙"), _entry("丙")],
                 )
@@ -308,31 +308,31 @@ class PerAccountRunTests(unittest.TestCase):
 
     def _pool(self):
         # 账本是新→旧的
-        return [self._other_run(), self._wheat_run()]
+        return [self._other_run(), self._示例号_run()]
 
     def test_总览每张卡取自己最近一轮(self) -> None:
         cards = viewmodel.account_cards(
             self._snapshots(), self._other_run(), records=self._pool(), per_account=True
         )
         by_id = {card["unique_id"]: card for card in cards}
-        wheat = by_id["10050yi"]
-        self.assertEqual(wheat["confirmed"], 4, "wheat 的 4 个目标上一轮已经强确认了")
-        self.assertEqual(wheat["pending"], 0, "不能因为最近一轮没轮到它就报「未尝试 4」")
-        self.assertEqual(wheat["run_id"], "20261007-173500-tmr1", "数字必须来自它自己那一轮")
-        self.assertNotEqual(wheat["state"], "idle", "它跑过、而且全成功，不能显示成还没跑过")
-        self.assertFalse(wheat["run_missing"])
-        self.assertEqual(by_id["76998876121"]["confirmed"], 3)
+        示例号 = by_id["11223344556"]
+        self.assertEqual(示例号["confirmed"], 4, "示例号 的 4 个目标上一轮已经强确认了")
+        self.assertEqual(示例号["pending"], 0, "不能因为最近一轮没轮到它就报「未尝试 4」")
+        self.assertEqual(示例号["run_id"], "20261007-173500-tmr1", "数字必须来自它自己那一轮")
+        self.assertNotEqual(示例号["state"], "idle", "它跑过、而且全成功，不能显示成还没跑过")
+        self.assertFalse(示例号["run_missing"])
+        self.assertEqual(by_id["12345678905"]["confirmed"], 3)
 
     def test_运行记录页冻在选中那一轮并说清没轮到它(self) -> None:
         cards = viewmodel.account_cards(
             self._snapshots(), self._other_run(), records=self._pool(), per_account=False
         )
-        wheat = {card["unique_id"]: card for card in cards}["10050yi"]
-        self.assertTrue(wheat["run_missing"], "这一轮里没有它，模板要靠这个字段解释")
-        self.assertEqual(wheat["run_id"], "20261007-203500-tmr2", "这一页必须冻在选中那一轮")
-        self.assertEqual(wheat["pending"], 4)
-        self.assertEqual(wheat["own_run_id"], "20261007-173500-tmr1", "它自己那一轮也要带出去")
-        self.assertEqual(wheat["own_run_text"], "2026-10-07 17:35:00")
+        示例号 = {card["unique_id"]: card for card in cards}["11223344556"]
+        self.assertTrue(示例号["run_missing"], "这一轮里没有它，模板要靠这个字段解释")
+        self.assertEqual(示例号["run_id"], "20261007-203500-tmr2", "这一页必须冻在选中那一轮")
+        self.assertEqual(示例号["pending"], 4)
+        self.assertEqual(示例号["own_run_id"], "20261007-173500-tmr1", "它自己那一轮也要带出去")
+        self.assertEqual(示例号["own_run_text"], "2026-10-07 17:35:00")
 
     def test_从没跑过的账号说的是没试过(self) -> None:
         cards = viewmodel.account_cards(
@@ -374,7 +374,7 @@ class PerAccountRunTests(unittest.TestCase):
     def test_运行记录页的汇总仍然只是那一轮(self) -> None:
         summary = self._build(per_account=False, selected=self._other_run())["summary"]
         self.assertEqual(summary["confirmed"], 3)
-        self.assertEqual(summary["pending"], 4, "选中那一轮里 wheat 确实一个都没试过")
+        self.assertEqual(summary["pending"], 4, "选中那一轮里 示例号 确实一个都没试过")
         self.assertFalse(summary["mixed_runs"])
         self.assertEqual(summary["run_id"], "20261007-203500-tmr2")
 
@@ -382,7 +382,7 @@ class PerAccountRunTests(unittest.TestCase):
         dry = self._other_run()
         dry["dry_run"] = "dry"
         view = viewmodel.build(
-            records=[dry, self._wheat_run()],
+            records=[dry, self._示例号_run()],
             accounts=self._snapshots(),
             lock=_FakeLock(),
             rate_limit=_FakeRate(),
@@ -505,11 +505,94 @@ class ScheduleTimerTests(unittest.TestCase):
         self.assertEqual(payload["schedule"]["nextTriggerText"], "下一个 甲：今天 23:59",
                          "app.js 读的就是这个键，缺了会一律写成'今天该发的都发完了'")
 
+    def test_值槽用谁几点的短句而不是整句话(self) -> None:
+        """值槽是 26px 大字，塞整句话会撑成两三行、把整条概览拉高。
+
+        派发器模式下要额外给一句短的（"甲 · 已过 23:59"）给值槽用，整句话留给
+        提示行；app.js 轮询时读的就是这个键，缺了字号/句式会每 10 秒跳一次。
+        """
+        view = viewmodel.build(
+            records=[],
+            accounts=[_snapshot(targets=["甲"], target_count=1, send_time="23:59")],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            next_run=None,
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True,
+                   "state": "enabled", "dispatchMinutes": 5},
+            next_due={"at": "2026-10-07T23:59:00+08:00", "name": "甲",
+                      "due_text": "23:59", "imminent": True,
+                      "text": "下一个 甲：已过 23:59，等下一次敲门就发"},
+            default_dry_run="off",
+        )
+        schedule = view["schedule"]
+        self.assertEqual(schedule["nextTriggerShort"], "甲 · 已过 23:59")
+        self.assertEqual(schedule["nextTriggerText"], "下一个 甲：已过 23:59，等下一次敲门就发",
+                         "整句话要原样留着：提示行和没有短句时的回落都靠它")
+        payload = viewmodel.overview_payload(view)
+        self.assertEqual(payload["schedule"]["nextTriggerShort"], "甲 · 已过 23:59",
+                         "app.js 读的就是这个键")
+
+    def test_还没过点时短句不写已过(self) -> None:
+        view = viewmodel.build(
+            records=[],
+            accounts=[_snapshot(targets=["甲"], target_count=1, send_time="23:59")],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            next_run=None,
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True,
+                   "state": "enabled", "dispatchMinutes": 5},
+            next_due={"at": "2026-10-07T20:00:00+08:00", "name": "甲",
+                      "due_text": "23:59", "imminent": False,
+                      "text": "下一个 甲：今天 23:59"},
+            default_dry_run="off",
+        )
+        self.assertEqual(view["schedule"]["nextTriggerShort"], "甲 · 23:59")
+
+    def test_拼不出短句时留空让前端回落(self) -> None:
+        """单测/老调用方可能只喂 {at, text}（没有 name/due_text）：短句留空，
+        nextTriggerText 照旧 —— 值槽回落到整句话，只是字小一号，不许报错。"""
+        view = viewmodel.build(
+            records=[],
+            accounts=[_snapshot(targets=["甲"], target_count=1, send_time="23:59")],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            next_run=None,
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True,
+                   "state": "enabled", "dispatchMinutes": 5},
+            next_due={"at": "2026-10-07T23:59:00+08:00", "text": "下一个 甲：今天 23:59"},
+            default_dry_run="off",
+        )
+        schedule = view["schedule"]
+        self.assertEqual(schedule["nextTriggerShort"], "")
+        self.assertEqual(schedule["nextTriggerText"], "下一个 甲：今天 23:59")
+
+    def test_定时器没启用时短句也要清空(self) -> None:
+        """disabled 的定时器不会触发：值槽连短句都不许留，否则面板上会有个
+        "甲 · 23:59" 挂在那里骗人。"""
+        view = self._view({"name": "x.timer", "installed": True, "enabled": False,
+                           "state": "disabled"})
+        schedule = view["schedule"]
+        self.assertFalse(schedule["armed"])
+        self.assertEqual(schedule["nextTriggerShort"], "")
+
     def test_没装定时器单元时说清楚(self) -> None:
         schedule = self._view({"name": "x.timer", "installed": False, "enabled": False,
                                "state": "missing"})["schedule"]
         self.assertEqual(schedule["timerText"], "没装定时器单元")
         self.assertEqual(schedule["nextTriggerText"], "")
+        self.assertEqual(schedule["nextTriggerShort"], "")
 
     def test_拿不到定时器状态时不误报(self) -> None:
         """面板可能在 Windows/容器里跑，探不到 systemd 就按原来的样子显示，别乱报警。"""
@@ -898,7 +981,7 @@ class ViaLabelCoverageTests(unittest.TestCase):
 class LoginLostCardTests(unittest.TestCase):
     """运行期掉登录的账号卡：必须说清"登录失效、去重新扫码"，而不是"有几个失败"。
 
-    2026-10-09 wheat：发送时才发现登录失效，账本里是 4 条发送失败，卡片当时只会
+    2026-10-09 示例号：发送时才发现登录失效，账本里是 4 条发送失败，卡片当时只会
     显示「需处理 4」和一堆"发送失败"，用户根本不知道要做的是重新扫码。
     """
 
@@ -924,7 +1007,7 @@ class LoginLostCardTests(unittest.TestCase):
     def test_nothing_sent_is_blocked_and_explains_itself(self):
         """门禁通过、校验全 strong，却**一条都没送达** —— 卡片必须点名这件事。
 
-        2026-10-10 🌈LBX🌈：账本 `sent_ok=0 / sent_fail=3`、`error="nothing_sent: …"`。
+        2026-10-10 🌈示例号🌈：账本 `sent_ok=0 / sent_fail=3`、`error="nothing_sent: …"`。
         修复前它记的是 `status=ok`，卡片显示"需处理 3"，用户根本看不出
         "不是三个好友失败，是这条会话被服务端作废了"。
         """
@@ -952,7 +1035,7 @@ class LoginLostCardTests(unittest.TestCase):
     def test_gate_dead_session_says_the_day_will_not_be_retried(self):
         """门禁判死（core/tasks.py 的 GATE_DEAD_STATUSES）时，卡片要说清两件事。
 
-        2026-10-10 wheat 起的新记账口径：门禁 EXPIRED 记 `error`（`login_dead`），
+        2026-10-10 示例号 起的新记账口径：门禁 EXPIRED 记 `error`（`login_dead`），
         当天不再重试 —— 免得每 5 分钟重开一次浏览器去喂风控。但用户会看到
         "今天不试了"，所以必须同时说清「重新登录成功后当天照样补发」，
         否则会以为一整天就这么报废了。
@@ -985,7 +1068,7 @@ class LoginLostCardTests(unittest.TestCase):
 class NextDueSkipTests(unittest.TestCase):
     """「下一个该发的是谁」必须和派发器同一口径：`skipped` 当天还会再试。
 
-    2026-10-09 wheat 掉登录：上一轮被记成 `skipped`（门禁没过、一条都没发出去），
+    2026-10-09 示例号 掉登录：上一轮被记成 `skipped`（门禁没过、一条都没发出去），
     派发器下一次门铃还会再试它，而面板顶上却写着「今天该发的都发完了」——
     两处说法相反，用户只能猜。根因是 `next_due()` 把"今天有记录"一律当成"发过了"。
     """
@@ -1011,18 +1094,18 @@ class NextDueSkipTests(unittest.TestCase):
     def _mark(self, status, text="2026-10-09 22:30:00"):
         when = self._when(text)
         state = schedule.load_state()
-        schedule.mark_sent(state, "10050yi", when=when, status=status,
+        schedule.mark_sent(state, "11223344556", when=when, status=status,
                            plan={"time": "17:20", "due_at": when}, run_id="r1")
         schedule.save_state(state)
 
     def _account(self):
-        return {"unique_id": "10050yi", "username": "wheat", "send_time": "17:20"}
+        return {"unique_id": "11223344556", "username": "示例号", "send_time": "17:20"}
 
     def test_skipped_keeps_it_as_the_next_one(self):
         self._mark(schedule.STATUS_SKIPPED)
         got = viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
         self.assertIsNotNone(got, "跳过的那一轮当天还会再试，不能说'都发完了'")
-        self.assertEqual(got["name"], "wheat")
+        self.assertEqual(got["name"], "示例号")
 
     def test_ok_means_nothing_left_today(self):
         self._mark(schedule.STATUS_OK)
@@ -1042,6 +1125,520 @@ class NextDueSkipTests(unittest.TestCase):
         got = viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
         # 今天的 due_at 是 17:31（已过），仍然应该报它是"下一个"
         self.assertIsNotNone(got)
+
+
+class SkipRetryExhaustedTests(unittest.TestCase):
+    """试满上限的 `skipped` 当天不再重试 —— 面板文案与"下一个"都必须跟着改。
+
+    `core/schedule.py` 给 `skipped` 记录加了 `attempts`：门铃每踹一次 +1，试满
+    `SCHEDULE_SKIP_RETRY_MAX`（默认 6）之后 `select()` 当天不再踹它（记录留着、
+    状态仍是 skipped）。面板旧文案一律写"下一次门铃会重试"，到上限后就是在骗人：
+    今天不会再有门铃了，用户只能干等或者以为工具坏了。
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="dsf-skipmax-")
+        self.addCleanup(shutil.rmtree, self._dir, True)
+        self.state_file = os.path.join(self._dir, "schedule_state.json")
+        self._old_state = os.environ.get("SCHEDULE_STATE_FILE")
+        os.environ["SCHEDULE_STATE_FILE"] = self.state_file
+
+        def restore_state():
+            if self._old_state is None:
+                os.environ.pop("SCHEDULE_STATE_FILE", None)
+            else:
+                os.environ["SCHEDULE_STATE_FILE"] = self._old_state
+        self.addCleanup(restore_state)
+
+        self._old_max = os.environ.get("SCHEDULE_SKIP_RETRY_MAX")
+        os.environ.pop("SCHEDULE_SKIP_RETRY_MAX", None)   # 先按默认上限（6）测
+
+        def restore_max():
+            if self._old_max is None:
+                os.environ.pop("SCHEDULE_SKIP_RETRY_MAX", None)
+            else:
+                os.environ["SCHEDULE_SKIP_RETRY_MAX"] = self._old_max
+        self.addCleanup(restore_max)
+
+    @staticmethod
+    def _when(text="2026-10-12 23:00:00"):
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").astimezone()
+
+    def _attempt(self, times=1):
+        """模拟门铃踹了 N 次：`mark_sent(status=skipped)` 每调一次 attempts 就 +1。"""
+        when = self._when("2026-10-12 21:30:00")
+        state = schedule.load_state()
+        for _ in range(times):
+            schedule.mark_sent(state, "10060yi", when=when, status=schedule.STATUS_SKIPPED,
+                               plan={"time": "21:30", "due_at": when}, run_id="r1")
+        schedule.save_state(state)
+
+    def _fields(self):
+        return viewmodel.schedule_fields("10060yi", "21:30", when=self._when())
+
+    def _account(self):
+        return {"unique_id": "10060yi", "username": "示例号", "send_time": "21:30"}
+
+    def test_没到上限时仍然说下一次门铃会重试(self):
+        self._attempt(3)
+        self.assertIn("下一次门铃会重试", self._fields()["send_state_text"])
+
+    def test_试满上限后不再说会重试(self):
+        self._attempt(6)
+        text = self._fields()["send_state_text"]
+        self.assertIn("试到上限", text)
+        self.assertNotIn("下一次门铃会重试", text)
+        self.assertIn("重新扫码登录", text, "到上限后唯一的补救办法必须写在面板上")
+
+    def test_上限由_env_决定而不是写死_6(self):
+        """`SCHEDULE_SKIP_RETRY_MAX=3` 时试 3 次就该到上限（面板不许自己比数字）。"""
+        os.environ["SCHEDULE_SKIP_RETRY_MAX"] = "3"
+        self._attempt(3)
+        self.assertIn("试到上限", self._fields()["send_state_text"])
+
+    def test_老记录没有_attempts_字段时文案不变(self):
+        """旧版本写的 `skipped` 记录没有 `attempts` → 按"没到上限"，文案与从前一致。"""
+        when = self._when("2026-10-12 21:30:00")
+        state = schedule.load_state()
+        state.setdefault("accounts", {})["10060yi"] = {
+            "date": "2026-10-12", "time": "21:30", "due_at": schedule.iso(when),
+            "sent_at": schedule.iso(when), "run_id": "old",
+            "status": schedule.STATUS_SKIPPED, "source": "cli", "note": "",
+        }
+        schedule.save_state(state)
+        text = self._fields()["send_state_text"]
+        self.assertIn("下一次门铃会重试", text)
+        self.assertNotIn("试到上限", text)
+
+    def test_试满上限后下一个该发的是明天(self):
+        self._attempt(6)
+        got = viewmodel.next_due([self._account()], when=self._when())
+        self.assertIsNotNone(got, "今天不动了，但「下一个」要落到明天，不能说都发完了")
+        self.assertTrue(got.get("exhausted"))
+        self.assertNotIn("等下一次敲门", got["text"])
+        self.assertIn("明天", got["text"])
+        due = datetime.fromisoformat(got["at"])
+        self.assertEqual(schedule.day_of(due), "2026-10-13")
+        # 与派发器同一份计划：明天那一刻就是 `plan_for` 算出来的（含抖动）
+        plan = schedule.plan_for({"unique_id": "10060yi", "time": "21:30"},
+                                 when=self._when("2026-10-13 23:00:00"),
+                                 jitter=schedule.jitter_minutes_env())
+        self.assertEqual(got["due_text"], plan["due_text"])
+
+    def test_没到上限时下一个仍然是今天(self):
+        self._attempt(3)
+        got = viewmodel.next_due([self._account()], when=self._when())
+        self.assertIsNotNone(got)
+        self.assertFalse(got.get("exhausted"))
+        self.assertIn("等下一次敲门", got["text"])
+
+
+class ScheduleJitterTests(unittest.TestCase):
+    """面板写的发送时刻必须和派发器同一口径 —— 抖动 span 是哈希的一部分。
+
+    `core/schedule.py::plan_for` 把 jitter span 计进 `jitter_minutes(uid, day, span)`
+    的哈希，派发器（`core/tasks.py`）一直传 `SCHEDULE_JITTER_MINUTES`，而面板这两处
+    （`schedule_fields` / `next_due`）没传 —— 吃默认 15 分钟。默认值下两者恰好相等，
+    所以这个 bug 平时隐身；用户把抖动调成 0 或 40 之后，面板写"今天 08:11 发"、
+    实际却在别的分钟发，而且调过之后连"改回默认"都救不了（哈希本来就该跟着变）。
+    """
+
+    UID = "10001"  # 2026-10-11：span=15 → +11 分钟，span=40 → +38 分钟，span=0 → +0
+
+    def setUp(self) -> None:
+        self._old = os.environ.get("SCHEDULE_JITTER_MINUTES")
+        self.addCleanup(self._restore_env)
+        self._dir = tempfile.mkdtemp(prefix="dsf-jitter-")
+        self.addCleanup(shutil.rmtree, self._dir, True)
+        self._old_state = os.environ.get("SCHEDULE_STATE_FILE")
+        os.environ["SCHEDULE_STATE_FILE"] = os.path.join(self._dir, "schedule_state.json")
+        self.addCleanup(self._restore_state)
+
+    def _restore_env(self) -> None:
+        if self._old is None:
+            os.environ.pop("SCHEDULE_JITTER_MINUTES", None)
+        else:
+            os.environ["SCHEDULE_JITTER_MINUTES"] = self._old
+
+    def _restore_state(self) -> None:
+        if self._old_state is None:
+            os.environ.pop("SCHEDULE_STATE_FILE", None)
+        else:
+            os.environ["SCHEDULE_STATE_FILE"] = self._old_state
+
+    @staticmethod
+    def _when():
+        return datetime(2026, 10, 11, 9, 0, 0).astimezone()
+
+    def _dispatcher(self):
+        """派发器口径（`core.schedule.select`）里这个账号今天的计划。"""
+        picked = schedule.select(
+            [{"unique_id": self.UID, "time": "08:00"}],
+            when=self._when(),
+            state={},
+            jitter=schedule.jitter_minutes_env(),
+        )
+        return picked["plans"][self.UID]
+
+    def test_抖动为_0_时面板跟派发器一致(self):
+        os.environ["SCHEDULE_JITTER_MINUTES"] = "0"
+        fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
+        self.assertEqual(fields["send_due"], self._dispatcher()["due_text"])
+        # 0 分钟抖动 = 不抖：老代码（吃默认 15 分钟）会写 08:11。
+        self.assertEqual(fields["send_due"], "08:00")
+
+    def test_抖动为_40_时面板跟派发器一致(self):
+        os.environ["SCHEDULE_JITTER_MINUTES"] = "40"
+        fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
+        self.assertEqual(fields["send_due"], self._dispatcher()["due_text"])
+        self.assertEqual(fields["send_due"], "08:38")
+
+    def test_下一个该发的也是同一口径(self):
+        os.environ["SCHEDULE_JITTER_MINUTES"] = "40"
+        got = viewmodel.next_due(
+            [{"unique_id": self.UID, "username": "示例号", "send_time": "08:00"}],
+            when=self._when(),
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual(got["due_text"], self._dispatcher()["due_text"])
+        self.assertEqual(got["due_text"], "08:38")
+
+    def test_没设_env_时仍然按默认_15_分钟(self):
+        os.environ.pop("SCHEDULE_JITTER_MINUTES", None)
+        fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
+        self.assertEqual(fields["send_due"], "08:11")
+        self.assertEqual(fields["send_due"], self._dispatcher()["due_text"])
+
+
+class WholeRunErrorTests(unittest.TestCase):
+    """「整轮 error」不许画成绿色正常。
+
+    2026-10-11 线上：一轮里发出 1 条、0 条失败，然后浏览器崩了，账号结果记
+    `status=error` —— 老判定只看 `failed`，于是卡片是绿色 healthy，跟"整轮跑完"
+    长得一模一样；而 `core/schedule.py::select` 把 error 当成"今天办过了"，
+    剩下的目标当天根本不会再试。看到绿色就不会有人去补，好友就那么断了。
+    """
+
+    def _card(self, **over):
+        account = _account(
+            status="error",
+            sent_ok=1,
+            sent_fail=0,
+            error="browser_crashed: 浏览器异常退出（code=1）",
+            entries=[_entry()],
+            **over,
+        )
+        snapshot = _snapshot(status="error", status_text="出错", targets=["好友甲", "好友乙"])
+        return viewmodel.build_account(
+            snapshot, _record(status="error", status_text="出错", accounts=[account])
+        )
+
+    def test_整轮_error_是需处理而不是健康(self):
+        card = self._card()
+        self.assertNotEqual(card["state"], "healthy")
+        self.assertEqual(card["state"], "attention")
+
+    def test_整轮_error_给一条_danger_并说清还剩几条(self):
+        card = self._card()
+        dangers = [issue for issue in card["issues"] if issue["level"] == "danger"]
+        self.assertTrue(dangers, card["issues"])
+        text = " ".join(issue["text"] for issue in dangers)
+        self.assertIn("本轮异常结束", text)
+        self.assertIn("已发 1/2", text)
+        self.assertIn("没有重试", text)
+
+    def test_一条都没发出去的_error_仍然是阻断(self):
+        """对照：`attempted<=0` 的 error（浏览器根本没起来）是 blocked，别被降级。"""
+        account = _account(status="error", sent_ok=0, sent_fail=0, entries=[])
+        card = viewmodel.build_account(
+            _snapshot(status="error", status_text="出错", targets=["好友甲"]),
+            _record(status="error", status_text="出错", accounts=[account]),
+        )
+        self.assertEqual(card["state"], "blocked")
+
+    def test_登录失效的_error_不叠第二条整轮异常(self):
+        """`login_lost` 已经有更具体的指引（去重新扫码），别再叠一条通用文案。"""
+        account = _account(
+            status="error",
+            sent_ok=0,
+            sent_fail=1,
+            error="login_lost: 登录已失效（服务端不认这个 sessionid）",
+            entries=[_entry(ok=False, level="none", reason="login_lost")],
+        )
+        card = viewmodel.build_account(
+            _snapshot(status="error", status_text="出错"),
+            _record(status="error", status_text="出错", accounts=[account]),
+        )
+        texts = " ".join(issue["text"] for issue in card["issues"])
+        self.assertNotIn("本轮异常结束", texts)
+        self.assertIn("登录已失效", texts)
+
+
+class MaintenanceViewTests(unittest.TestCase):
+    """「磁盘与资料目录」区块的数据层：字段名、安全线、以及"跳过了谁"。
+
+    这一块是**会删文件**的（虽然默认只预演），所以钉住三件事：
+    1. `core.maintenance.profile_report()` 的真实字段名（写错了页面只会静默空掉）；
+    2. 名单读不到时 `ok=False` —— 面板据此把「执行」藏起来（core 侧一个都不删）；
+    3. 每一行提前说清"能不能动"，别让用户拿「执行」当探针。
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="dsf-maintenance-")
+        self.addCleanup(shutil.rmtree, self._dir, True)
+
+    @staticmethod
+    def _disk():
+        return {"ok": True, "text": "磁盘剩余 25.0 GB（共 100.0 GB，已用 75%）", "level": "warning"}
+
+    def _report(self, **over):
+        base = {
+            "root": "/srv/spark/profiles",
+            "exists": True,
+            "known_ids": ["10001"],
+            "error": "",
+            "profiles": [
+                {
+                    "name": "10001",
+                    "bytes": 1024 * 1024,
+                    "cache_bytes": 512 * 1024,
+                    "human_bytes": "1.0 MB",
+                    "human_cache_bytes": "512.0 KB",
+                    "idle_days": 0.0,
+                    "is_orphan": False,
+                    "in_use": True,
+                    "is_scratch": False,
+                },
+                {
+                    "name": "10002",
+                    "bytes": 2 * 1024 * 1024,
+                    "cache_bytes": 1024 * 1024,
+                    "human_bytes": "2.0 MB",
+                    "human_cache_bytes": "1.0 MB",
+                    "idle_days": 9.5,
+                    "is_orphan": True,
+                    "in_use": False,
+                    "is_scratch": False,
+                },
+                {
+                    "name": "default",
+                    "bytes": 3 * 1024 * 1024,
+                    "cache_bytes": 2 * 1024 * 1024,
+                    "human_bytes": "3.0 MB",
+                    "human_cache_bytes": "2.0 MB",
+                    "idle_days": 1.0,
+                    "is_orphan": True,
+                    "in_use": False,
+                    "is_scratch": True,
+                },
+            ],
+            "total_bytes": 6 * 1024 * 1024,
+            "cache_bytes": 3584 * 1024,
+            "orphan_bytes": 5 * 1024 * 1024,
+            "human_total": "6.0 MB",
+            "human_cache": "3.5 MB",
+            "human_orphan": "5.0 MB",
+        }
+        base.update(over)
+        return base
+
+    def test_每个目录一行且字段名跟_core_一致(self):
+        rows = viewmodel.profile_rows(self._report(), {"10001": "示例号"})
+        self.assertEqual([row["name"] for row in rows], ["10001", "10002", "default"])
+        running, orphan, scratch = rows
+        self.assertEqual(running["label"], "示例号（10001）")
+        self.assertEqual(running["human_cache_bytes"], "512.0 KB")
+        self.assertTrue(running["in_use"])
+        self.assertIn("正在跑", running["hint"])
+        self.assertIn("在册", running["tags"])
+        self.assertTrue(orphan["is_orphan"])
+        self.assertIn("孤儿", orphan["tags"][0])
+        self.assertIn("可以删", orphan["hint"])
+        self.assertEqual(orphan["idle_text"], "9.5 天没动")
+        # `default` 是扫码登录前的落脚点：永远算「临时」，不参与孤儿清理。
+        self.assertTrue(scratch["is_scratch"])
+        self.assertFalse(scratch["is_orphan"])
+        self.assertEqual(scratch["tags"][0], "临时")
+        self.assertIn("只清缓存", scratch["hint"])
+
+    def test_宽限期没到就不说可以删(self):
+        report = self._report(
+            profiles=[
+                {
+                    "name": "10003",
+                    "bytes": 1024,
+                    "cache_bytes": 0,
+                    "human_bytes": "1.0 KB",
+                    "human_cache_bytes": "0 B",
+                    "idle_days": 2.0,
+                    "is_orphan": True,
+                    "in_use": False,
+                    "is_scratch": False,
+                }
+            ]
+        )
+        row = viewmodel.profile_rows(report, grace_days=7)[0]
+        self.assertIn("还差 5.0 天", row["hint"])
+        self.assertNotIn("可以删", row["hint"])
+
+    def test_名单读不到时_ok_为假且带着错误(self):
+        report = self._report(
+            error="读不到账号名单：TASKS 里没有可用的 unique_id",
+            known_ids=[],
+            profiles=[],
+            total_bytes=0,
+            cache_bytes=0,
+            orphan_bytes=0,
+        )
+        view = viewmodel.maintenance_view(report=report, disk=self._disk())
+        self.assertFalse(view["ok"])
+        self.assertIn("读不到账号名单", view["error"])
+        self.assertEqual(view["rows"], [])
+
+    def test_名单读不到时哪怕扫到了目录也不列出来(self):
+        """真实形状：`profile_report()` 扫到了目录，只是判不出谁在册。
+
+        `core.maintenance` 是按"不在名单里"判孤儿的 —— 名单为空时它会把**在册
+        账号**也标成"孤儿（可删）"。安全线保证一个都不会真删，但把这些错的判定
+        画出来只会诱导用户去点「执行」，所以行列表必须是空的。
+        """
+        report = self._report(
+            error="读不到账号名单：TASKS 里没有可用的 unique_id",
+            known_ids=[],
+        )
+        view = viewmodel.maintenance_view(report=report, disk=self._disk())
+        self.assertFalse(view["ok"])
+        self.assertEqual(view["rows"], [], "名单读不到时不许画逐目录判定")
+        self.assertEqual(view["totals"]["count"], 0)
+        self.assertEqual(view["totals"]["orphan_bytes"], 0, "孤儿字节数这时没有意义")
+        self.assertEqual(view["totals"]["human_orphan"], "0 B")
+
+    def test_名单读得到时_ok_为真且汇总说清构成(self):
+        view = viewmodel.maintenance_view(
+            report=self._report(), names={"10001": "示例号"}, disk=self._disk()
+        )
+        self.assertTrue(view["ok"])
+        self.assertEqual(view["error"], "")
+        self.assertEqual(view["notice"], "")
+        self.assertIn("资料目录合计 6.0 MB", view["totals"]["text"])
+        self.assertIn("可再生缓存 3.5 MB", view["totals"]["text"])
+        self.assertEqual(view["grace_days"], viewmodel.ORPHAN_GRACE_DAYS)
+        self.assertEqual(view["rows"][0]["label"], "示例号（10001）")
+        self.assertEqual(view["root"], "/srv/spark/profiles")
+        self.assertEqual(view["disk"]["level"], "warning")
+
+    def test_资料目录不存在时说清还没登录过(self):
+        report = self._report(
+            exists=False, profiles=[], total_bytes=0, cache_bytes=0, orphan_bytes=0
+        )
+        view = viewmodel.maintenance_view(report=report, disk=self._disk())
+        self.assertIn("还没有账号扫码登录过", view["notice"])
+        self.assertEqual(view["rows"], [])
+
+    def test_真目录走一遍字段名对得上(self):
+        """不靠假数据：在临时目录里造一个资料目录，跑真的 `profile_report()`。"""
+        root = os.path.join(self._dir, "profiles")
+        profile = os.path.join(root, "10001", "Default")
+        os.makedirs(os.path.join(profile, "Cache"))
+        with open(os.path.join(profile, "Cache", "data_0"), "wb") as handle:
+            handle.write(b"x" * 4096)
+        with open(os.path.join(profile, "Cookies"), "wb") as handle:
+            handle.write(b"c" * 10)
+
+        view = viewmodel.maintenance_view(root=root, ids=["10001"])
+        self.assertTrue(view["ok"])
+        self.assertEqual(view["totals"]["count"], 1)
+        row = view["rows"][0]
+        self.assertEqual(row["name"], "10001")
+        self.assertEqual(row["tags"], ["在册"])
+        self.assertEqual(row["cache_bytes"], 4096)
+        self.assertGreaterEqual(row["bytes"], 4106)
+        self.assertTrue(view["disk"]["ok"])
+
+    def test_磁盘剩余空间按分区算(self):
+        disk = viewmodel.disk_usage_view(self._dir)
+        self.assertTrue(disk["ok"])
+        self.assertGreater(disk["free_bytes"], 0)
+        self.assertTrue(disk["text"].startswith("磁盘剩余"))
+        self.assertTrue(disk["tail"].startswith("剩余"), "折叠状态下也要看得见还剩多少")
+        self.assertIn(disk["level"], ("ok", "warning", "danger"))
+        self.assertLessEqual(disk["used_pct"], 100)
+
+    def test_资料目录还没建也问得到磁盘(self):
+        """目录不存在是第一次打开面板的常态：往上找存在的祖先，不许整块报错。"""
+        disk = viewmodel.disk_usage_view(os.path.join(self._dir, "还没有这个目录"))
+        self.assertTrue(disk["ok"])
+        self.assertGreater(disk["free_bytes"], 0)
+
+    def test_整块是_json_可序列化的(self):
+        view = viewmodel.maintenance_view(
+            report=self._report(), disk=viewmodel.disk_usage_view(self._dir)
+        )
+        self.assertIn('"rows"', json.dumps(view, ensure_ascii=False))
+
+    def test_预演结果带上释放量与跳过名单(self):
+        result = {
+            "ok": True,
+            "error": "",
+            "applied": False,
+            "removed": [
+                {
+                    "profile": "10001",
+                    "path": "/srv/spark/profiles/10001/Default/Cache",
+                    "bytes": 2048,
+                    "human_bytes": "2.0 KB",
+                }
+            ],
+            "freed_bytes": 2048,
+            "human_freed": "2.0 KB",
+            "skipped_in_use": ["10002"],
+            "root": "/srv/spark/profiles",
+        }
+        view = viewmodel.prune_view(result, what="缓存")
+        self.assertTrue(view["ok"])
+        self.assertFalse(view["applied"])
+        self.assertTrue(view["dry_run"])
+        self.assertEqual(view["removed"][0]["label"], "10001/Cache")
+        self.assertEqual(view["human_freed"], "2.0 KB")
+        self.assertEqual(view["skipped_in_use"], ["10002"])
+        self.assertIn("预演", view["headline"])
+        # 清缓存的结果里没有 grace_days，前端只认一套键名 → 补默认值。
+        self.assertEqual(view["grace_days"], viewmodel.ORPHAN_GRACE_DAYS)
+        json.dumps(view, ensure_ascii=False)
+
+    def test_孤儿预演把三类跳过都带出来(self):
+        result = {
+            "ok": True,
+            "error": "",
+            "applied": False,
+            "removed": [
+                {"name": "10009", "path": "/srv/spark/profiles/10009", "bytes": 10, "human_bytes": "10 B"}
+            ],
+            "freed_bytes": 10,
+            "human_freed": "10 B",
+            "kept": ["10001"],
+            "skipped_recent": ["10008"],
+            "skipped_in_use": ["10007"],
+            "skipped_symlink": ["link1"],
+            "grace_days": 7.0,
+            "root": "/srv/spark/profiles",
+        }
+        view = viewmodel.prune_view(result, what="孤儿目录")
+        self.assertEqual(view["removed"][0]["label"], "10009")
+        self.assertEqual(view["kept"], ["10001"])
+        self.assertEqual(view["skipped_recent"], ["10008"])
+        self.assertEqual(view["skipped_in_use"], ["10007"])
+        self.assertEqual(view["skipped_symlink"], ["link1"])
+        self.assertEqual(view["grace_days"], 7.0)
+        self.assertIn("孤儿目录", view["headline"])
+
+    def test_名单读不到时清理结果是失败而不是零(self):
+        view = viewmodel.prune_view(
+            {"ok": False, "error": "读不到账号名单：TASKS 没配", "applied": False}
+        )
+        self.assertFalse(view["ok"])
+        self.assertIn("没动任何文件", view["headline"])
+        self.assertEqual(view["removed"], [])
 
 
 if __name__ == "__main__":

@@ -409,6 +409,16 @@ html[data-theme="light"] .nav-item.active {
   gap: 20px;
 }
 
+/* 运行记录页顶部会连着排两三条通栏（运行状态 / 阻断原因 / 本轮结论）：句子都
+   不长，收一点体量，别让它们把首屏全占了 —— 具体数字在下面的 KPI 卡里。 */
+.console-shell > .status-banner {
+  padding: 10px 14px;
+}
+
+.console-shell > [data-today-summary] {
+  font-size: 13px;
+}
+
 .dashboard-section,
 .panel {
   min-width: 0;
@@ -855,6 +865,23 @@ html[data-theme="light"] .theme-dark-icon {
   font-weight: 800;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
+}
+
+/* 值槽默认是给"0/5"这种一行数字准备的 26px 大字。「下次自动触发」那格喂进来的
+   是「示例号 · 已过 17:20」这种短句（--short）或一整句话（--prose）：不换一套
+   字号的话，一句话会撑成两三行大字，桌面把整条概览拉高、手机上单这一格就占
+   200px。两个类由 dashboard.html 与 app.js 同步切换。 */
+.overview-value--short {
+  font-size: 20px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.overview-value--prose {
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .overview-help,
@@ -2147,13 +2174,23 @@ textarea {
   }
 
   .status-banner {
-    align-items: flex-start;
-    flex-direction: column;
+    /* 手机上原来是竖排：一句话 + 一枚"实时"胶囊会拉出一大块空底色。
+       改成横排换行，装得下就同行，装不下才掉行。 */
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 10px 14px;
   }
 
   .overview-strip,
   .metric-grid {
     grid-template-columns: 1fr;
+  }
+
+  .overview-primary,
+  .overview-cell {
+    padding: 16px;
   }
 
   .overview-primary {
@@ -2678,5 +2715,58 @@ html:not([data-theme="light"]) .time-input::-webkit-calendar-picker-indicator {
   .account-stats {
     gap: 14px;
   }
+}
+
+/* 磁盘与资料目录（#maintenance-panel）：把 core.maintenance 的盘点结果画成一张表，
+   外加一行磁盘状态。配色沿用面板既有的成功/警告/危险三档。 */
+.notice-inline.maintenance-ok {
+  border-left-color: var(--success);
+  background: var(--success-soft);
+}
+
+.notice-inline.maintenance-warning {
+  border-left-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.notice-inline.maintenance-danger {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.notice-inline.maintenance-unknown {
+  border-left-color: var(--text-muted);
+  background: var(--surface-soft);
+}
+
+.maintenance-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.maintenance-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.maintenance-result {
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.maintenance-result ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.maintenance-result li {
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 

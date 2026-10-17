@@ -1,6 +1,6 @@
 """浏览器启动。首选 cloakbrowser（自带拟人化），失败时回落原生 Playwright。
 
-融合版相比上游改了三处，都是被 .172 的实测逼出来的：
+融合版相比上游改了三处，都是被 本机 的实测逼出来的：
 
 1. **惰性 import**：上游在模块级 `from cloakbrowser import launch`，导致只要没装
    cloakbrowser，`import core.browser`（进而 `core.tasks`）就直接失败 —— 本机
@@ -13,6 +13,7 @@
    指定的二进制，其次 `channel="chrome"` 复用系统 Chrome。两条路都实测可用。
 """
 import os
+import time
 import traceback
 
 from utils.config import DEBUG, get_config
@@ -45,6 +46,13 @@ BASE_CHROME_ARGS = [
     "--disable-gpu",
     "--enable-unsafe-swiftshader",
 ]
+
+# Chromium 的磁盘缓存默认**没有上限**：实测每个账号每天长 ~180MB
+# （资料目录里 Default/Cache 最大），跑一两个月就能把磁盘吃满 ——
+# 磁盘满的直接后果是发送静默失败。这里给它一个上限，配合
+# `core/maintenance.py` 的缓存清理（`main.py prune` / 面板）双保险。
+DISK_CACHE_SIZE_MB = 256
+BASE_CHROME_ARGS.append(f"--disk-cache-size={DISK_CACHE_SIZE_MB * 1024 * 1024}")
 
 # playwright 回落时的 `sync_playwright()` 句柄必须活到浏览器关闭，
 # 否则一旦被 GC 回收，浏览器进程会连着一起被杀。
@@ -104,7 +112,14 @@ def _launch_playwright(headless, args, proxy):
         kw["executable_path"] = "/opt/google/chrome/chrome"
     if proxy:
         kw["proxy"] = {"server": proxy}
-    browser = pw.chromium.launch(**kw)
+    try:
+        browser = pw.chromium.launch(**kw)
+    except BaseException:
+        # 启动失败也要把 driver 还回去：`sync_playwright().start()` 已经拉起了一个
+        # node 子进程，只有 stop() 才会回收（成功路径交给 close_context 回收）。
+        # 最常见的失败原因恰恰是"资料目录被另一只 Chromium 占着"，会连着重试很多次。
+        _stop_silently(pw)
+        raise
     _KEEPALIVE.append((pw, browser))
     return browser
 
@@ -148,7 +163,13 @@ def launch_persistent_context(profile_dir, *, fingerprint=None, proxy=None,
                     kw["executable_path"] = "/opt/google/chrome/chrome"
                 if proxy:
                     kw["proxy"] = {"server": proxy}
-                ctx = pw.chromium.launch_persistent_context(profile_dir, **kw)
+                try:
+                    ctx = pw.chromium.launch_persistent_context(profile_dir, **kw)
+                except BaseException:
+                    # 同 `_launch_playwright`：driver 已经起来了，启动失败必须 stop()，
+                    # 否则每失败一次就漏一个 node 子进程（"目录被占"正是最常见的失败）。
+                    _stop_silently(pw)
+                    raise
                 # 句柄必须活到浏览器关闭，否则被 GC 时浏览器一起死（见 _KEEPALIVE）
                 _KEEPALIVE.append((pw, ctx))
                 return ctx
@@ -159,6 +180,21 @@ def launch_persistent_context(profile_dir, *, fingerprint=None, proxy=None,
                 errors[-1] += "（浏览器可执行文件不存在，请先安装浏览器或设置 CLOAKBROWSER_BINARY_PATH）"
             traceback.print_exc()
     raise RuntimeError("浏览器启动失败 —— " + " | ".join(errors))
+
+
+def _stop_silently(pw):
+    """把**启动失败**那次 `sync_playwright().start()` 拉起的 driver 还回去。
+
+    为什么单独一个函数：`close_context()` 是"关一只已经开起来的浏览器"，靠
+    `_KEEPALIVE` 里的身份对上号才能回收句柄。而启动中途失败时句柄**根本还没登记**
+    （登记发生在 launch 成功之后），所以必须在这里就地 stop()。漏掉的后果是每次
+    失败漏一个 node 子进程 —— 而"资料目录被占"正是最常见的失败原因，会连着重试。
+    """
+    try:
+        pw.stop()
+    except Exception as exc:                             # noqa: BLE001
+        logger.warning(f"[BROWSER] ⚠️ 回收启动失败的 playwright 句柄时出错："
+                       f"{type(exc).__name__}: {exc}")
 
 
 def close_context(target) -> bool:
@@ -177,16 +213,33 @@ def close_context(target) -> bool:
     except Exception as exc:                             # noqa: BLE001
         ok = False
         logger.warning(f"[BROWSER] ⚠️ 关浏览器失败：{type(exc).__name__}: {exc}")
+    matched = False
     for entry in list(_KEEPALIVE):
         pw, owner = entry
         if owner is not target:
             continue
+        matched = True
         _KEEPALIVE.remove(entry)
         try:
             pw.stop()
         except Exception as exc:                         # noqa: BLE001
             logger.warning(f"[BROWSER] ⚠️ 回收 playwright 句柄失败：{type(exc).__name__}: {exc}")
+    if not matched and _KEEPALIVE and _looks_like_playwright(target):
+        # 登记表里还有别的句柄、关掉的偏偏是一个 playwright 对象 ⇒ 多半有人直接
+        # `browser.close()` / `ctx.close()` 绕过了这里，那个 driver 就永远不回收了。
+        # （cloakbrowser 后端本来就不登记句柄，`_KEEPALIVE` 为空时不会误报。）
+        logger.warning("[BROWSER] ⚠️ close_context 收到一个没登记过句柄的对象"
+                       "（可能是被 browser.close()/ctx.close() 直接关掉的）："
+                       "playwright driver 可能没回收，请改用 close_context()")
     return ok
+
+
+def _looks_like_playwright(target) -> bool:
+    """是不是 playwright 自己的对象（而不是 cloakbrowser 之类的壳）。"""
+    try:
+        return type(target).__module__.startswith("playwright")
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 def get_browser(fingerprint=None):
@@ -218,3 +271,71 @@ def get_browser(fingerprint=None):
                 errors[-1] += "（浏览器可执行文件不存在，请先安装浏览器或设置 CLOAKBROWSER_BINARY_PATH）"
             traceback.print_exc()
     raise RuntimeError("浏览器启动失败 —— " + " | ".join(errors))
+
+
+def kill_profile_processes(profile_dir, *, grace: float = 3.0) -> int:
+    """把还在用这个资料目录的 Chromium 进程结束掉（先 SIGTERM，宽限后 SIGKILL）。
+
+    ★ 2026-10-17 审计：`page.evaluate` / `ctx.cookies()` 这类调用**没有超时**，
+    浏览器一旦卡住，扫码登录/读好友列表的线程会永远停在那一行 —— `cancel()`
+    只是置旗，卡住的调用根本收不到。面板为了不"永远忙"只能把会话记录摘掉，
+    结果下一次登录又去抢同一个 user-data-dir（SingletonLock 冲突）。
+    守夜线程需要一个**跨线程安全**的收尾手段：Playwright 的对象不能跨线程碰
+    （`greenlet.error: Cannot switch to a different thread`），但"按命令行里的
+    `--user-data-dir=` 找到进程再杀"可以。
+
+    返回被信号命中的进程数（一个都没找到返回 0，不算失败）。非 Linux 直接返回 0。
+    """
+    target = os.path.realpath(str(profile_dir or ""))
+    if not target or not os.path.isdir("/proc"):
+        return 0
+    me = os.getpid()
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        for part in raw.split(b"\0"):
+            if not part.startswith(b"--user-data-dir="):
+                continue
+            value = part[len(b"--user-data-dir="):].decode("utf-8", "replace").rstrip("/")
+            if value and os.path.realpath(value) == target:
+                pids.append(pid)
+            break
+    killed = 0
+    for sig in (15, 9):                                # SIGTERM → 宽限 → SIGKILL
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                continue
+            alive.append(pid)
+        killed = max(killed, len(alive))
+        if sig == 15 and alive:
+            deadline = time.time() + max(0.0, float(grace or 0.0))
+            while time.time() < deadline:
+                if not any(_pid_alive(pid) for pid in alive):
+                    break
+                time.sleep(0.2)
+        pids = [pid for pid in alive if _pid_alive(pid)]
+        if not pids:
+            break
+    return killed
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True

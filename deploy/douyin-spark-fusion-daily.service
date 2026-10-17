@@ -26,7 +26,7 @@ ExecStart=/opt/douyin-spark-fusion/.venv/bin/python main.py task
 # 由 -daily.timer 每 5 分钟触发一次。没账号到点的那几次会立刻退出 0，
 # 属于常态，不要在监控里当失败。要无视时间表强制发一轮：
 #     python main.py task --force
-#     python main.py task --only 10050yi
+#     python main.py task --only 11223344556
 # 一轮可能跑十几分钟（多账号 + 拟人间隔）；给足时间，别让 systemd 中途掐掉
 TimeoutStartSec=3600
 StandardOutput=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log

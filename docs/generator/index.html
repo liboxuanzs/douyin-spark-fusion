@@ -156,9 +156,27 @@
                                 <el-form-item label="代理地址（暂未实现）">
                                     <el-input v-model="form.PROXY_ADDRESS" />
                                 </el-form-item>
-                                <el-form-item label="执行时间（仅Docker部署有效）">
+                                <el-form-item label="执行时间">
                                     <el-time-picker v-model="form.RUN_TIME" format="HH:mm:ss" value-format="HH:mm:ss"
                                         placeholder="09:00:00" />
+                                    <div class="form-tip"
+                                        style="width: 100%; display: block; margin-top: 4px; font-size: 12px; line-height: 1.6; color: #909399;">
+                                        这个时刻会同时写进两个键：<code>TASK_SCHEDULE_TIMES</code>（程序内决定每个账号
+                                        几点发，秒会被丢掉 —— 调度刻度是 5 分钟）和
+                                        <code>CRON_HOUR/MINUTE/SECOND</code>（<b>仅 Docker 部署用</b>，
+                                        用来生成容器里的 cron；systemd 部署下这三个键无效）。
+                                        想让某个账号单独用别的时间，在它自己的
+                                        <code>TASKS</code> 项里加 <code>"time":"17:20"</code> 即可。
+                                    </div>
+                                </el-form-item>
+                                <el-form-item label="发送时间抖动（分钟）">
+                                    <el-input-number v-model.number="jitter.SCHEDULE_JITTER_MINUTES" :step="1"
+                                        step-strictly :precision="0" :min="0" :max="120" />
+                                    <div class="form-tip"
+                                        style="width: 100%; display: block; margin-top: 4px; font-size: 12px; line-height: 1.6; color: #909399;">
+                                        每个账号的实际发送时刻会在这个点前后再随机偏一点（按「账号 + 日期」确定性取值，
+                                        同一天不会飘），避免所有账号整点齐刷刷一起发。<code>0</code> = 准点发。
+                                    </div>
                                 </el-form-item>
                                 <el-form-item label="时区">
                                     <el-select v-model="form.TZ" placeholder="Asia/Shanghai">
@@ -226,6 +244,18 @@
                                     </el-form-item>
                                     <el-form-item label="抖音号">
                                         <el-input v-model="account.unique_id" />
+                                    </el-form-item>
+                                    <el-form-item label="浏览器指纹">
+                                        <el-input v-model="account.fingerprint" placeholder="10000 ~ 99999" />
+                                        <div class="form-tip"
+                                            style="width: 100%; display: block; margin-top: 4px; font-size: 12px; line-height: 1.6; color: #909399;">
+                                            这个数字决定本账号的浏览器指纹种子，<b>换号重扫不要改它</b>。
+                                            它会被写成 <code>--fingerprint=&lt;这个数&gt;</code> 交给浏览器；
+                                            留空的话每次启动浏览器都会自己随机生成一个，
+                                            抖音那边看到的就是「天天换设备登录」。
+                                            10000~99999 之间任意整数即可，不需要和别的账号不同，
+                                            也不需要和抖音号有任何关系。
+                                        </div>
                                     </el-form-item>
                                     <el-form-item label="Cookies【JSON格式】">
                                         <el-input v-model="account.cookies" :rows="4" type="textarea" />

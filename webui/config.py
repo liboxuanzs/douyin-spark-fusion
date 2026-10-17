@@ -15,14 +15,14 @@ WEBUI_PASSWORD                   （空）                       明文口令
 WEBUI_PASSWORD_HASH              （空）                       优先于明文，pbkdf2_sha256$salt$digest
 WEBUI_AUTH                       pass                         off 时关闭认证（仅回环地址允许）
 WEBUI_SESSION_SECRET             （随机）                     签名 cookie 的密钥
-WEBUI_SESSION_MAX_AGE            28800                        会话有效期（秒）
+WEBUI_SESSION_MAX_AGE            2592000（30 天）             登录保持时长（秒），上限 400 天
 WEBUI_COOKIE_NAME                dsf_webui_session            会话 cookie 名
 WEBUI_TZ                         Asia/Shanghai                展示用时区
 RUN_LEDGER_FILE                  logs/runs.jsonl              运行账本（每行一条 JSON）
 RATE_LIMIT_FILE                  logs/rate_limit.json         熔断/冷却状态
 RUN_LOCK_FILE                    logs/run.lock                运行锁
 OPS_LOG_FILE                     logs/app.log                 日志文件（与 utils.logger 同一份）
-TASK_SCHEDULE_TIMES              09:00 “下次定时”预览用，逗号分隔的 HH:MM，空则未知
+TASK_SCHEDULE_TIMES              20:30 “下次定时”预览用，逗号分隔的 HH:MM，空则未知
 ===============================  ==========================  ==================================
 """
 
@@ -41,6 +41,8 @@ __all__ = [
     "ConfigError",
     "DEFAULT_LOG_FILE",
     "DEFAULT_SCHEDULE_TIMES",
+    "DEFAULT_SESSION_MAX_AGE",
+    "MAX_SESSION_MAX_AGE",
     "credential_fingerprint",
     "default_timezone",
     "is_loopback_host",
@@ -57,6 +59,7 @@ __all__ = [
     "schedule_times",
     "session_cookie_name",
     "session_max_age",
+    "session_max_age_text",
     "session_secret",
     "webui_auth_mode",
     "webui_host",
@@ -213,13 +216,44 @@ def session_cookie_name() -> str:
     return _getenv("WEBUI_COOKIE_NAME", "dsf_webui_session")
 
 
+#: 登录保持时长的默认值：30 天。面板是放在局域网里的自用工具，原来那个 8 小时太短 ——
+#: 一天里干两趟活就要重输一次口令。延长不等于把门锁死：token 载荷里有**口令指纹**，
+#: 改口令会立刻作废所有会话；登出也会把那一份拉黑。
+DEFAULT_SESSION_MAX_AGE = 30 * 24 * 3600
+
+#: 上限：Chrome 对 cookie 有效期的硬上限是 400 天，写更大也只会被浏览器截断 ——
+#: 这里主动夹住，免得 .env 里手滑多打几个 0 之后界面显示"114 年"。
+MAX_SESSION_MAX_AGE = 400 * 24 * 3600
+
+
 def session_max_age() -> int:
-    raw = _getenv("WEBUI_SESSION_MAX_AGE", "28800")
+    """登录保持时长（秒）：非法值回落默认值，超过 400 天夹到 400 天。
+
+    注意它是**读的时候**生效的（``read_token(max_age=…)``），所以调大之后已经登录的
+    浏览器立刻受益，调小则会把超过新时长的会话立刻踢下线。
+    """
+    raw = _getenv("WEBUI_SESSION_MAX_AGE", str(DEFAULT_SESSION_MAX_AGE))
     try:
-        value = int(raw)
-    except ValueError:
-        return 28800
-    return value if value > 0 else 28800
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_SESSION_MAX_AGE
+    if value <= 0:
+        return DEFAULT_SESSION_MAX_AGE
+    return min(value, MAX_SESSION_MAX_AGE)
+
+
+def session_max_age_text() -> str:
+    """给面板看的人话时长：``30 分钟`` / ``8 小时`` / ``1.5 天`` / ``30 天``。"""
+    seconds = session_max_age()
+    if seconds >= 86400:
+        days = seconds / 86400
+        return f"{seconds // 86400} 天" if seconds % 86400 == 0 else f"{days:.1f} 天"
+    if seconds >= 3600:
+        hours = seconds / 3600
+        return f"{seconds // 3600} 小时" if seconds % 3600 == 0 else f"{hours:.1f} 小时"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
 
 
 def session_secret_configured() -> bool:

@@ -249,10 +249,10 @@ class WebUITestCase(unittest.TestCase):
         }
         self.rate_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    def write_lock(self, pid: Optional[int] = None) -> None:
+    def write_lock(self, pid: Optional[int] = None, started_at: Optional[datetime] = None) -> None:
         payload = {
             "pid": os.getpid() if pid is None else pid,
-            "started_at": _iso(datetime.now(timezone.utc)),
+            "started_at": _iso(started_at or datetime.now(timezone.utc)),
             "dry_run": "off",
             "source": "webui",
             "run_id": "20261001-090000-ab12",
@@ -778,6 +778,31 @@ class WebUITestCase(unittest.TestCase):
         self.write_lock(pid=999_999_991)
         state = store.read_lock()
         self.assertFalse(state.running)
+
+    def test_真跑两小时仍然算在跑(self) -> None:
+        """活着的进程不能按时间判残留：多账号 × 多目标跑两小时很正常。
+
+        判残留就会让第二个进程夺锁、两个 Chromium 抢同一个账号（会互踢）。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_lock(started_at=datetime.now(timezone.utc) - timedelta(hours=3))
+        state = store.read_lock()
+        self.assertTrue(state.running)
+        self.assertIn("仍在运行", state.reason)
+
+    def test_活着的_pid_卡太久也算残留(self) -> None:
+        """pid 还活着 ≠ 真在跑：pid 会被复用，面板那条线程也可能卡死。
+
+        与 `core.run_ledger.lock_info()` 的 `alive_too_long` 同口径（6 小时）——
+        旧代码只看 `pid_alive is True`，这种锁会让「立即运行」永久 409，
+        只能有人登机器 `rm` 锁文件。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_lock(started_at=datetime.now(timezone.utc) - timedelta(hours=7))
+        state = store.read_lock()
+        self.assertFalse(state.running)
+        self.assertIn("6 小时", state.reason)
+        self.assertTrue(state.exists, "锁文件还在，只是不再拦住触发")
 
     def test_dry_run_取值非法时返回_400(self) -> None:
         os.environ["WEBUI_PASSWORD"] = PASSWORD
@@ -1462,7 +1487,7 @@ class FriendPickerWebUITestCase(WebUITestCase):
     def test_保存时点名这次少掉了哪些目标(self) -> None:
         """整表覆盖式保存会把这次没勾上的旧目标删掉，提示里必须报出删了谁。
 
-        2026-10-11 wheat 的目标从 4 个变成 2 个，面板当时只说"已保存 2 个"，
+        2026-10-11 示例号 的目标从 4 个变成 2 个，面板当时只说"已保存 2 个"，
         少掉的两个要到下一轮发送时才发现 —— 不能让这种删除继续静默。
         """
         os.environ["WEBUI_PASSWORD"] = PASSWORD
@@ -2308,7 +2333,7 @@ class CrossSiteGuardTests(WebUITestCase):
         """面板是局域网工具：私网 IP、短名（机器名）都得能用。"""
         self.assertTrue(
             webui_app._csrf_ok(
-                _FakeRequest({"host": "192.168.15.172:8787", "origin": "http://192.168.15.172:8787"})
+                _FakeRequest({"host": "192.168.1.100:8787", "origin": "http://192.168.1.100:8787"})
             )
         )
         self.assertTrue(
@@ -2338,7 +2363,7 @@ class CrossSiteGuardTests(WebUITestCase):
 class ProfileAdoptGuardTests(WebUITestCase):
     """扫码登录成功后会"搬迁"资料目录：搬迁途中那个目标目录也不能被抢。"""
 
-    UID = "76998876121"
+    UID = "12345678905"
 
     def setUp(self) -> None:
         super().setUp()
@@ -2360,7 +2385,7 @@ class ProfileAdoptGuardTests(WebUITestCase):
 class StuckSessionReapTests(WebUITestCase):
     """卡住的会话必须能被回收：否则那个账号在面板上永久失效。"""
 
-    UID = "76998876121"
+    UID = "12345678905"
 
     def setUp(self) -> None:
         super().setUp()
@@ -2733,6 +2758,30 @@ class ConfigEditorWebUITestCase(WebUITestCase):
         self.assertEqual(result["changed"], {"DRY_RUN": "full"})
         self.assertIn("DRY_RUN=full", self.env_text())
 
+    def test_登录保持时长能在面板上改(self) -> None:
+        """`WEBUI_SESSION_MAX_AGE` 是后加进白名单的键（默认 30 天，上限 400 天）。"""
+        rows = {row["key"]: row for row in settings.form_state(envfile.read_map())}
+        self.assertIn("WEBUI_SESSION_MAX_AGE", rows)
+        self.assertTrue(rows["WEBUI_SESSION_MAX_AGE"]["missing"], "fixture 里没有 → 用默认值")
+
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            response = self.post_config(
+                client, {"cfg_WEBUI_SESSION_MAX_AGE": "604800"}, headers={"Accept": "text/html"}
+            )
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("已保存 1 项", unquote(response.headers["location"]))
+        self.assertIn("WEBUI_SESSION_MAX_AGE=604800", self.env_text())
+
+        # 非法值 / 越界值一个字节都不写
+        before = self.env_text()
+        for bad in ("", "abc", "0", "-1", "59", str(config.MAX_SESSION_MAX_AGE + 1)):
+            with self.subTest(bad=bad):
+                result = settings.apply({"WEBUI_SESSION_MAX_AGE": bad})
+                self.assertFalse(result["ok"], bad)
+        self.assertEqual(self.env_text(), before, "拒绝时不许动文件")
+
     def test_代理口令在表单里是打码的(self) -> None:
         self.env.write_text(
             CONFIG_ENV_TEXT + "PROXY_ADDRESS=http://user:secret-pass@127.0.0.1:1080\n",
@@ -2931,6 +2980,41 @@ class ConfigEditorWebUITestCase(WebUITestCase):
             env_map,
         )
         self.assertEqual(prepared, {"DRY_RUN": "full"})
+
+    def test_重读失败时不能说已重读(self) -> None:
+        """文件写成功 ≠ 本进程读到新值 —— 这两件事必须分开说。
+
+        `store.refresh_env()` 把异常吞掉返回 False（读权限、编码、并发改坏），
+        而 `.env` 其实已经写进去了。旧代码丢掉返回值，页面照旧说"并重读 .env"，
+        用户以为新配置已经在跑，实际还在用内存里的旧值，直到重启面板 ——
+        而且会以为是"保存没生效"去反复点保存。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            with mock.patch.object(store, "refresh_env", return_value=False):
+                response = self.post_config(
+                    client, {"cfg_LOG_LEVEL": "Info"}, headers={"Accept": "text/html"}
+                )
+        self.assertEqual(response.status_code, 303, "文件确实写成功了，不能报成保存失败")
+        location = unquote(response.headers["location"])
+        self.assertIn("重读失败", location)
+        self.assertIn("重启面板后生效", location)
+        self.assertNotIn("并重读 .env", location)
+        self.assertIn("LOG_LEVEL=Info", self.env_text(), "该写的还是要写")
+
+    def test_重读成功时照旧说已重读(self) -> None:
+        """对照组：`refresh_env()` 返回 True 时文案不能跟着变。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            with mock.patch.object(store, "refresh_env", return_value=True):
+                response = self.post_config(
+                    client, {"cfg_LOG_LEVEL": "Info"}, headers={"Accept": "text/html"}
+                )
+        location = unquote(response.headers["location"])
+        self.assertIn("并重读 .env", location)
+        self.assertNotIn("重读失败", location)
 
     # ------------------------------------------------------------ 页面
 
@@ -3263,12 +3347,23 @@ class PasswordPanelWebUITestCase(WebUITestCase):
         self.assertTrue(state["inline"])
         self.assertTrue(state["has_password"])
 
-        for key in ("mode", "mode_label", "has_password", "inline", "session_hours"):
+        for key in ("mode", "mode_label", "has_password", "inline", "session_hours",
+                    "session_seconds", "session_text"):
             self.assertIn(key, state)
+        self.assertEqual(state["session_seconds"], config.DEFAULT_SESSION_MAX_AGE)
+        self.assertEqual(state["session_text"], "30 天", "面板上要说人话，不写秒数")
         self.assertFalse(
             any("password" in key.lower() and key != "has_password" for key in state),
             "口令面板的状态里不许出现任何凭据字段",
         )
+
+    def test_面板上显示的是人话时长(self) -> None:
+        template = (REPO_ROOT / "webui" / "templates" / "dashboard.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("session_text", template)
+        self.assertIn("session_seconds", template)
+        self.assertIn("登录保持", template)
 
     def test_口令表单不会被总览轮询改写(self) -> None:
         """总览轮询只认 `data-overview-*`；表单里挂的是 `data-password-*`。"""
@@ -3608,6 +3703,24 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
         self.assertIn("按各账号自己的时间发", page)
         self.assertNotIn("当前没有待发送目标，下一次触发不会实际发送", page)
 
+    def test_值槽短句与字号类前后端一致(self) -> None:
+        """值槽只有一行位置（26px 大字）：派发器模式下喂它「甲 · 已过 23:59」短句，
+        整句话留给提示行。服务端渲染和 app.js 轮询必须用同一套回落顺序和同样两个
+        类名 —— 不然每 10 秒刷一次，字号和句式就跳一次。"""
+        self._with_next_due({"at": "2026-10-07T23:59:00+08:00", "name": "甲",
+                             "due_text": "23:59", "imminent": True,
+                             "text": "下一个 甲：已过 23:59，等下一次敲门就发"})
+        page = self._page_with_timer("enabled", dispatch=5)
+        self.assertIn("甲 · 已过 23:59", page, "值槽要短句，不是整句话")
+        self.assertIn("overview-value--short", page)
+        script = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("nextTriggerShort", script, "轮询不带短句就会把值槽改回整句话")
+        self.assertIn("overview-value--short", script)
+        self.assertIn("overview-value--prose", script)
+        css = (REPO_ROOT / "webui" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn(".overview-value--short", css)
+        self.assertIn(".overview-value--prose", css)
+
     def test_接口带出派发器标志与那句话(self) -> None:
         self._with_next_due(None)
         original = webui_app.store.timer_state
@@ -3632,11 +3745,225 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
 
 
 
+class MaintenanceWebUITestCase(WebUITestCase):
+    """「磁盘与资料目录」区块：只读盘点 + 手动清理，默认只预演。
+
+    真机背景（2026-10-14）：生产机上资料目录已经涨到 1GB（单账号 `Default/Cache`
+    就 451MB），磁盘只剩 25G —— **磁盘满 = 发送直接失败**，而缓存是可再生的。
+    所以面板要有一个"看得见、能预演、再手动执行"的口子。
+
+    这里钉的是**路由层**（清理规则本身在 `tests/test_maintenance.py`）：登录与
+    CSRF 两个校验都在、参数丢了只会更保守、名单读不到时把错误显示出来且
+    **真的一个文件都没删**。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = self.tmp / "login-profile"
+        self.root.mkdir()
+        self._saved_profile_dir = os.environ.get("LOGIN_PROFILE_DIR")
+        os.environ["LOGIN_PROFILE_DIR"] = str(self.root)
+        self.addCleanup(self._restore_profile_dir)
+        self.profile(UID, cache_bytes=4096)
+        self.profile(OTHER_UID, cache_bytes=2048)
+
+    def _restore_profile_dir(self) -> None:
+        if self._saved_profile_dir is None:
+            os.environ.pop("LOGIN_PROFILE_DIR", None)
+        else:
+            os.environ["LOGIN_PROFILE_DIR"] = self._saved_profile_dir
+
+    # ------------------------------------------------------------ 脚手架
+
+    def profile(self, name: str, *, cache_bytes: int = 0) -> Path:
+        """造一个资料目录：`Default/Cache`（可再生） + `Cookies`（绝不能被清掉）。"""
+        base = self.root / name / "Default"
+        cache = base / "Cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "data_0").write_bytes(b"x" * max(0, cache_bytes))
+        (base / "Cookies").write_bytes(b"sessionid-not-a-real-one")
+        (self.root / name / "Local State").write_text("{}", encoding="utf-8")
+        return self.root / name
+
+    def orphan(self, name: str, *, idle_days: float = 30.0) -> Path:
+        """造一个"不在名单里 + 很久没动"的目录（`is_orphan` 看的是 mtime）。"""
+        base = self.profile(name)
+        stamp = time.time() - idle_days * 86400
+        for path in sorted(base.rglob("*"), reverse=True):
+            os.utime(path, (stamp, stamp))
+        os.utime(base, (stamp, stamp))
+        return base
+
+    def login_client(self, client: TestClient) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.login(client)
+
+    def tree(self) -> List[Tuple[str, int]]:
+        """整棵资料目录树的 (相对路径, 字节数) —— 用来证明"预演一个字节都没动"。"""
+        rows: List[Tuple[str, int]] = []
+        for path in sorted(self.root.rglob("*")):
+            size = path.stat().st_size if path.is_file() else -1
+            rows.append((str(path.relative_to(self.root)), size))
+        return rows
+
+    def report(self, client: TestClient):
+        return client.get("/api/ops/maintenance", headers={"Accept": "application/json"})
+
+    def prune(self, client: TestClient, action: str, apply: bool = False, **kwargs: Any):
+        kwargs.setdefault("follow_redirects", False)
+        return client.post(
+            f"/ops/maintenance/{action}",
+            data={"apply": "1" if apply else "0"},
+            **kwargs,
+        )
+
+    # -------------------------------------------------------------- 用例
+
+    def test_未登录拿不到盘点(self) -> None:
+        with self.make_client() as client:
+            response = self.report(client)
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["ok"])
+
+    def test_盘点列出每个资料目录与磁盘剩余(self) -> None:
+        os.environ["TASKS"] = json.dumps(
+            [{"unique_id": UID, "username": ACCOUNT_NAME, "targets": []}], ensure_ascii=False
+        )
+        with self.make_client() as client:
+            self.login_client(client)
+            response = self.report(client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-store", "盘点是实时数字")
+        data = response.json()
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(sorted(row["name"] for row in data["rows"]), sorted([UID, OTHER_UID]))
+        # 目录名就是抖音号，光看号认不出人 → 昵称来自 TASKS。
+        row = next(item for item in data["rows"] if item["name"] == UID)
+        self.assertEqual(row["label"], f"{ACCOUNT_NAME}（{UID}）")
+        self.assertEqual(row["human_cache_bytes"], "4.0 KB")
+        self.assertIn("在册", row["tags"])
+        self.assertIn("永不删除", row["hint"])
+        self.assertEqual(data["totals"]["count"], 2)
+        self.assertIn("资料目录合计", data["totals"]["text"])
+        self.assertEqual(data["grace_days"], 7)
+        self.assertTrue(data["disk"]["ok"], data["disk"])
+        self.assertGreater(data["disk"]["free_bytes"], 0)
+        self.assertTrue(data["disk"]["text"].startswith("磁盘剩余"))
+
+    def test_预演一个字节都不动(self) -> None:
+        before = self.tree()
+        with self.make_client() as client:
+            self.login_client(client)
+            response = self.prune(client, "caches", apply=False)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"], data)
+        self.assertFalse(data["applied"])
+        self.assertTrue(data["dry_run"])
+        self.assertGreater(data["freed_bytes"], 0, "预演也要说清能释放多少")
+        self.assertIn("预演", data["headline"])
+        self.assertEqual(self.tree(), before, "预演是只读的")
+
+    def test_执行只删在册账号的可再生缓存(self) -> None:
+        with self.make_client() as client:
+            self.login_client(client)
+            response = self.prune(client, "caches", apply=True)
+        data = response.json()
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(data["applied"])
+        self.assertFalse((self.root / UID / "Default" / "Cache").exists())
+        self.assertGreater(data["freed_bytes"], 0)
+        # 登录态绝不能碰：清了就等于把账号踢下线（还得重新扫码）。
+        self.assertTrue((self.root / UID / "Default" / "Cookies").exists())
+        self.assertTrue((self.root / UID / "Local State").exists())
+        # 不在名单里的目录不归"清缓存"管（那是"清孤儿目录"的事，还带宽限期）。
+        self.assertTrue((self.root / OTHER_UID / "Default" / "Cache" / "data_0").exists())
+
+    def test_参数丢了只会更保守(self) -> None:
+        """`apply` 是决定"删不删文件"的字段：缺失/写错只能当成"不删"。"""
+        before = self.tree()
+        with self.make_client() as client:
+            self.login_client(client)
+            missing = client.post("/ops/maintenance/caches", follow_redirects=False)
+            garbage = client.post(
+                "/ops/maintenance/orphans", data={"apply": "yes-please"}, follow_redirects=False
+            )
+        for response in (missing, garbage):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(response.json()["applied"])
+        self.assertEqual(self.tree(), before)
+
+    def test_名单读不到时执行也一个都不删(self) -> None:
+        """安全线：名单读不到 → 每个目录都像"孤儿"，这时删任何东西都是灾难。"""
+        self.utils_config.userData = []      # get_userData() 读到空名单
+        os.environ["TASKS"] = "[]"
+        before = self.tree()
+        with self.make_client() as client:
+            self.login_client(client)
+            listing = self.report(client)
+            response = self.prune(client, "caches", apply=True)
+        self.assertFalse(listing.json()["ok"], "面板据此把「执行」藏起来")
+        self.assertIn("名单", listing.json()["error"])
+        self.assertEqual(listing.json()["rows"], [])
+        self.assertEqual(response.status_code, 409)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("名单", data["error"])
+        self.assertIn("没动任何文件", data["headline"])
+        self.assertEqual(self.tree(), before, "名单读不到时一个文件都不许动")
+
+    def test_清孤儿目录预演与执行(self) -> None:
+        dead = self.orphan("99999999999", idle_days=30)
+        with self.make_client() as client:
+            self.login_client(client)
+            dry = self.prune(client, "orphans", apply=False)
+            self.assertTrue(dead.exists(), "预演不删")
+            done = self.prune(client, "orphans", apply=True)
+        dry_data = dry.json()
+        self.assertTrue(dry_data["ok"], dry_data)
+        self.assertIn("99999999999", [item["label"] for item in dry_data["removed"]])
+        data = done.json()
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(data["applied"])
+        self.assertFalse(dead.exists())
+        # 在册账号的目录永不删，宽限期内的孤儿也不动（见 core.maintenance 的安全线）。
+        self.assertTrue((self.root / UID).exists())
+        self.assertIn(UID, data["kept"])
+        self.assertEqual(data["grace_days"], 7)
+
+    def test_跨站与未登录都挡在门外(self) -> None:
+        with self.make_client() as client:
+            anonymous = self.prune(client, "caches", apply=True)
+        self.assertEqual(anonymous.status_code, 401)
+        with self.make_client() as client:
+            self.login_client(client)
+            cross = self.prune(
+                client, "caches", apply=True, headers={"Origin": "http://evil.example"}
+            )
+        self.assertEqual(cross.status_code, 403)
+        self.assertTrue(
+            (self.root / UID / "Default" / "Cache" / "data_0").exists(),
+            "被挡住的请求不能有任何副作用",
+        )
+
+    def test_首页渲染出这一块(self) -> None:
+        with self.make_client() as client:
+            self.login_client(client)
+            page = client.get("/", headers={"Accept": "text/html"})
+        self.assertIn("data-maintenance-panel", page.text)
+        self.assertIn('data-maintenance-action="caches"', page.text)
+        self.assertIn('data-maintenance-action="orphans"', page.text)
+        self.assertIn('data-apply="1"', page.text)
+        self.assertIn("data-maintenance-disk", page.text)
+        self.assertIn("data-maintenance-rows", page.text)
+        self.assertIn("data-maintenance-result", page.text)
+
+
 class ReloginRequeueTests(unittest.TestCase):
     """重新扫码登录成功后，当天没发出去的要自动补发。
 
     时间表把"失败"也算办过（防的是坏 cookie 一天被门铃踹 288 次），所以掉登录
-    那一轮记完之后，人重新登录还得手点「立即运行」才会补发 —— 2026-10-09 wheat
+    那一轮记完之后，人重新登录还得手点「立即运行」才会补发 —— 2026-10-09 示例号
     掉登录那天就丢在这儿。`_requeue_after_relogin()` 在登录成功的瞬间撤掉记账，
     下一个 5 分钟门铃自动补上；**已经成功发过的账号绝不撤**（撤了就一天发两遍）。
 
@@ -3703,13 +4030,47 @@ class ReloginRequeueTests(unittest.TestCase):
         state = self.schedule.load_state(self.schedule_file)
         return self.schedule.entry_for(state, UID, self.schedule.now()) is not None
 
+    def _clear_for_retry(self) -> bool:
+        """今天还能不能补发 —— 这才是「撤记账」真正要保证的那件事。
+
+        `_marked_today()` 只看"有没有一条记录"，而 `schedule.select` 认的是**状态**：
+        只有 `ok` 这类"真发出去了"的记录才吃掉当天名额，`skipped` 的意思是
+        "今天试过但没发出去"，名额还在（见 `core/schedule.py:550`）。
+        """
+        state = self.schedule.load_state(self.schedule_file)
+        users = [{"unique_id": UID, "username": ACCOUNT_NAME, "targets": []}]
+        plan = self.schedule.select(users, state=state, fallback="00:00", jitter=0)
+        return any(user["unique_id"] == UID for user, _plan in plan["due"])
+
+    def _mark_today(self, status: str) -> None:
+        """把今天的记账改成指定状态（setUp 预置的是 `error` 墓碑）。"""
+        state = self.schedule.load_state(self.schedule_file)
+        self.schedule.mark_sent(
+            state, UID, when=self.schedule.now(), status=status, note="test"
+        )
+        self.schedule.save_state(state, self.schedule_file)
+
+    def _clear_marks(self) -> None:
+        """清空状态文件 —— 测"两边都没有今天的记录"那一支。
+
+        ★ 2026-10-14 起状态文件也算"今天跑过"（见 `_requeue_after_relogin`）：
+          setUp 预置的那条 error 墓碑会走"撤账补发"，所以想测"今天根本没轮到它"
+          就必须把状态也清干净。
+        """
+        self.schedule.save_state({}, self.schedule_file)
+
     # -------------------------------------------------------------- 用例
 
     def test_zero_sent_today_clears_the_mark(self):
         self.write_ledger([self._run_today(sent_ok=0)])
         out = webui_app._requeue_after_relogin(UID)
         self.assertTrue(out["requeued"], out)
-        self.assertFalse(self._marked_today())
+        # 撤记账写成 `skipped` 墓碑，而不是把记录删掉：面板要能说出"今天试过但没
+        # 发出去"，而"还能不能发"由状态决定 —— 所以两个断言都要。
+        state = self.schedule.load_state(self.schedule_file)
+        record = self.schedule.entry_for(state, UID, self.schedule.now())
+        self.assertEqual(str(record.get("status") or ""), self.schedule.STATUS_SKIPPED)
+        self.assertTrue(self._clear_for_retry(), "重新登录之后当天必须还能补发")
 
     def test_already_sent_today_keeps_the_mark(self):
         self.write_ledger([self._run_today(sent_ok=2)])
@@ -3735,25 +4096,237 @@ class ReloginRequeueTests(unittest.TestCase):
 
     def test_no_run_today_is_left_alone(self):
         """今天根本没轮到它 → 没有记账要撤，保持原样（信息类返回，不报错）。"""
+        self._clear_marks()
         self.write_ledger([])
         out = webui_app._requeue_after_relogin(UID)
         self.assertFalse(out["requeued"])
         self.assertEqual(out["reason"], "no-run-today")
-        self.assertTrue(self._marked_today())
+        self.assertFalse(self._marked_today())
 
     def test_another_accounts_run_does_not_requeue(self):
-        """账本里今天的记录是**别的**账号的 → 不能撤这个账号的记账。"""
+        """账本里今天的记录是**别的**账号的、状态里也没有它 → 不能撤这个账号的记账。"""
+        self._clear_marks()
         self.write_ledger([self._run_today(sent_ok=0, unique_id=OTHER_UID)])
         out = webui_app._requeue_after_relogin(UID)
         self.assertFalse(out["requeued"])
         self.assertEqual(out["reason"], "no-run-today")
-        self.assertTrue(self._marked_today())
+        self.assertFalse(self._marked_today())
+
+    def test_ok_mark_today_keeps_the_mark(self):
+        """状态里今天已经是 `ok` → 账本读不到也不能补发（补了朋友会收到两遍）。
+
+        账本和状态是**两次写**，账本还可能被轮转/截断；状态里明明记着"今天发出去了"，
+        只看账本就会当成"今天没跑过"而撤账补发。
+        """
+        self._mark_today(self.schedule.STATUS_OK)
+        self.write_ledger([])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertFalse(out["requeued"], out)
+        self.assertEqual(out["reason"], "already-sent")
+        state = self.schedule.load_state(self.schedule_file)
+        record = self.schedule.entry_for(state, UID, self.schedule.now())
+        self.assertEqual(str(record.get("status") or ""), self.schedule.STATUS_OK)
+        self.assertFalse(self._clear_for_retry(), "已经发过了，当天名额不能还回来")
+
+    def test_error_mark_without_ledger_still_requeues(self):
+        """状态里有今天（error）、账本里没有今天的行 → 允许撤账补发。
+
+        收尾时先写状态、后追加账本，中间被 SIGKILL/OOM/重启打断就是这个样子。
+        旧口径只看账本 → `no-run-today` → 既不撤账也不补发，当天火花静默丢失。
+        """
+        # setUp 写的就是 error 墓碑；账本留空 = 那一行没落盘。
+        self.write_ledger([])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertTrue(out["requeued"], out)
+        self.assertEqual(out["reason"], "")
+        self.assertTrue(self._clear_for_retry(), "撤账之后当天必须还能补发")
+
+    def test_skipped_mark_without_ledger_still_requeues(self):
+        """`skipped`（试过但没发出去）同样不该吃掉当天名额。"""
+        self._mark_today(self.schedule.STATUS_SKIPPED)
+        self.write_ledger([])
+        out = webui_app._requeue_after_relogin(UID)
+        self.assertTrue(out["requeued"], out)
+        self.assertTrue(self._clear_for_retry())
 
     def test_empty_uid_is_a_noop(self):
         out = webui_app._requeue_after_relogin("")
         self.assertFalse(out["requeued"])
         self.assertEqual(out["reason"], "no-uid")
         self.assertTrue(self._marked_today())
+
+
+class StartSlotTests(unittest.TestCase):
+    """开启窗口的占位：忙检查与"占位登记"必须在同一把锁里完成。
+
+    真实场景是双击「扫码登录」：旧代码在锁内查忙、出锁去拉起 Chromium（秒级）、
+    **最后**才登记会话。第二个请求于是在"还没登记"的窗口里也通过了忙检查，两个
+    Chromium 抢同一份 `logs/login-profile/<uid>/`，第二个抛 SingletonLock 之后
+    context 没有引用、那目录再也打不开。现在第一个请求一进临界区就占位，第二个
+    必须当场被拒（路由层是 409 + 中文原因）。
+    """
+
+    def setUp(self) -> None:
+        self.addCleanup(webui_app._LOGIN_SESSIONS.clear)
+        self.addCleanup(webui_app._FRIEND_SESSIONS.clear)
+        self.addCleanup(setattr, webui_app, "_LOGIN_LATEST", "")
+        self.addCleanup(setattr, webui_app, "_FRIEND_LATEST", "")
+        self._log_patcher = mock.patch.object(webui_app, "_log")
+        self._log_patcher.start()
+        self.addCleanup(self._log_patcher.stop)
+
+    def _claim(self, sessions, lock, *, profile, busy_error, owner=UID, kind="login"):
+        placeholder = webui_app._StartingSession(profile_dir=profile, owner=owner, kind=kind)
+        return placeholder, webui_app._claim_start_slot(
+            sessions, lock, placeholder, busy_error=busy_error
+        )
+
+    def test_开启窗口里的第二个请求会被当场拒掉(self) -> None:
+        _, (first_id, error) = self._claim(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+            profile="/tmp/probe/profile-a", busy_error=webui_app._busy_login_error,
+        )
+        self.assertTrue(first_id, "第一个请求应该拿到占位")
+        self.assertEqual(error, "")
+
+        second, (second_id, second_error) = self._claim(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+            profile="/tmp/probe/profile-a", busy_error=webui_app._busy_login_error,
+        )
+        self.assertEqual(second_id, "", "同一个窗口里的第二个请求不能再拿到占位")
+        self.assertIn("该账号的扫码登录正在进行中", second_error)
+        # 既有断言用的关键字必须保留（tests/test_webui.py 里的「同时只能有一次扫码」）
+        self.assertIn("已经有一次扫码登录在进行", second_error)
+        self.assertNotIn(second, list(webui_app._LOGIN_SESSIONS.values()))
+
+    def test_好友侧走的是同一套(self) -> None:
+        _, (first_id, error) = self._claim(
+            webui_app._FRIEND_SESSIONS, webui_app._FRIEND_LOCK,
+            profile="/tmp/probe/profile-b", busy_error=webui_app._busy_friend_error,
+            kind="friend",
+        )
+        self.assertTrue(first_id)
+        self.assertEqual(error, "")
+
+        _, (second_id, second_error) = self._claim(
+            webui_app._FRIEND_SESSIONS, webui_app._FRIEND_LOCK,
+            profile="/tmp/probe/profile-b", busy_error=webui_app._busy_friend_error,
+            kind="friend",
+        )
+        self.assertEqual(second_id, "")
+        self.assertIn("该账号的好友列表读取正在进行中", second_error)
+        self.assertIn("已经有一次好友列表读取在进行", second_error)
+
+    def test_占位会被_profile_in_use_看见也能撤掉(self) -> None:
+        placeholder, (session_id, error) = self._claim(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+            profile="/tmp/probe/profile-c", busy_error=webui_app._busy_login_error,
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(webui_app._profile_in_use("/tmp/probe/profile-c"), "这个账号正在扫码登录")
+
+        self.assertTrue(webui_app._drop_claim(webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK, session_id))
+        self.assertEqual(webui_app._profile_in_use("/tmp/probe/profile-c"), "",
+                         "占位撤掉之后 profile 必须立刻空出来（否则就是「永远忙」的假状态）")
+        self.assertFalse(webui_app._drop_claim(webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK, session_id))
+
+    def test_卡死的占位会被更早回收(self) -> None:
+        stale, (stale_id, _) = self._claim(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+            profile="/tmp/probe/profile-d", busy_error=webui_app._busy_login_error,
+        )
+        # 浏览器启动线程死了：占位自己不会更新，也不能等满 SESSION_STUCK_SECONDS(20 分钟)
+        stale._updated = time.time() - (webui_app.START_STUCK_SECONDS + 5)
+
+        dropped = webui_app._reap_stuck_sessions(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK, label="扫码登录"
+        )
+        self.assertIn(stale_id, dropped)
+        self.assertNotIn(stale_id, webui_app._LOGIN_SESSIONS)
+        self.assertEqual(webui_app._profile_in_use("/tmp/probe/profile-d"), "")
+        self.assertTrue(stale.cancelled)
+
+    def test_刚开始的占位不会被误杀(self) -> None:
+        fresh, (fresh_id, _) = self._claim(
+            webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+            profile="/tmp/probe/profile-e", busy_error=webui_app._busy_login_error,
+        )
+        self.assertEqual(
+            webui_app._reap_stuck_sessions(webui_app._LOGIN_SESSIONS, webui_app._LOGIN_LOCK,
+                                           label="扫码登录"),
+            [],
+        )
+        self.assertIn(fresh_id, webui_app._LOGIN_SESSIONS)
+        self.assertFalse(fresh.cancelled)
+
+    def test_占位期间面板读取是安全的(self) -> None:
+        """占位对象要给出登录/好友状态里用到的字段（模板与 JS 靠 falsy 兜底）。"""
+        placeholder = webui_app._StartingSession(profile_dir="/tmp/probe/profile-f", owner=UID)
+        snap = placeholder.snapshot()
+        self.assertEqual(snap["state"], "starting")
+        self.assertTrue(snap["active"], "占位期间必须算 active，否则忙检查看不见它")
+        self.assertEqual(placeholder.items(), [])
+        self.assertEqual(placeholder.qr_png(), b"")
+        self.assertEqual(placeholder.shot_png(), b"")
+
+
+class LoginFailBudgetTests(unittest.TestCase):
+    """口令失败记账的三层治理：按来源罚站 / 全局限流 / 表有上界。"""
+
+    def setUp(self) -> None:
+        with webui_app._LOGIN_FAILS_LOCK:
+            webui_app._LOGIN_FAILS.clear()
+            webui_app._LOGIN_FAIL_TIMES.clear()
+        self.addCleanup(self._reset)
+        self._log_patcher = mock.patch.object(webui_app, "_log")
+        self._log_patcher.start()
+        self.addCleanup(self._log_patcher.stop)
+
+    def _reset(self) -> None:
+        with webui_app._LOGIN_FAILS_LOCK:
+            webui_app._LOGIN_FAILS.clear()
+            webui_app._LOGIN_FAIL_TIMES.clear()
+
+    @staticmethod
+    def _request(host: str):
+        client = type("FakeClient", (), {"host": host})()
+        return type("FakeRequest", (), {"client": client})()
+
+    def test_连错到额度开始罚站并且成功一次就清掉(self) -> None:
+        request = self._request("10.1.1.1")
+        for _ in range(webui_app._LOGIN_FAIL_LIMIT):
+            self.assertEqual(webui_app._login_wait_left(request), 0.0, "还没到额度不该拦住")
+            webui_app._note_login_fail(request)
+        self.assertGreater(webui_app._login_wait_left(request), 0.0, "连错到额度必须罚站")
+
+        webui_app._clear_login_fail(request)
+        self.assertEqual(webui_app._login_wait_left(request), 0.0)
+
+    def test_记账表有上界(self) -> None:
+        for index in range(webui_app._LOGIN_FAIL_TRACK_MAX + 88):
+            webui_app._note_login_fail(self._request(f"10.9.{index}"))
+        with webui_app._LOGIN_FAILS_LOCK:
+            tracked = len(webui_app._LOGIN_FAILS)
+        self.assertLessEqual(tracked, webui_app._LOGIN_FAIL_TRACK_MAX,
+                             "换 IP 猜口令不能把面板的内存吃掉")
+
+    def test_早就走人的记账会被清掉(self) -> None:
+        request = self._request("10.8.8.8")
+        with webui_app._LOGIN_FAILS_LOCK:
+            webui_app._LOGIN_FAILS["10.8.8.8"] = [
+                1, 0.0, time.monotonic() - webui_app._LOGIN_FAIL_FORGET - 60,
+            ]
+        self.assertEqual(webui_app._login_wait_left(request), 0.0)
+        self.assertNotIn("10.8.8.8", webui_app._LOGIN_FAILS)
+
+    def test_全局限流能挡住换_IP_的(self) -> None:
+        for index in range(webui_app._LOGIN_FAIL_GLOBAL_MAX):
+            self.assertEqual(webui_app._login_global_wait_left(), 0.0)
+            webui_app._note_login_fail(self._request(f"10.2.0.{index}"))
+        self.assertGreater(webui_app._login_global_wait_left(), 0.0,
+                           "所有来源合计打满之后要整体拒一小会儿")
+        self.assertGreater(webui_app._LOGIN_FAIL_GLOBAL_MAX, 4,
+                           "正常运维输错几次（手滑）不能被全局限流锁死")
 
 
 if __name__ == "__main__":
