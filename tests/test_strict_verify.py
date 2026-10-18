@@ -293,12 +293,19 @@ class ReceiptVerdictTests(unittest.TestCase):
         self.assertEqual(v.level, LEVEL_STRONG)
         self.assertEqual(v.reason, "")
 
-    def test_http_receipt_with_other_conv_is_not_strong(self):
-        """发送后当前会话不是目标 → 不许给 strong，理由要写明"会话不匹配"。
+    def test_http_receipt_with_other_conv_is_failure_not_strong(self):
+        """发送后当前会话不是目标 → 判"发错人"（conflict），连 ok 都不许给。
 
-        只有扫描阶段没读到 conv_id 才走得到这里（读到了就走 `receipt_wrong_conv`
+        只有扫描阶段没读到 conv_id 才走得到这里（读到了就走上面 `receipt_wrong_conv`
         的 conflict 分支），期望的会话 id 靠 `self_uid + peer_uid` 反算，
         所以 `self_uid` 必须传进来 —— 不传就核验不了收件人。
+
+        ★ 从前这里判 `ok=True / medium`（"反正服务端收下了一条"），于是真发错人
+        被记成发送成功：`core/tasks.py` 记 `sent_ok += 1`、账本 ok=true、
+        `core/schedule.select()` 认定当天已发、面板写"今天 HH:MM 已发" ——
+        而消息送到了**别人**那里（GitHub issue #13）。回执里的 code/status
+        证明不了收件人是谁（`decode_send_resp` 只解 code/status/message_id），
+        所以"稳定地看错会话"必须与"两次读数不一致"（`dom_conv_off`）同级。
         """
         e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
                               display="甲同学", matched_by="remark")
@@ -307,10 +314,15 @@ class ReceiptVerdictTests(unittest.TestCase):
         after = {"convId": CONV_B, "count": 11, "lastFromMe": True}
         v = verify_receipt(e, before=before, after=after,
                            receipts=[{"ok": True, "message_id": "mid-1"}], self_uid=ME)
-        self.assertTrue(v.ok)
-        self.assertIsNot(v.level, LEVEL_STRONG)
-        self.assertEqual(v.level, LEVEL_MEDIUM)
-        self.assertIn("会话不匹配", v.reason)
+        self.assertFalse(v.ok)
+        self.assertEqual(v.level, LEVEL_CONFLICT)
+        # `reason` 是与 `dom_conv_off` 共用的那一个码（面板文案见
+        # webui/viewmodel.py 的 REASON_LABELS），人话在 `detail` 里
+        self.assertEqual(v.reason, "receipt_wrong_conv")
+        self.assertIn("会话不是目标", v.detail)
+        self.assertIn("回执本身不带收件人", v.detail)
+        self.assertEqual(v.evidence["want_conv"], CONV_A)
+        self.assertIs(v.evidence["recipient_ok"], False)
 
     def test_http_receipt_with_derived_conv_id_matching_is_strong(self):
         """同上但当前会话正是反算出来的那一个 → strong（证明上一条不是恒判 medium）。"""
@@ -323,15 +335,24 @@ class ReceiptVerdictTests(unittest.TestCase):
         self.assertEqual(v.level, LEVEL_STRONG)
 
     def test_http_receipt_with_self_uid_unknown_still_checks_recipient(self):
-        """连 self_uid 都拿不到时退化成"目标 uid 在不在 conv_id 里"，仍能认出会话不匹配。"""
+        """连 self_uid 都拿不到时退化成"目标 uid 在不在会话里"，仍能认出会话不匹配。
+
+        这是 #13 里"`self_uid` 拿不到是常态"的那一格（core/strict_verify.py:117-120
+        自己写明）：`want_conv` 反算不出来，判据只剩 `_conv_holds_peer`
+        —— PEER_A 不在 CONV_B 的参与者里 → `recipient_ok is False` → 一样判失败。
+        """
         e = build_expectation("甲同学", self_uid=None, peer_uid=PEER_A,
                               display="甲同学", matched_by="remark")
         before = {"convId": CONV_B, "count": 10, "lastFromMe": False}
         after = {"convId": CONV_B, "count": 11, "lastFromMe": True}
         v = verify_receipt(e, before=before, after=after,
                            receipts=[{"ok": True, "message_id": "mid-1"}], self_uid=None)
-        self.assertEqual(v.level, LEVEL_MEDIUM)
-        self.assertIn("会话不匹配", v.reason)
+        self.assertFalse(v.ok)
+        self.assertEqual(v.level, LEVEL_CONFLICT)
+        self.assertEqual(v.reason, "receipt_wrong_conv")
+        self.assertIn("的参与者里没有目标", v.detail)
+        self.assertIsNone(v.evidence["want_conv"])
+        self.assertIs(v.evidence["recipient_ok"], False)
 
     def test_group_conv_id_is_not_strong_by_default(self):
         """会话 id 不是单聊形状（群聊）→ 收件人核验不了，保守判弱证据。"""

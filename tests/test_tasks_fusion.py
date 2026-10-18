@@ -556,6 +556,20 @@ class LimitGuardIntegrationTests(_TasksCase):
         self.assertGreater(active["remaining_seconds"], 0)
         self.assertFalse(os.path.exists(self.lock_file))   # 熔断也必须释放锁
 
+        # ★ 同一次熔断，门禁那条（见下）记 `skipped`，发送中这条从前**什么状态都不写**
+        #   → 保持 `out` 的初值 "ok" → `_mark_status()` 兜成 STATUS_OK → 时间表认定
+        #   "今天已发"、当天名额被吃掉，而这条消息一条都没送到（GitHub issue #14）。
+        #   第一个目标就熔断、sent_ok == 0，账号级结论必须与门禁那条一致。
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "skipped")
+        self.assertTrue(acct["abort_run"])
+        self.assertIn("rate_aborted", acct["error"])
+        self.assertIn("操作频繁", acct["error"])
+        # 面板与调度读的是**落盘的状态文件**，不是内存里的返回值：两边都要是 skipped
+        with open(self.schedule_file, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["accounts"]["111"]["status"], "skipped")
+
     def test_pre_send_limit_stops_before_any_message(self):
         self._set_users(self.users)
         _FakeIM.pre_limit = {"keyword": "安全验证", "category": "captcha",
@@ -652,17 +666,24 @@ class LimitGuardIntegrationTests(_TasksCase):
         self.assertTrue(limit_guard.LimitGuard(path=self.rate_file).in_cooldown())
 
     def test_cooldown_seconds_follow_config(self):
-        """**F3 回归**：`LIMIT_COOLDOWN_MINUTES` 从前是死配置（永远 30 分钟）。"""
+        """**F3 回归**：`LIMIT_COOLDOWN_MINUTES` 从前是死配置（永远 30 分钟）。
+
+        ★ 同时是 issue #14 的**反向钉子**：`ok=True` 的回执先被送达过一次
+        （sent_ok == 1），之后才熔断 —— 这时照旧必须记 `ok`。若把"熔断即 skipped"
+        写死在分支上，账号会平白多出一次重试、面板也谎报"没发出去"。
+        """
         self._set_users(self.users)
         _FakeIM.result = _ok_result(
             ok=True, rate_limited=True,
             limit={"keyword": "操作频繁", "category": "rate_limit", "source": "http"})
         with mock.patch.dict(tasks_mod.config, {"limitCooldownMinutes": 120}):
-            tasks_mod.runTasks(dry_run="off", source="test")
+            rec = tasks_mod.runTasks(dry_run="off", source="test")
         with open(self.rate_file, encoding="utf-8") as f:
             import json
             saved = json.load(f)
         self.assertEqual(saved["cooldown_seconds"], 7200)
+        self.assertEqual(rec["accounts"][0]["status"], "ok")      # 送达过 → 仍算已发
+        self.assertNotIn("rate_aborted", rec["accounts"][0].get("error") or "")
 
 
 class QuietWindowIntegrationTests(_TasksCase):

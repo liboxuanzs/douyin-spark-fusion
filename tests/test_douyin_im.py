@@ -1571,6 +1571,70 @@ class ReceiptVerdictIntegrationTests(unittest.TestCase):
         self.assertEqual(rc["verdict"].reason, "receipt_wrong_conv")
         self.assertTrue(rc["dom_conv_off"])
 
+    def test_scan_conv_id_reaches_verdict_when_self_uid_is_unknown(self):
+        """扫描阶段读到的目标 conv_id 必须原样进判定层（GitHub issue #13）。
+
+        `_wait_receipt` 从前构造期望时**漏传** `conv_id=want`，于是
+        `verify_receipt` 里"发送后当前会话不是目标"的第一条闸恒不成立；
+        这里把 `self_uid` 也抠掉（DOM 兜底判登录时它是 None，是常态），
+        反算路径同时失效 —— 结果是**发错人**只剩显示名可看，被降级成
+        `ok=True / medium`，任务层记成发送成功、当天名额被吃掉。
+        """
+        self.im._state = {}                      # self_uid 拿不到（常态）
+        # 发送前后页面上的会话都是 conv_b：第二条闸（发送前后不同）不成立，
+        # 所以只有"扫描读到的 conv_id 传下去了"才能认出这次发错了人
+        self.im.cur = {"convId": self.conv_b}
+        self.before = {"convId": self.conv_b, "count": 10, "lastFromMe": False}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "你好"}
+        self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
+                              "status": "OK"}]
+        rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertFalse(rc["ok"])
+        self.assertEqual(rc["verdict"].reason, "receipt_wrong_conv")
+        self.assertTrue(rc["dom_conv_off"])
+        self.assertEqual(rc["verdict"].evidence["want_conv"], self.conv_a)
+        self.assertIn("会话不是目标", rc["verdict"].detail)
+
+    def test_unknown_self_uid_and_no_scan_conv_id_still_catches_wrong_peer(self):
+        """扫描没读到 conv_id、self_uid 也拿不到 → 退回"目标 uid 在不在会话里"。
+
+        判据只剩 `_conv_holds_peer`：会话里没有 PEER_A → 一样判「发错人」。
+        从前这一格返回 `ok=True / medium`，正是 issue #13 报的"稳定地看错人却算成功"。
+        """
+        self.im._state = {}
+        self.item = {"uid": PEER_A, "display": "甲同学"}     # 扫描没读到 conv_id
+        self.im.cur = {"convId": self.conv_b}
+        self.before = {"convId": None, "count": 10, "lastFromMe": False}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "你好"}
+        self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
+                              "status": "OK"}]
+        rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertFalse(rc["ok"])
+        self.assertEqual(rc["verdict"].reason, "receipt_wrong_conv")
+        self.assertEqual(rc["verdict"].level, "conflict")
+        self.assertIsNone(rc["verdict"].evidence["want_conv"])
+        self.assertIs(rc["verdict"].evidence["recipient_ok"], False)
+        self.assertIn("的参与者里没有目标", rc["verdict"].detail)
+
+    def test_unknown_self_uid_with_right_conv_is_still_strong(self):
+        """同一格的正向对照：会话里**有** PEER_A → 仍然判成功且强证据。
+
+        "认不出收件人"和"认出收件人不是目标"必须继续分开：把上面那条修成
+        conflict 之后，这里不能跟着一起变失败（否则每一次发送都会判失败、
+        重复发送）。
+        """
+        self.im._state = {}
+        self.item = {"uid": PEER_A, "display": "甲同学"}     # 扫描没读到 conv_id
+        self.im.cur = {"convId": self.conv_a}
+        self.before = {"convId": None, "count": 10, "lastFromMe": False}
+        self.im.state = {"count": 11, "lastFromMe": True, "lastText": "你好"}
+        self.im.mon.sends = [{"ok": True, "message_id": "mid-1", "code": 0,
+                              "status": "OK"}]
+        rc = self.im._wait_receipt(0, self.before, "你好", 0.2, hit=self.item)
+        self.assertTrue(rc["ok"])
+        self.assertEqual(rc["verdict"].level, "strong")
+        self.assertIs(rc["verdict"].evidence["recipient_ok"], True)
+
     def test_failed_receipt_without_dom_growth_is_failure(self):
         """服务端明确拒绝、DOM 也没涨 → 失败（conflict 级，调用方应告警而不是重发）。"""
         self.im.cur = {"convId": self.conv_a}

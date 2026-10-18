@@ -413,11 +413,21 @@ def verify_receipt(expect: Expectation, *, before, after,
         # 收件人。点得出（recipient_ok is True）才配叫强；点不出或点错了降级。
         # 注意这里**不动** ok —— 回答的是"证据够不够硬"，不是"发没发出去"。
         if recipient_ok is False:
-            return Verdict(True, LEVEL_MEDIUM,
-                           f"HTTP 回执 ok，但发送后当前会话是 {a_conv!r}"
-                           f"（期望 {want_conv or expect.peer_uid!r}）"
-                           f"—— 会话不匹配，回执本身不带收件人",
-                           "HTTP 回执 ok", evidence)
+            # ★ 发送后页面上的会话**不是目标**：这是"知道得够多才发现对不上"
+            #   （反算出的 id 不一致，或单聊参与者里根本没有目标 uid）—— 也就是
+            #   **发错人**，比"没发出去"严重得多。回执里的 code/status 证明不了
+            #   收件人是谁（`decode_send_resp` 只解 code/status/message_id），所以它
+            #   与上面 `dom_conv_off` 同级：判 conflict，即使服务端回了 ok 也不算成功。
+            #   以前这里返回 `ok=True / medium` → `core/tasks.py` 记 `sent_ok += 1`
+            #   → `core/schedule.select()` 认定"今天发过了"，用户看不出任何异常
+            #   （GitHub issue #13）。调用方会重试，重试前按 conv_id 重新选中
+            #   （`core/tasks.py` 的 `friend["reselect"]`）—— 正好修正选错的会话。
+            detail = (f"发送后当前会话 {a_conv!r} 不是目标的会话 {want_conv!r}"
+                      if want_conv else
+                      f"发送后当前会话 {a_conv!r} 的参与者里没有目标 "
+                      f"{expect.peer_uid!r}")
+            return Verdict(False, LEVEL_CONFLICT, "receipt_wrong_conv",
+                           f"会话不是目标：{detail}（回执本身不带收件人）", evidence)
         if recipient_ok is True:
             # ★ 判 strong 的**正向**条件只有这一条：回执 ok **且** 能点名收件人
             #   （发送后当前会话就是目标会话）。

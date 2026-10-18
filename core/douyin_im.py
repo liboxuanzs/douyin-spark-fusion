@@ -3315,6 +3315,14 @@ class DouyinIM:
             (hit or {}).get("display") or want or "",
             self_uid=self.self_uid,
             peer_uid=self._peer_uid_for(want, hit, (hit or {}).get("uid")),
+            # ★ 把扫描时读到的目标 conv_id 原样交给判定层（与选中阶段 `_select_and_verify`
+            #   里是同一处构造、同一条理由）。这一行不是可选的：回执阶段能拿到"目标是谁"
+            #   的只有两处 —— 发送前后的 convId 读数，和这里传下去的期望。少了它，
+            #   `verify_receipt()` 里"发送后当前会话不是目标"的第一条闸恒不成立；而
+            #   `self_uid` 取不到是常态（DOM 兜底判登录时返回 None），反算路径也一起
+            #   失效，于是**发错人**只剩显示名可看、被降级成 medium 且 ok=True ——
+            #   账号当天名额被吃掉（GitHub issue #13）。
+            conv_id=want,
             display=(hit or {}).get("display") or "",
             matched_by="conv_id",
         )

@@ -418,6 +418,25 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
                 "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
             )
+        elif dry_run == DRY_RUN_OFF and sent_ok == 0 and out.get("abort_run"):
+            # **发送过程中命中风控熔断，而这一轮一条都没送出去**。同一次熔断，
+            # 上面门禁处写的是 `status="skipped"`，这里却什么状态都不写 → 保持
+            # `out["status"]` 的初值 "ok"（见上面 out 的构造）→ `_mark_status()`
+            # 兜成 STATUS_OK → 时间表认定"今天已发"、当天名额被吃掉，而用户不知道
+            # 消息其实一条都没送到（`_mark_status` 的 docstring 点名要避免的形状）。
+            # 触发很普通：**第一个目标**（或前几个都没成功时）的回执带
+            # `rate_limited=True`（「操作频繁」「安全验证」），此时 sent_ok == 0。
+            # 判据用 `sent_ok == 0` 而不是"有没有熔断"：先成功、后熔断的账号确实
+            # 送达过，必须照旧记 ok（反向钉子见 tests/test_tasks_fusion.py）。
+            # 记 skipped 而不是 error：熔断是**有意为之**，不该像坏 cookie 那样把
+            # 账号判成「需要处理」；skipped 只吃掉一次重试预算（上限 6 次），
+            # 且冷却窗口本身会挡住接下来的门铃（limit_guard），重新登录也会撤账。
+            out["status"] = "skipped"
+            out["error"] = (
+                "rate_aborted: 发送中命中风控"
+                f"（{(out.get('limit') or {}).get('keyword') or '触发限流'}），"
+                "本轮一条都没送达；名额留着，冷却结束或重新登录后会补发"
+            )
         elif (dry_run == DRY_RUN_OFF and sent_ok == 0
               and not out.get("abort_run")):
             # **一条都没送达**。这里刻意**不再要求 `sent_fail > 0`**：从前只有
