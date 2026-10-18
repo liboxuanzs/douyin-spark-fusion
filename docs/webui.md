@@ -104,6 +104,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | POST | `/ops/friends/cancel` | 停止当前读取（200；没有在跑的则 409） |
 | POST | `/ops/account/targets` | 表单 `unique_id` + **`picked`（可重复，每个值是一小段 JSON `{"name","uid","conv_id"}`）**，保存勾选结果到 `.env` 的 `TASKS`；`picked` 为空时回落到旧的 `targets` 文本字段（每行/逗号分隔的名字，给命令行与老配置用） |
 | POST | `/ops/account/remove` | 移除账号（连 `COOKIES_<抖音号>` 一起删） |
+| POST | `/ops/account/requeue` | 表单 `unique_id`：**撤回今天的记账**，让当天剩下的门铃把它补发一次（issue #12 的手动出口）。**今天已经成功发过的账号会被拒绝**（"已经发过就不撤"的判定在 `core/schedule.requeue_after_relogin()`），所以这个按钮造不出"一天发两遍"；`?format=json` 走 JSON |
 | POST | `/ops/config/save` | 保存「运行配置」表单：只认 `webui/settings.py` 白名单里的键，写前备份 `.env`；`?format=json` 走 JSON 报错 |
 | POST | `/ops/password` | 改面板自己的访问口令：字段 `current`/`new`/`confirm`/`store`（`plain`\|`hash`）。`WEBUI_PASSWORD` 与 `WEBUI_PASSWORD_HASH` **两个键一起写**（不用的那个写成空行），成功即**所有旧会话立刻失效**（303 回登录页）；`?format=json` 走 JSON |
 | GET | `/healthz` | 免登录健康检查 `{"ok":true}` |
@@ -121,7 +122,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   C 没有 B 的"仅回执"这一档，所以那张卡不渲染（不是隐藏，是压根不存在）。
   "本轮已发送"不是独立一张卡，而是进度环旁边的那个数字。
 - **账号与目标好友**：每个账号一张卡片（不是表格），卡片头是名字 + 抖音号/指纹/cookie 项数 +
-  状态标签，右侧是「明细 / 重新登录 / 移除」；下面一条进度条与三个数字（强确认 / 需处理 /
+  状态标签，右侧是「明细 / 重新登录 / 补发今天 / 移除」；下面一条进度条与三个数字（强确认 / 需处理 /
   待发送），异常原因直接列在卡片里。同一个账号**只渲染一次** —— 总览数据与扫码登录数据在
   `webui/app.py::merge_account_rows()` 里按 `unique_id` 合并成一张卡。点进运行记录页看明细。
 - **立即运行**：**整页唯一的动作按钮**。三档空跑用分段控件选，按钮文字与配色随档位变化
@@ -287,6 +288,10 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | 账号全被门禁拦下（登录失效/掉登录/超时），那一轮却显示绿色「成功」 | 轮次判决只看"有没有失败"，而每个账号都是 `skipped` 时既没成功也没失败 | 新增判决「账号全被跳过」（`status="blocked"`，`totals["entries"] == 0` 时才算）；只要有一个账号真跑了就还是「成功」，别把话说反 |
 | `.env` 里没有的下拉项被"顺手"写死 | 浏览器遇到"当前值不在选项里"会默认选中**第一项**，用户不动它直接点保存，就把一个从来没配过的键写成第一项的值（例如凭空写出 `DRY_RUN=off`） | 缺项时下拉框最前面插一个空值占位项「（.env 里没有，工具用默认值 X）」—— 它与 `.env` 原文一致，`collect()` 据此判定"没动过"，一个字节都不写；认不出的当前值同样插在最前面，不会被第一项顶掉 |
 | 正在编辑的配置被 10 秒轮询改回旧值 | 表单字段若复用 `data-overview-value` 挂点，总览轮询会把输入框里的内容换成 `.env` 里的旧值 | 表单用 `data-config-input`，`app.js` **完全不认识**这个挂点（`FrontendAgreementTests::test_配置表单不会被总览轮询改写` 钉住）；口令表单同理用 `data-password-*` |
+| 空跑跑了一轮，页面安安静静地把它讲成发送 | 空跑药丸与那两句说明由模板的 `{% if summary.dry_run %}` 决定在不在页面上 —— 首屏打开时档位是 `off`，之后切成空跑，页面上根本没有可写的节点（2026-10-18 issue #9） | 两块都改成**常驻元素 + `hidden`**，两种说明（各账号档位不一致 / 整页一个档位）各自常驻、档位文字单独挂一个槽；`/api/ops/overview` 的 `summary` 新增 `dryRun`/`dryRunText`；`FrontendAgreementTests::test_空跑药丸与两种说明都能被轮询重画` 钉住 |
+| 跑到一半命中风控、跨进禁跑窗，页面顶部什么都不说 | 顶部状态横幅只有服务端渲染那一刻算一次：`/api/ops/overview` 的 payload 里**没有 `banners`**，前端也就没有可用来重画它的数据，那条倒计时永远等不到它的横幅（2026-10-18 issue #10） | 横幅常驻一个容器（`data-status-banner-list`）+ 模板母版（`data-status-banner-tpl`），payload 新增 `banners`（文案仍然只有 `viewmodel._banners()` 一处，前端只切显隐与文字）；倒计时改成**每秒重新取节点**，新插进来的横幅也有倒计时 |
+| 运行期间还能点「移除 / 重新登录」 | `updateActions()` 认的 `data-action-count-source`/`data-action-count`/`data-disable-while-running` 三个挂点在 `templates/` 下命中数是 0 —— 它自 `9c7a3a8` 起就是死代码，承诺的"运行期间禁用"从未发生（2026-10-18 issue #11） | 三个计数挂点连同 `updateActions()` 一起删掉；"运行期间不许动账号"改由 `data-disable-while-running` 接管，轮询按 `task.running` 写 `disabled`，服务端首屏同样渲染；「重新登录」另有一路禁用理由（扫码会话开着），也渲染成 `data-login-active` 发给轮询，避免 10 秒后把服务端禁用的按钮重新点亮 |
+| 同一份新 cookie：面板扫码会当天补发，configTool 扫码不会 | "登录成功 → 撤今天的记账"这套判定原来写在 `webui/app.py` 里，只有面板扫码那条路调得到；configTool 那条路只写 `.env`，于是用户从它登录完，当天的火花静默丢失（2026-10-09 事故换个入口重演，2026-10-18 issue #12） | 判定搬到 `core/schedule.requeue_after_relogin()` **只有一份**，面板扫码与 configTool 登录成功都调它；另加「补发今天」按钮（`POST /ops/account/requeue`）作为手动出口 —— 哪条路都没走到时，用户不必去手改 `logs/schedule_state.json` |
 | 在面板里改了口令，登出后老口令照样能进 | 只写了 `WEBUI_PASSWORD`，而 `.env` 里还留着更早的 `WEBUI_PASSWORD_HASH` —— 校验是**哈希优先** | 两个键一起写（不用的那个清成空行）；再给 token 加 `credential_fingerprint()`，改完口令所有旧会话立刻失效 |
 | 以为"登录要用密钥" | `WEBUI_SESSION_SECRET` 的注释写成"会话签名密钥"，看着像是登录凭据 | 文档与 `.env` 注释都点明它**只是 cookie 的签名密钥**，登录框只认 `WEBUI_PASSWORD` / `WEBUI_PASSWORD_HASH`；口令能在面板「访问口令」里自己改 |
 | 面板预览是三行，真发出去是一行、行尾还挂个 `n` | 模板里写的字面 `\n` 在**配置层**就被吃掉了：单元文件用了 systemd 的 `EnvironmentFile=`（它按转义序列解析值），而 `main.py` 当年 `load_dotenv(".env")` 的 `override` 默认 `False`，被弄坏的进程环境反而赢了文件 | 两份 unit 都不写 `EnvironmentFile=`；`.env` 只由程序读（`utils/config.load_env_file`，绝对路径、**文件优先**，`DRY_RUN`/`RUN_MODE`/`RUN_SOURCE` 仍归启动方）；进程值与文件值不一致时打 WARNING 报出两边；面板预览读的就是这份文件，不存在"两套值" |

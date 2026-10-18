@@ -725,7 +725,29 @@ class GuiSourceGuardTests(unittest.TestCase):
 
     def test_login_saved_forces_a_save_and_returns_it(self):
         body = self._body(self.main, "_on_login_saved")
-        self.assertIn("return self.save_now(force=True)", body)
+        self.assertIn("saved = self.save_now(force=True)", body)
+        self.assertIn("return saved", body)
+
+    def test_login_saved_also_requeues_todays_mark(self):
+        """issue #12：configTool 是 README 里与面板并列的第二条正规登录路径。
+
+        原来只有面板那半条路会撤当天的记账，于是同一份新 cookie，面板扫码进来当天补发、
+        从这里扫码进来当天照样不发 —— 而两边显示的都是"登录成功了"。
+        """
+        body = self._body(self.main, "_on_login_saved")
+        self.assertIn("self._requeue_after_relogin(account)", body)
+        self.assertLess(
+            body.index("save_now"),
+            body.index("_requeue_after_relogin"),
+            "必须先落盘再撤账：写盘失败还撤账 = 白扔一天",
+        )
+
+    def test_requeue_helper_uses_the_shared_schedule_function(self):
+        """撤账判定只许有一份（`core/schedule.requeue_after_relogin`），别再自己判一遍。"""
+        body = self._body(self.main, "_requeue_after_relogin")
+        self.assertIn("schedule.requeue_after_relogin", body)
+        self.assertNotIn("retract_mark", body, "判定属于 core/schedule，工具里不许再写一份")
+        self.assertIn("self._set_message", body, "撤没撤必须说出来，不能让用户猜")
 
     def test_only_one_login_dialog_at_a_time(self):
         body = self._body(self.main, "_open_login_dialog")

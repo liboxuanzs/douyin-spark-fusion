@@ -1025,6 +1025,118 @@ class RetractMarkTests(_StateCase):
         self.assertEqual([p["unique_id"] for _u, p in after["due"]], ["11223344556"])  # 刹车松开
 
 
+class RequeueAfterReloginTests(_StateCase):
+    """`requeue_after_relogin` —— 两条登录路径（面板扫码 + configTool）共用的同一份判定。
+
+    issue #12：这份判定原来是面板里的**私有实现**，configTool 那条正规登录路径走不到它，
+    于是同一份新 cookie 从两条路进来结果不同 —— 面板会当天补发、configTool 不会，
+    而用户在两边看到的都是"登录成功了"。判定只有一份，才不会再次分叉。
+    """
+
+    UID = "11223344556"
+
+    def setUp(self):
+        super().setUp()
+        self.saved_env = {
+            key: os.environ.get(key)
+            for key in ("SCHEDULE_STATE_FILE", "RUN_LEDGER_FILE")
+        }
+        os.environ["SCHEDULE_STATE_FILE"] = self.path
+        self.ledger = os.path.join(self.dir, "runs.jsonl")
+        os.environ["RUN_LEDGER_FILE"] = self.ledger
+
+        def restore():
+            for key, value in self.saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+
+    def _write_ledger(self, rows):
+        lines = [
+            row if isinstance(row, str) else json.dumps(row, ensure_ascii=False)
+            for row in rows
+        ]
+        with open(self.ledger, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + ("\n" if lines else ""))
+
+    @staticmethod
+    def _run(sent_ok, unique_id="11223344556"):
+        return {
+            "run_id": "20261007-080000",
+            "started_at": schedule.iso(_at("2026-10-07 08:00:00")),
+            "dry_run": "off",
+            "accounts": [{
+                "unique_id": unique_id,
+                "username": "示例号",
+                "status": "error" if sent_ok == 0 else "ok",
+                "gate": "READY",
+                "sent_ok": sent_ok,
+                "sent_fail": 0,
+            }],
+        }
+
+    def _mark_today(self, status):
+        state = schedule.load_state(self.path)
+        schedule.mark_sent(state, self.UID, when=_at(), status=status, note="test")
+        schedule.save_state(state, self.path)
+
+    def _mark_of_today(self):
+        state = schedule.load_state(self.path)
+        return schedule.entry_for(state, self.UID, _at())
+
+    def test_error_mark_today_is_retracted_and_saved(self):
+        """今天跑过、但一条都没发出去 → 写成 `skipped` 墓碑并落盘（当天还能补发）。"""
+        self._mark_today(schedule.STATUS_ERROR)
+        self._write_ledger([])
+        out = schedule.requeue_after_relogin(self.UID)
+        self.assertTrue(out["requeued"], out)
+        self.assertTrue(out["saved"], out)
+        self.assertEqual(out["reason"], "")
+        record = self._mark_of_today()
+        self.assertEqual(record["status"], schedule.STATUS_SKIPPED)
+        self.assertEqual(record["source"], "relogin")
+        self.assertEqual(int(record.get("attempts") or 0), 0, "重试计数必须归零，否则当天不再补")
+
+    def test_already_sent_today_keeps_the_mark(self):
+        """今天发出去过（账本里 sent_ok>0）→ 绝不撤账：撤了朋友会收到两遍。"""
+        self._mark_today(schedule.STATUS_ERROR)
+        self._write_ledger([self._run(sent_ok=2)])
+        out = schedule.requeue_after_relogin(self.UID)
+        self.assertFalse(out["requeued"], out)
+        self.assertEqual(out["reason"], "already-sent")
+        self.assertEqual(self._mark_of_today()["status"], schedule.STATUS_ERROR)
+
+    def test_ok_mark_blocks_requeue_without_a_ledger_row(self):
+        """状态里今天已经是 `ok` → 账本读不到也不能补发（账本和状态是两次写）。"""
+        self._mark_today(schedule.STATUS_OK)
+        self._write_ledger([])
+        out = schedule.requeue_after_relogin(self.UID)
+        self.assertFalse(out["requeued"], out)
+        self.assertEqual(out["reason"], "already-sent")
+
+    def test_no_run_today_is_left_alone(self):
+        """今天根本没轮到它 → 没有记账要撤，什么都不做（门铃本来就会发它）。"""
+        self._write_ledger([])
+        out = schedule.requeue_after_relogin(self.UID)
+        self.assertFalse(out["requeued"], out)
+        self.assertEqual(out["reason"], "no-run-today")
+        self.assertIsNone(self._mark_of_today())
+
+    def test_another_accounts_run_does_not_requeue(self):
+        self._write_ledger([self._run(sent_ok=0, unique_id="98765432101")])
+        out = schedule.requeue_after_relogin(self.UID)
+        self.assertFalse(out["requeued"], out)
+        self.assertEqual(out["reason"], "no-run-today")
+
+    def test_empty_uid_is_a_noop(self):
+        out = schedule.requeue_after_relogin("")
+        self.assertFalse(out["requeued"])
+        self.assertEqual(out["reason"], "no-uid")
+
+
 class StateLockTests(_StateCase):
     """锁坏了也不能把记账带崩 —— `save_state` 的"不抛"契约在锁这一层同样成立。
 

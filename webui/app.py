@@ -1464,63 +1464,15 @@ def login_view() -> Dict[str, Any]:
 def _requeue_after_relogin(unique_id: str) -> Dict[str, Any]:
     """重新登录成功后，把"今天已经办过"的记账撤掉 —— **前提是今天一条都没发出去**。
 
-    为什么需要它：登录失效那一轮记的是 `status=error`（见 `core/tasks.py`），
-    而时间表把"失败"也算办过（当天不再重试，否则坏 cookie 一天被门铃踹 288 次）。
-    于是重新扫码登录之后，人还得手动点「立即运行」才会补发 —— 2026-10-09 示例号
-    掉登录那次就是丢在这里。登录成功的瞬间把今天的记账撤掉，下一个 5 分钟门铃
-    就会补上；**今天已经成功发过的账号绝不撤**（撤了就变成一天发两遍）。
+    判定逻辑已经搬到 `core/schedule.py::requeue_after_relogin`：这是**两条**登录路径
+    （面板扫码 + configTool）共用的同一件事，写在面板里就注定只会有一半生效
+    （2026-10-18 issue #12）。这里只负责把它翻成面板的调用口径，不再自己判一遍。
     """
-    uid = str(unique_id or "").strip()
-    if not uid:
-        return {"requeued": False, "reason": "no-uid"}
     try:
-        from core import run_ledger, schedule
+        from core import schedule
     except Exception as exc:  # noqa: BLE001 —— 补发判断失败不能让扫码登录本身失败
-        return {"requeued": False, "reason": f"import-failed: {type(exc).__name__}"}
-
-    today = schedule.day_of(schedule.now())
-    seen_today = sent_today = False
-    for record in run_ledger.read_runs(limit=200):
-        if not str(record.get("started_at") or "").startswith(today):
-            continue
-        for account in record.get("accounts") or []:
-            if str(account.get("unique_id") or "") != uid:
-                continue
-            seen_today = True
-            try:
-                if int(account.get("sent_ok") or 0) > 0:
-                    sent_today = True
-            except (TypeError, ValueError):
-                sent_today = True      # 读不懂就当发过：宁可不补发，也不能补出双份
-    # ★ 账本和状态文件是**两次写**：收尾时先写状态、后追加账本，中间被
-    #   SIGKILL/OOM/重启打断，就成了"状态里有今天、账本里没有"。只看账本会把
-    #   这种情况误判成「今天没跑过」（no-run-today），于是既不撤账也不补发 ——
-    #   当天火花静默丢失。所以状态文件也要看一眼（两个都看，宁可不补发）。
-    try:
-        mark = schedule.entry_for(schedule.load_state(), uid, when=schedule.now())
-    except Exception:  # noqa: BLE001 —— 状态文件读不了就只看账本
-        mark = None
-    if isinstance(mark, dict):
-        seen_today = True
-        if str(mark.get("status") or "") == schedule.STATUS_OK:
-            sent_today = True
-    if sent_today:
-        return {"requeued": False, "reason": "already-sent"}
-    if not seen_today:
-        return {"requeued": False, "reason": "no-run-today"}
-    try:
-        # 这里是**跨进程**改状态文件：不能整体覆盖。sender 可能正跑着这一轮，
-        # 它手里那份快照是几分钟前读的，收尾时会合并写一遍 —— 所以撤账要写成
-        # `skipped` 墓碑（带撤销时刻）再按时间戳合并，sender 才会认输；
-        # 直接删掉的话文件里没有时间戳可比，它会把 error 记录原样写回，
-        # 当天火花再次静默丢失（2026-10-09 示例号 走的正是这条路径）。
-        state = schedule.load_state()
-        changed = schedule.retract_mark(state, uid, when=schedule.now())
-        saved = schedule.save_marks(state, [uid]) if changed else False
-    except Exception as exc:  # noqa: BLE001
-        return {"requeued": False, "reason": f"{type(exc).__name__}: {exc}"}
-    return {"requeued": bool(changed), "saved": bool(saved),
-            "reason": "" if changed else "no-mark"}
+        return {"requeued": False, "saved": False, "reason": f"import-failed: {type(exc).__name__}"}
+    return dict(schedule.requeue_after_relogin(unique_id))
 
 
 def start_login_session(
@@ -2776,6 +2728,52 @@ def create_app() -> FastAPI:
                 return redirect_with(request, path="/", warn=result.get("message") or "已移除账号")
             return redirect_with(request, path="/", error=result.get("error") or "移除失败")
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+    @app.post("/ops/account/requeue")
+    def ops_account_requeue(request: Request, unique_id: str = Form("")) -> Response:
+        """手动撤掉"今天已经办过"的记账，让当天的门铃补发一次。
+
+        为什么要有这条**明路**（2026-10-18 issue #12）：账号当天掉登录之后，时间表把
+        `error` 也当成办过（当天不再重试，否则坏 cookie 一天被门铃踹 288 次），人要补发
+        只能靠"重新登录"这个动作顺带撤账。两条登录路径现在都会自动撤账，但要是哪条都没
+        走到（登录窗口没抓到抖音号、cookie 是手工贴的……），用户唯一的办法是手改
+        `logs/schedule_state.json` —— 一个内部状态文件，文档里没有面向用户的说明。
+
+        安全性靠判定本身：**今天已经成功发过的账号会被拒绝**（`already-sent`），
+        所以这个按钮造不出"一天发两遍"。
+        """
+        as_html = wants_html(request)
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        result = _requeue_after_relogin(unique_id)
+        reason = str(result.get("reason") or "")
+        if result.get("requeued"):
+            message = ("已撤回今天的记账 —— 下一次门铃（≤5 分钟）会补发；"
+                       "想马上发就点「立即运行」。")
+            if as_html:
+                return redirect_with(request, path="/", warn=message)
+            return JSONResponse({"ok": True, "message": message, **result})
+        if reason == "already-sent":
+            message = "今天已经成功发过这个账号了，不撤账、不补发（避免一天发两遍）。"
+        elif reason == "no-run-today":
+            message = "今天还没有跑过这个账号，门铃本来就会发它，不需要补发。"
+        elif reason == "no-mark":
+            message = "今天没有可撤回的记账（可能刚刚已经被撤过）。"
+        else:
+            message = f"补发失败：{reason or '未知原因'}"
+        # 被拒绝就是 400：调它的脚本/curl 要看得出"这一下没生效"，
+        # 不能像成功那样只给一个 200（同一条路线上的 /ops/account/remove 也是这个口径）。
+        if as_html:
+            level = "error" if message.startswith("补发失败") else "warn"
+            return redirect_with(request, path="/", **{level: message})
+        return JSONResponse({"ok": False, "error": message, **result}, status_code=400)
 
     @app.post("/ops/config/save")
     async def ops_config_save(request: Request) -> Response:

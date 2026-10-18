@@ -1202,7 +1202,44 @@ class ConfigApp:
         self._refresh_validation()
         # force=True：这是「刚抓到的 Cookie 立刻落盘」的关键路径，失败必须让用户
         # 当场看见（弹窗 + 状态栏），返回值再交给登录窗口决定要不要报成功。
-        return self.save_now(force=True)
+        saved = self.save_now(force=True)
+        if saved:
+            # ★ 写盘成功之后才撤账：写失败还撤账 = 白扔一天。顺序不能反
+            #   （2026-10-18 issue #12：这份补发原来只挂在面板扫码那半条路上）。
+            self._requeue_after_relogin(account)
+        return saved
+
+    def _requeue_after_relogin(self, account: Account) -> None:
+        """登录成功写盘之后，撤掉"今天已经办过"的记账，让当天的门铃补发一次。
+
+        ★ 为什么这条路径也必须做：README 把 configTool 与面板并列成两条正规登录路径
+          （"用来生成/修改 .env、抓取登录态"）。原来只有面板那半条路会补发，于是
+          **同一份新 cookie**，面板扫码进来当天补发、从这里扫码进来当天照样不发，
+          而用户在两边看到的都是"登录成功了" —— 2026-10-09 那次静默丢一天的形状，
+          只是换了个入口（2026-10-18 issue #12）。
+
+        判定只有一份：`core/schedule.requeue_after_relogin`（已经成功发过的账号绝不
+        撤账，避免一天发两遍）。状态文件按**仓库根**解析，不按 CWD 拼路径
+        （见 `core/schedule.py::state_path`）。
+        """
+        uid = str(getattr(account, "unique_id", "") or "").strip()
+        if not uid:
+            return
+        try:
+            from core import schedule      # noqa: PLC0415 函数内 import：不在 import 期拉 core
+            result = schedule.requeue_after_relogin(uid)
+        except Exception as exc:           # noqa: BLE001 —— 补发判断失败不能让登录流程失败
+            self._set_message(f"已写入 {self.env_path.name}；补发判断失败（{type(exc).__name__}: {exc}）")
+            return
+        if result.get("requeued"):
+            self._set_message(
+                f"已写入 {self.env_path.name}，并撤回「{account.display_name}」今天的记账："
+                "下一次门铃（≤5 分钟）会补发，回面板点「立即运行」也可以马上发。"
+            )
+        elif result.get("reason") == "already-sent":
+            self._set_message(
+                f"已写入 {self.env_path.name}；「{account.display_name}」今天已经成功发过了，不补发（避免一天发两遍）。"
+            )
 
     # -------------------------------------------------------------- 拉取会话列表
     def on_fetch_conversations(self) -> None:

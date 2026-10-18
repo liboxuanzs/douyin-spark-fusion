@@ -3553,6 +3553,97 @@ class FrontendAgreementTests(unittest.TestCase):
         self.assertNotIn("data-overview-badge", self.js)
         self.assertNotIn("data-overview-badge", self.dashboard)
 
+    def test_空跑药丸与两种说明都能被轮询重画(self) -> None:
+        """issue #9：这两块原来由 `{% if %}` 决定在不在页面上。
+
+        首屏打开时档位是 off → 之后在首页切到「输入后清空」跑一轮 → `summary.dry_run`
+        变成 full，而药丸和「一条都没真发出去」都不出现（页面上根本没有可写的节点），
+        页面于是安安静静地把排练讲成了发送。
+        """
+        for hook in ("data-overview-dry-run", "data-overview-dry-run-hint"):
+            self.assertIn(hook, self.dashboard, f"模板少了挂点 {hook}")
+            self.assertIn(hook, self.js, f"轮询没重画 {hook}")
+        # 两种说明都常驻（各账号档位不一致 / 整页只有一个档位），靠 hidden 切显隐；
+        # 档位文字单独挂一个槽，文案本身只写在模板里，轮询不另写一句。
+        self.assertIn('data-overview-dry-run-hint="mixed"', self.dashboard)
+        self.assertIn('data-overview-dry-run-hint="single"', self.dashboard)
+        self.assertIn("data-overview-dry-run-text", self.dashboard)
+        self.assertIn("data-overview-dry-run-text", self.js)
+        self.assertIn("overviewDryRunHint", self.js)
+        # 服务端必须把档位发出来（键名与 app.js 里的消费逐字一致）
+        record = {
+            "run_id": "20261018-090000",
+            "dry_run": "full",
+            "finished_at": "",
+            "started_at": "",
+            "accounts": [{
+                "username": "甲", "unique_id": "1", "status": "ok",
+                "sent_ok": 1, "sent_fail": 0, "entries": [],
+                "missing": [], "select_failed": [], "targets": [],
+            }],
+        }
+        payload = viewmodel.overview_payload(
+            viewmodel.build(
+                records=[record],
+                accounts=[store.AccountSnapshot(username="甲", unique_id="1")],
+                lock=None, rate_limit=None, cfg={}, schedules=[],
+            )
+        )
+        self.assertEqual(payload["summary"]["dryRun"], "full")
+        self.assertIn("dryRunText", payload["summary"])
+
+    def test_顶部横幅由轮询重画(self) -> None:
+        """issue #10：冷却 / 禁跑窗 / 运行中 / 运行锁 / 阻断 / 上一轮跳过都会**自己开始**。
+
+        只在首屏渲染一遍，实际观感就是"跑到一半命中风控 → 页面顶部什么都不说"，
+        而那条 `data-countdown-until` 倒计时也永远等不到它的横幅。
+        """
+        for hook in ("data-status-banner-list", "data-status-banner-tpl",
+                     "data-status-banner-icon", "data-status-banner-text"):
+            self.assertIn(hook, self.dashboard, f"首页少了挂点 {hook}")
+            self.assertIn(hook, self.runs, f"运行记录页少了挂点 {hook}")
+            self.assertIn(hook, self.js, f"轮询没重画 {hook}")
+        self.assertIn("updateBanners", self.js)
+        # 倒计时必须**每次**重新取节点：否则轮询新插进来的横幅没有倒计时
+        self.assertNotIn('const nodes = [...document.querySelectorAll("[data-countdown-until]")]', self.js)
+        self.assertIn('document.querySelectorAll("[data-countdown-until]").forEach', self.js)
+        # 服务端把同一份横幅发出来（文案只有 viewmodel._banners() 一处）
+        payload = viewmodel.overview_payload(
+            viewmodel.build(
+                records=[],
+                accounts=[store.AccountSnapshot(username="甲", unique_id="1")],
+                lock=None, rate_limit=None, cfg={}, schedules=[],
+            )
+        )
+        self.assertIn("banners", payload)
+        self.assertIsInstance(payload["banners"], list)
+
+    def test_运行中禁用账号动作由轮询接管(self) -> None:
+        """issue #11：`updateActions()` 认的三个挂点在 templates/ 下命中数是 0。
+
+        它们从 `9c7a3a8`（同步进本仓那天）起就是死代码，而且不是"兼容旧写法"那一类
+        （对比 `data-segment-group`：那个是有意保留的旧选择器）。实验证明它承诺的两件事
+        一件都没发生：按钮上不会出现待办数字，运行期间也不会被禁用。这里删掉那半段，
+        把真正要做的那件事（运行期间不许动账号）交给 `data-disable-while-running`。
+        """
+        # 查的是"选择器还在不在"，不是注释里提没提到它 —— 注释解释这段历史正是要留的。
+        self.assertNotIn('querySelectorAll("[data-action-count', self.js, "死挂点必须删干净")
+        self.assertNotIn("dataset.actionCountSource", self.js)
+        self.assertNotIn("data-action-count", self.dashboard)
+        self.assertNotIn("const updateActions", self.js, "死函数必须删干净")
+        self.assertNotIn("updateActions(summary", self.js, "调用点也要一起删")
+        self.assertIn("data-disable-while-running", self.dashboard)
+        self.assertIn("data-disable-while-running", self.js)
+        # 「扫码会话开着」是另一路禁用理由，也必须发给轮询 —— 否则 10 秒后会把
+        # 服务端禁用的按钮重新点亮（首屏与轮询同源是这套前端的硬规矩）。
+        self.assertIn("data-login-active", self.dashboard)
+        self.assertIn("data-login-active", self.js)
+        for action in ("/ops/login/start", "/ops/account/remove", "/ops/account/requeue"):
+            block = self.dashboard.split(f'action="{action}"', 1)[1].split("</form>", 1)[0]
+            with self.subTest(action=action):
+                self.assertIn("data-disable-while-running", block)
+                self.assertIn("disabled", block, "首屏与轮询必须同源：运行态服务端也要渲染 disabled")
+
 
 class TimerStateTests(unittest.TestCase):
     """`store.timer_state()` 必须反映 systemd 的**真配置**，不是 `.env` 里的一厢情愿。"""
@@ -4200,6 +4291,189 @@ class ReloginRequeueTests(unittest.TestCase):
         self.assertEqual(out["reason"], "no-uid")
         self.assertTrue(self._marked_today())
 
+
+class PollingStateWebUITestCase(WebUITestCase):
+    """issue #9/#10/#11：首屏渲染与 10 秒轮询必须给同一份状态。
+
+    这三条是同一个形状的坑：服务端把状态算好了，但页面上没有可写的节点（#9）、
+    压根没把状态发给前端（#10）、或者挂点在模板里根本不存在（#11）。
+    """
+
+    def _payload(self, client: TestClient) -> Dict[str, Any]:
+        response = client.get("/api/ops/overview", headers={"Accept": "application/json"})
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    @staticmethod
+    def _tag(page: str, marker: str) -> str:
+        """marker 所在那个开标签的属性段 —— 用来断言 hidden / disabled 这类属性。"""
+        return page.split(marker, 1)[1].split(">", 1)[0]
+
+    @classmethod
+    def _form(cls, page: str, action: str) -> str:
+        return page.split(f'action="{action}"', 1)[1].split("</form>", 1)[0]
+
+    def test_空跑档位药丸在首屏常驻而轮询能点亮(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_ledger([self.sample_run(dry_run="full")])
+        with self.make_client() as client:
+            self.login(client)
+            page = client.get("/").text
+            payload = self._payload(client)
+        self.assertEqual(payload["summary"]["dryRun"], "full")
+        self.assertIn("输入后清空", payload["summary"]["dryRunText"])
+        self.assertNotIn("hidden", self._tag(page, "data-overview-dry-run "),
+                         "这一轮是空跑：药丸必须在页面上露着")
+        self.assertNotIn("hidden", self._tag(page, 'data-overview-dry-run-hint="single"'),
+                         "空跑那一句必须露着")
+        self.assertIn("hidden", self._tag(page, 'data-overview-dry-run-hint="mixed"'))
+
+    def test_不是空跑时药丸常驻但藏着(self) -> None:
+        """元素必须常驻：不常驻的话，档位改了轮询也没法让它出现（issue #9 的正因）。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_ledger([self.sample_run(dry_run="off")])
+        with self.make_client() as client:
+            self.login(client)
+            page = client.get("/").text
+            payload = self._payload(client)
+        self.assertEqual(payload["summary"]["dryRun"], "off")
+        self.assertIn("data-overview-dry-run ", page)
+        self.assertIn("hidden", self._tag(page, "data-overview-dry-run "))
+        self.assertIn("hidden", self._tag(page, 'data-overview-dry-run-hint="single"'))
+        self.assertIn("hidden", self._tag(page, 'data-overview-dry-run-hint="mixed"'))
+
+    def test_冷却开始时横幅在首屏与轮询里都在(self) -> None:
+        """#10：冷却由"上一轮命中关键词"自己成立 —— 不刷新页面也得看得见。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_rate_limit(datetime.now(timezone.utc) + timedelta(minutes=30))
+        with self.make_client() as client:
+            self.login(client)
+            page = client.get("/").text
+            runs_page = client.get("/ops/runs").text
+            payload = self._payload(client)
+        kinds = [banner["kind"] for banner in payload["banners"]]
+        self.assertIn("cooldown", kinds, "冷却必须进 payload，否则轮询无从重画")
+        banner = next(item for item in payload["banners"] if item["kind"] == "cooldown")
+        self.assertIn("风控冷却中", banner["title"])
+        self.assertTrue(banner["until"], "冷却横幅要带 until，倒计时才有的算")
+        self.assertIn("data-status-banner-list", page)
+        self.assertIn("风控冷却中", page)
+        self.assertIn("data-countdown-until", page)
+        self.assertIn("风控冷却中", runs_page, "运行记录页与首页是同一块横幅")
+
+    def test_运行中账号动作按钮被禁用(self) -> None:
+        """#11：轮询手里只有 running，而"运行期间不许动账号"必须落到按钮上。
+
+        重新登录会去抢同一份资料目录、移除会把正在跑的账号从 TASKS 里删掉、补发会撤
+        当天的记账 —— 三件事在运行期间都不该点得动（首屏与轮询必须同源）。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.write_lock(pid=os.getpid())
+        with self.make_client() as client:
+            self.login(client)
+            running_page = client.get("/").text
+        self.lock_file.unlink()
+        with self.make_client() as client:
+            self.login(client)
+            idle_page = client.get("/").text
+        for action in ("/ops/login/start", "/ops/account/remove", "/ops/account/requeue"):
+            with self.subTest(action=action):
+                self.assertIn("data-disable-while-running", self._form(running_page, action))
+                self.assertIn("disabled", self._form(running_page, action), "运行中必须禁用")
+                self.assertNotIn("disabled", self._form(idle_page, action), "空闲时不该禁用")
+
+
+class RequeueRouteTests(unittest.TestCase):
+    """issue #12：面板那条"撤回今天的记账，现在补发一次"的明路。
+
+    账号当天掉登录之后，时间表把 `error` 也当成办过（当天不再重试），人只能靠"重新
+    登录"顺带撤账。两条登录路径现在都会自动撤账，但要是哪条都没走到（登录窗口没抓到
+    抖音号、cookie 是手工贴的……），用户唯一的办法是手改 `logs/schedule_state.json`
+    —— 一个内部状态文件，文档里没有面向用户的说明。
+
+    这一类自己起临时状态文件与客户端（不用 WebUITestCase：那套脚手架会把它的
+    60 多条用例在每个子类里再跑一遍，而这里只需要一条路由）。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="dsf-requeue-route-")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.ledger = self.tmp / "runs.jsonl"
+        self.schedule_file = self.tmp / "schedule_state.json"
+        self._saved_env = {k: os.environ.get(k)
+                           for k in ("RUN_LEDGER_FILE", "SCHEDULE_STATE_FILE", "WEBUI_PASSWORD")}
+        os.environ["RUN_LEDGER_FILE"] = str(self.ledger)
+        os.environ["SCHEDULE_STATE_FILE"] = str(self.schedule_file)
+
+        def restore() -> None:
+            for key, value in self._saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+        self.addCleanup(self._restore_log)
+        self._log_patcher = mock.patch.object(webui_app, "_log")
+        self._log_patcher.start()
+
+        from core import schedule
+        self.schedule = schedule
+        state = schedule.load_state(self.schedule_file)
+        schedule.mark_sent(state, UID, when=schedule.now(),
+                           status=schedule.STATUS_ERROR, note="login_lost")
+        schedule.save_state(state, self.schedule_file)
+
+    def _restore_log(self) -> None:
+        if getattr(self, "_log_patcher", None) is not None:
+            self._log_patcher.stop()
+            self._log_patcher = None
+
+    def _client(self) -> TestClient:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        client = TestClient(webui_app.create_app())
+        client.post("/login", data={"password": PASSWORD, "next": "/"},
+                    follow_redirects=False)
+        return client
+
+    def _clear_for_retry(self) -> bool:
+        """今天还能不能补发 —— 与 ReloginRequeueTests 同一口径。"""
+        state = self.schedule.load_state(self.schedule_file)
+        users = [{"unique_id": UID, "username": ACCOUNT_NAME, "targets": []}]
+        plan = self.schedule.select(users, state=state, fallback="00:00", jitter=0)
+        return any(user["unique_id"] == UID for user, _plan in plan["due"])
+
+    @staticmethod
+    def _post(client: TestClient, unique_id: str = UID):
+        return client.post(
+            "/ops/account/requeue",
+            data={"unique_id": unique_id},
+            headers={"Accept": "application/json"},
+        )
+
+    def test_点了补发之后当天真的还能补发(self) -> None:
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertTrue(self._clear_for_retry(), "撤账之后当天必须还能补发")
+
+    def test_今天已经发过的账号拒绝补发(self) -> None:
+        """按钮不许造出"一天发两遍"：已经成功发过就拒绝（判定在 core/schedule 里）。"""
+        state = self.schedule.load_state(self.schedule_file)
+        self.schedule.mark_sent(state, UID, when=self.schedule.now(),
+                                status=self.schedule.STATUS_OK, note="test")
+        self.schedule.save_state(state, self.schedule_file)
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("今天已经成功发过", response.json()["error"])
+        self.assertFalse(self._clear_for_retry(), "已经发过了，当天名额不能还回来")
+
+    def test_没登录时不许撤账(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        response = self._post(TestClient(webui_app.create_app()))
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(self._clear_for_retry(), "没登录时根本不该动到记账")
 
 class StartSlotTests(unittest.TestCase):
     """开启窗口的占位：忙检查与"占位登记"必须在同一把锁里完成。

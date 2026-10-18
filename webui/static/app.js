@@ -237,6 +237,62 @@
     });
   };
 
+  // 顶部状态横幅：服务端 _banners() 是唯一的文案来源，这里只按它重画。
+  // 为什么必须重画：冷却、禁跑窗、运行中、运行锁、账号阻断、上一轮跳过**全都会自己开始**
+  // —— 时钟走进禁跑窗、上一轮命中风控、定时器每 5 分钟敲一次门 —— 只在首屏渲染一遍，
+  // 结果就是"盯着页面反而看不见它开始"，那枚倒计时也永远等不到它的横幅
+  // （2026-10-18 issue #10）。
+  //
+  // 只在内容变了才重建 DOM：每 10 秒重插一次会把倒计时的节点换掉（数字闪一下），
+  // 而且白白丢掉浏览器的滚动/焦点状态。
+  // 签名里**不含** untilText：它是每秒重算的倒计时文案（"还剩 9 分 58 秒"），
+  // 每 10 秒都变一次；带上它等于每次轮询都重建 DOM（数字闪一下），
+  // 而倒计时本来就有自己的每秒 tick（按 until 算），不需要靠重建来刷新。
+  let bannerSignature = null;
+  const bannerKey = (banner) =>
+    [
+      banner.kind,
+      banner.level,
+      banner.title,
+      banner.text,
+      banner.icon,
+      banner.until,
+    ].join("\u0000");
+  const updateBanners = (banners) => {
+    const list = document.querySelector("[data-status-banner-list]");
+    if (!list) return;
+    const signature = banners.map(bannerKey).join("\u0001");
+    if (signature === bannerSignature) return;
+    bannerSignature = signature;
+    const tpl = document.querySelector("template[data-status-banner-tpl]");
+    list.textContent = "";
+    banners.forEach((banner) => {
+      const node = tpl ? tpl.content.firstElementChild.cloneNode(true) : null;
+      if (!node) return;
+      node.className = `status-banner ${banner.level || "info"}`;
+      const icon = node.querySelector("[data-status-banner-icon]");
+      if (icon) icon.setAttribute("data-lucide", banner.icon || "info");
+      const text = node.querySelector("[data-status-banner-text]");
+      if (text) {
+        // 与模板同一套拼法：有标题才露那个全角冒号（少一边，首屏与轮询就差一个字）。
+        text.textContent = banner.title
+          ? `${banner.title}：${banner.text || ""}`
+          : banner.text || "";
+      }
+      const pill = node.querySelector("[data-countdown-until]");
+      if (pill) {
+        const until = banner.until || "";
+        pill.hidden = !until;
+        pill.dataset.countdownUntil = until;
+        pill.className = `pill ${banner.level === "danger" ? "danger" : "info"}`;
+        const countdown = pill.querySelector("[data-countdown-text]");
+        if (countdown) countdown.textContent = banner.untilText || "";
+      }
+      list.appendChild(node);
+    });
+    renderIcons(); // 克隆来的 <i data-lucide> 也得点亮，不然横幅前面少个图标
+  };
+
   // 服务端 viewmodel.STATE_CHIP 会发过来的四档配色类名（模板把它写进
   // `class="status-chip {{ account.chip }}"`）。放在这里当一份可被测试对着看的词表：
   // 服务端加了第五种配色、这里没跟上，就会出现"配色翻不过来"。
@@ -361,22 +417,17 @@
     });
   };
 
-  const updateActions = (summary, running) => {
-    const counts = {
-      attention: summary.attention,
-      pending: summary.pending + summary.unprocessed,
-      total: summary.total,
-    };
-    document.querySelectorAll("[data-action-count-source]").forEach((button) => {
-      const count = counts[button.dataset.actionCountSource] || 0;
-      button.disabled = running || count <= 0;
-      const countNode = button.querySelector("[data-action-count]");
-      if (countNode) countNode.textContent = count;
-    });
+  // 运行期间不许动账号：重新登录会去抢同一份资料目录，移除会把正在跑的账号从 TASKS
+  // 里删掉。挂点只有这一个 —— 原来的 updateActions() 还认 data-action-count-source /
+  // data-action-count，而这两个属性在 templates/ 下命中数是 0，从 9c7a3a8 起就是死代码
+  // （2026-10-18 issue #11），那半段已删掉。
+  //
+  // 只按 running 写 disabled 是不行的：服务端首屏还会因为"扫码会话开着"禁用重新登录，
+  // 轮询手里没有那个状态，10 秒后就会把按钮重新点亮。所以服务端把这条理由也渲染成
+  // data-login-active 发给这里，两处判断必须同源。
+  const updateDisableWhileRunning = (running) => {
     document.querySelectorAll("[data-disable-while-running]").forEach((button) => {
-      if (!button.dataset.actionCountSource) {
-        button.disabled = running;
-      }
+      button.disabled = Boolean(running) || button.dataset.loginActive === "1";
     });
   };
 
@@ -384,6 +435,7 @@
     const summary = data.summary || {};
     const task = data.task || {};
     updateTaskBanner(task);
+    updateBanners(data.banners || []);
     setText("[data-overview-value='total']", summary.total || 0);
     setText("[data-overview-value='confirmed']", summary.confirmed || 0);
     setText("[data-overview-value='pageEcho']", summary.pageEcho || 0);
@@ -448,6 +500,22 @@
         count.textContent = summary.runCount || 0;
       });
     });
+    // 空跑档位（"排练还是真发"）：药丸与两种说明也必须由轮询决定在不在页面上 ——
+    // 档位会变（首页切档 → 立即运行），而首屏那一支是按"打开页面那一刻"的档位渲染的，
+    // 轮询不重画，排练就被页面安安静静讲成了发送（2026-10-18 issue #9）。
+    // 文案只写在模板里，这里只切 hidden 与那个档位文字槽。
+    const dryRun = summary.dryRun || "off";
+    const dryOn = dryRun !== "off";
+    document.querySelectorAll("[data-overview-dry-run]").forEach((node) => {
+      node.hidden = !dryOn;
+      node.textContent = summary.dryRunText || "";
+    });
+    document.querySelectorAll("[data-overview-dry-run-hint]").forEach((node) => {
+      // mixed：各账号档位不一致（每张卡自己写着）；single：整页只有一个档位。
+      const mixed = node.dataset.overviewDryRunHint === "mixed";
+      node.hidden = mixed ? dryRun !== "mixed" : !(dryOn && dryRun !== "mixed");
+    });
+    setText("[data-overview-dry-run-text]", summary.dryRunText || "");
     // 定时器没启用时，服务端渲染的是"不会自动跑"；轮询也必须说同一句话，
     // 不然页面每 2 秒就被前端改回一个骗人的时间点。
     const schedule = data.schedule || {};
@@ -501,7 +569,7 @@
             : schedule.timerText || "",
     );
     updateAccounts(data.accounts || []);
-    updateActions(summary, Boolean(task.running));
+    updateDisableWhileRunning(Boolean(task.running));
 
     if (previousRunning === true && !task.running) {
       document
@@ -608,11 +676,11 @@
 })();
 
 (() => {
-  const nodes = [...document.querySelectorAll("[data-countdown-until]")];
-  if (!nodes.length) return;
+  // 节点**每次**重新取：横幅是 10 秒轮询重画的（冷却 / 禁跑窗会自己开始），
+  // 只在加载时取一次的话，新出现的那条横幅永远没有倒计时（2026-10-18 issue #10）。
   const tick = () => {
     const now = Date.now();
-    nodes.forEach((node) => {
+    document.querySelectorAll("[data-countdown-until]").forEach((node) => {
       const until = Date.parse(node.dataset.countdownUntil || "");
       const out = node.querySelector("[data-countdown-text]");
       if (!out || Number.isNaN(until)) return;

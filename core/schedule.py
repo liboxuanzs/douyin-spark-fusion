@@ -533,7 +533,8 @@ def clear_mark(state, unique_id, *, when=None):
 
     用途只有一个：**当天一条都没发出去**（登录失效等）之后重新登录成功，
     要让门铃在当天剩下的时间里把它补发掉。已经成功发过的账号绝不走这条路 ——
-    那会变成一天发两遍（调用方负责判断，见 webui/app.py 的扫码成功回调）。
+    那会变成一天发两遍。判定与落盘都在 `requeue_after_relogin()` 里，
+    真实调用方（面板扫码成功回调、configTool 登录成功回调）走的是那一个入口。
     """
     accounts = (state or {}).get("accounts")
     if not isinstance(accounts, dict):
@@ -588,6 +589,96 @@ def retract_mark(state, unique_id, *, when=None, note=""):
     })
     accounts[key] = tomb
     return True
+
+
+def requeue_after_relogin(unique_id, *, when=None, state=None, runs=None):
+    """登录成功之后，把"今天已经办过"的记账撤掉 —— **前提是今天一条都没发出去**。
+
+    ★ 为什么这件事只能有一份实现：当天掉登录之后重新登录的入口有**两条**，
+      面板扫码（`webui/app.py`）与 configTool（`configTool/main.py`，README 里与面板
+      并列的正规登录路径："用来生成/修改 .env、抓取登录态"）。判定写两份，迟早漏掉
+      一个分支，而漏掉的后果是**当天火花静默丢失**：状态文件里记着"今天办过"、
+      门铃当天不再叫，用户却以为"登录成功 = 会补发"（2026-10-09 的事故换个入口重演，
+      见 2026-10-18 issue #12）。
+
+    三条判定（与面板原来那份逐字一致）：
+      1. 今天这个账号在账本里有 `sent_ok > 0`，或状态文件里今天这条是 `ok`
+         → **绝不撤**（撤了就变成一天发两遍）；
+      2. 今天账本与状态文件都没见过它 → 不撤（`no-run-today`：门铃本来就会发它）；
+      3. 其余（今天跑过、但一条都没成功）→ 用 `retract_mark` 改写成 `skipped` 墓碑
+         再按时间戳合并落盘（为什么不删记录见那里的注释）。
+
+    `state` / `runs` 只是给测试注入用的；不传就现读（账本 + 状态文件**两个都看**：
+    收尾时先写状态、后追加账本，中间被打断就成了"状态里有今天、账本里没有"，
+    只看账本会误判成 `no-run-today` 而既不撤账也不补发）。
+
+    返回 `{"requeued": bool, "saved": bool, "reason": str}`。任何异常都翻成 `reason`，
+    绝不往外抛 —— 调用它的是"登录刚成功"的那一刻，补发判断失败不能让登录本身失败。
+    """
+    uid = str(unique_id or "").strip()
+    when = when or now()
+    if not uid:
+        return {"requeued": False, "saved": False, "reason": "no-uid"}
+    try:
+        from core import run_ledger       # noqa: PLC0415 函数内 import：与 state_path 同款，避免 import 期耦合
+    except Exception as exc:  # noqa: BLE001
+        return {"requeued": False, "saved": False, "reason": f"import-failed: {type(exc).__name__}"}
+
+    today = day_of(when)
+    if runs is None:
+        try:
+            runs = run_ledger.read_runs(limit=200)
+        except Exception as exc:  # noqa: BLE001
+            return {"requeued": False, "saved": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    seen_today = sent_today = False
+    for record in runs or []:
+        if not isinstance(record, dict):
+            continue
+        if not str(record.get("started_at") or "").startswith(today):
+            continue
+        for account in record.get("accounts") or []:
+            if not isinstance(account, dict):
+                continue
+            if str(account.get("unique_id") or "") != uid:
+                continue
+            seen_today = True
+            try:
+                if int(account.get("sent_ok") or 0) > 0:
+                    sent_today = True
+            except (TypeError, ValueError):
+                sent_today = True      # 读不懂就当发过：宁可不补发，也不能补出双份
+
+    if state is None:
+        try:
+            state = load_state()
+        except Exception:  # noqa: BLE001 —— 状态文件读不了就只看账本
+            state = None
+    try:
+        mark = entry_for(state, uid, when=when)
+    except Exception:  # noqa: BLE001
+        mark = None
+    if isinstance(mark, dict):
+        seen_today = True
+        if str(mark.get("status") or "") == STATUS_OK:
+            sent_today = True
+    if sent_today:
+        return {"requeued": False, "saved": False, "reason": "already-sent"}
+    if not seen_today:
+        return {"requeued": False, "saved": False, "reason": "no-run-today"}
+    try:
+        # 这里是**跨进程**改状态文件：不能整体覆盖。sender 可能正跑着这一轮，
+        # 它手里那份快照是几分钟前读的，收尾时会合并写一遍 —— 所以撤账要写成
+        # `skipped` 墓碑（带撤销时刻）再按时间戳合并，sender 才会认输；
+        # 直接删掉的话文件里没有时间戳可比，它会把 error 记录原样写回，
+        # 当天火花再次静默丢失（2026-10-09 走的正是这条路径）。
+        state = load_state()
+        changed = retract_mark(state, uid, when=when)
+        saved = save_marks(state, [uid]) if changed else False
+    except Exception as exc:  # noqa: BLE001
+        return {"requeued": False, "saved": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return {"requeued": bool(changed), "saved": bool(saved),
+            "reason": "" if changed else "no-mark"}
 
 
 def prune(state, *, today=None, keep_days=7):

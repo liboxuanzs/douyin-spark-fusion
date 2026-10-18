@@ -1438,7 +1438,30 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             # "上一轮"重画 —— 数字一个没变，口径却被悄悄改错，用户无从察觉。
             "mixedRuns": bool(summary.get("mixed_runs")),
             "runCount": _int(summary.get("run_count")),
+            # 这一版的数字是"排练"还是"真发" —— 同一个毛病：药丸与那两句说明原来
+            # 由模板的 {% if %} 决定在不在页面上，首屏若是 off 档就永远不出现，
+            # 之后切成空跑跑一轮，页面就把排练讲成了发送（2026-10-18 issue #9）。
+            # 键名与 static/app.js 里那两处消费必须逐字一致。
+            "dryRun": _text(summary.get("dry_run"), "off"),
+            "dryRunText": _text(summary.get("dry_run_text")),
         },
+        # 顶部状态横幅（风控冷却 / 禁跑时间窗 / 缺依赖 / 运行中 / 运行锁 / 账号阻断 /
+        # 上一轮整轮跳过）。它们当中好几条会**自己开始**：时钟走进禁跑窗、上一轮命中
+        # 风控、定时器每 5 分钟敲一次门。原来只有首屏渲染一遍，于是"盯着页面反而看不见
+        # 冷却开始"，那枚倒计时也永远等不到它的横幅（2026-10-18 issue #10）。
+        # 文案只有 viewmodel._banners() 一处来源，前端按同一套字段重画，不许自己再编一句。
+        "banners": [
+            {
+                "kind": _text(banner.get("kind")),
+                "level": _text(banner.get("level"), "info"),
+                "title": _text(banner.get("title")),
+                "text": _text(banner.get("text")),
+                "icon": _text(banner.get("icon"), "info"),
+                "until": _text(banner.get("until")),
+                "untilText": _text(banner.get("untilText")),
+            }
+            for banner in (view.get("banners") or [])
+        ],
         "task": {
             "running": bool(task.get("running")),
             "stale": bool(task.get("stale")),

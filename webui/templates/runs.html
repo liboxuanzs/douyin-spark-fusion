@@ -43,17 +43,34 @@
     </button>
   </div>
 
+  {# 与首页同一块（同一套挂点）：这一页也有 10 秒轮询，冷却/禁跑窗会自己开始，
+     只渲染首屏就等于盯着页面看不见（2026-10-18 issue #10）。 #}
+  <div data-status-banner-list>
   {% for banner in view.banners %}
-  <div class="status-banner {{ banner.level }}">
-    <strong><i data-lucide="{{ banner.icon }}"></i><span>{{ banner.text }}</span></strong>
-    {% if banner.until %}
+  <div class="status-banner {{ banner.level }}" data-status-banner>
+    <strong>
+      <i data-lucide="{{ banner.icon }}" data-status-banner-icon></i>
+      <span data-status-banner-text>{{ banner.title }}{% if banner.title %}：{% endif %}{{ banner.text }}</span>
+    </strong>
     <span class="pill {{ 'danger' if banner.level == 'danger' else 'info' }}"
-          data-countdown-until="{{ banner.until }}">
+          data-countdown-until="{{ banner.until or '' }}"
+          {% if not banner.until %}hidden{% endif %}>
       <span data-countdown-text>{{ banner.untilText }}</span>
     </span>
-    {% endif %}
   </div>
   {% endfor %}
+  </div>
+  <template data-status-banner-tpl>
+    <div class="status-banner info" data-status-banner>
+      <strong>
+        <i data-lucide="info" data-status-banner-icon></i>
+        <span data-status-banner-text></span>
+      </strong>
+      <span class="pill info" data-countdown-until="" hidden>
+        <span data-countdown-text></span>
+      </span>
+    </div>
+  </template>
 
   {# ---- 本轮结论 -------------------------------------------------------------- #}
   <div class="status-banner {% if summary.attention %}warning{% elif summary.total %}success{% else %}info{% endif %}"
