@@ -869,6 +869,7 @@
                     {% if row.restart %}<br><small class="muted">要重启服务才生效</small>{% endif %}
                   </th>
                   <td>
+                    <div class="config-cell">
                     {% if row.kind == 'select' %}
                     <select name="cfg_{{ row.key }}" id="cfg-{{ row.key }}" data-config-input="{{ row.key }}">
                       {% for option in row.options %}
@@ -893,6 +894,7 @@
                       {%- if row.bad %} · <span class="danger-text" data-config-bad>现在这个值就是坏的</span>
                       {%- elif row.missing %} · <span data-config-missing>.env 里没有这一项，工具用的是默认值 {{ row.default }}</span>
                       {%- endif %}
+                    </div>
                     </div>
                   </td>
                 </tr>
