@@ -276,6 +276,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 |---|---|---|
 | 样式表 | `static/app.css` | `static/app-aurora.css` |
 | 观感 | 扁平控制台：1px 发丝线、单一强调色、信息密度高 | 玻璃层 + 动态极光光斑 + 光谱描边与走光高光 |
+| 版式（桌面 ≥1081px） | 左侧竖栏 + 单列流水，内容 1280px 定宽居中 | 顶部指挥条 + 刊头 + 12 栏非对称栅格；运行记录是卡片列表、日志页是通栏终端、登录页是居中单列 |
 | 装饰 | 无（只有静态背景色） | `app.js` 往 `body` 最前面插一层 `.aurora-scene`（网格 + 三个光斑 + 暗角），切回 classic 就删掉 |
 | 交互点缀 | 没有位移与光效 | 卡片鼠标跟随柔光、进度条跑光、进入动画 |
 
@@ -299,6 +300,16 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 - **浅色主题要单独收一遍渐变文字**：用 `background-clip: text` + `color: transparent` 画的标题（`.brand-title`、`.page-heading h1`），
   深色主题下用亮色渐变，浅色底上就等于把字藏了 —— 两处都另配了 `html[data-theme="light"] …` 的深色渐变，
   以后新增这种标题要照着加（`SkinWebUITestCase::test_浅色下渐变文字换成深色渐变` 钉住）。
+- **版式也换了，不只是配色**：`app-aurora.css` 末尾是一层 `/* == 21 版式重排 … */`，整段包在
+  `@media (min-width: 1081px)` 里，把七块重排了一遍 —— 外壳（`.app-shell` 退出栅格、`.sidebar` 变 sticky 顶部指挥条）、
+  主区（`.main-area::before` 刊头柔光带 + `.page-header` 大字标题 + 1360px 宽画布）、仪表盘（`.dashboard-stack` 12 栏栅格，
+  扫码登录、立即运行 `span 7` / `span 5` 成对同行）、概览条（主卡独占一行、主数字 clamp 到 76px）、
+  KPI（2×2）、运行记录（`#run-history` 表格改卡片列表，`td::before` 用 `nth-child` 硬编码七列中文小标签）、
+  日志页（`.panel` 去壳、`.logs-code` 通栏终端）、登录页（居中单列 + 三列特性 + 560px 卡片）。
+  **必须留在 `min-width: 1081px` 里**：part6 的窄屏是抽屉，压掉就废；窄屏另有一段补丁（`.mobile-topbar` 贴顶、
+  `.mobile-brand` 靠左把主题/皮肤按钮推到右侧）。顶部指挥条会挡住锚点跳转的落点，所以另配了
+  `html { scroll-padding-top: 104px } `（1081–1399 的折行档 150px）与各 section 的 `scroll-margin-top`。
+  `SkinWebUITestCase::test_极光皮肤在版式上也与经典不同` 钉住这些骨架选择，也钉住 `body.nav-open .sidebar` 没被压掉。
 - **版本串**：`asset_version()` 的 mtime 取自 `app.css` + `app-aurora.css` + `app.js`，改哪一套都会换 `?v=`。
 - **测试**：`SkinWebUITestCase` 钉住「两套都完整（>30KB，不是薄薄一层覆盖）、模板里用到的类两套都有样式、
   每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache」；

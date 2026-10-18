@@ -3930,6 +3930,43 @@ class SkinWebUITestCase(unittest.TestCase):
                 f"{selector} 缺浅色覆盖，浅色主题下会是一块看不见的渐变字",
             )
 
+    def test_极光皮肤在版式上也与经典不同(self) -> None:
+        """换皮肤只换样式表，但版式要真的换：桌面端是「顶部指挥条 + 刊头 + 12 栏 bento
+        + 卡片式运行记录 + 通栏日志 + 居中登录页」，经典那套是「左侧竖栏 + 单列流水」。
+        这里钉住版式层的骨架选择，免得以后改着改着又缩回经典布局；同时钉住它只在桌面
+        生效 —— 窄屏仍是 part6 的抽屉，抽屉规则不能被新版式压掉。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        marker = "/* == 21 版式重排"
+        self.assertIn(marker, css, "版式层整段没了，等于皮肤又只剩配色")
+        layer = css.split(marker, 1)[1]
+        self.assertIn("@media (min-width: 1081px) {", layer, "桌面版式必须包在宽度查询里")
+        self.assertRegex(layer, r"\.app-shell \{ display: block; \}", "外壳要放弃左侧竖栏的网格")
+        self.assertRegex(layer, r"\.sidebar \{[^}]*position: sticky;", "侧栏要变成顶部指挥条")
+        for token in (
+            ".main-area::before",
+            ".dashboard-stack > #login-panel { grid-column: span 7; }",
+            ".dashboard-stack > #ops-panel { grid-column: span 5; }",
+            ".metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr));",
+            "#run-history tbody td::before",
+            "#run-history tbody tr.muted td::before { content: none; }",
+            ".logs-code {",
+            "scroll-padding-top: 104px;",
+        ):
+            self.assertIn(token, layer, f"版式层缺了 {token}")
+        for label in ("开始", "档位", "来源", "结果", "账号", "成功 / 失败", "耗时"):
+            self.assertIn(f'content: "{label}";', layer, f"运行记录卡片列表缺「{label}」这一列的小标签")
+        self.assertRegex(layer, r"\.overview-primary \{[^}]*grid-column: 1 / -1;", "概览主卡要独占一行")
+        self.assertRegex(layer, r"\.login-page \{[^}]*flex-direction: column;", "登录页要收成居中单列")
+        self.assertIn("@media (max-width: 1080px) {", layer, "窄屏那边也要有配套补丁")
+        narrow = layer.split("@media (max-width: 1080px) {", 1)[1]
+        self.assertRegex(narrow, r"\.mobile-topbar \{[^}]*position: sticky;", "窄屏顶栏要贴顶")
+        self.assertIn(
+            ".mobile-topbar .mobile-brand { margin-right: auto; margin-left: 3px; }",
+            narrow,
+            "窄屏顶栏要把主题/皮肤按钮推到右边",
+        )
+        self.assertIn("body.nav-open .sidebar { transform: none; }", css, "抽屉规则被压掉了")
+
     def test_极光皮肤也能从静态路由取到(self) -> None:
         client = TestClient(webui_app.create_app())
         response = client.get("/static/app-aurora.css")

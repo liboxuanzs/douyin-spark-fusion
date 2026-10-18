@@ -135,7 +135,9 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 
 样式表有两套**完整**实现，切换只是换一个 `<link>`，不刷新页面也不重建 DOM（HTML 与 `app.js` 始终只有一份）：
 `static/app.css`「扁平控制台」（默认）与 `static/app-aurora.css`「极光棱镜」（玻璃层 + 动态极光光斑 + 光谱描边）。
-皮肤只决定 css 挂点长什么样，不决定 DOM 结构；运行时类挂点（`.poll-stale`、`.maintenance-*`、
+两套的**版式**也不同（2026-10-19 起）：aurora 在桌面端把侧栏改成顶部指挥条、仪表盘改成 12 栏栅格、运行记录改成卡片列表、
+日志页改成通栏终端、登录页改成居中单列，classic 仍是左侧竖栏 + 单列流水。版式差异同样只能靠 CSS 重排**同一份 DOM** 实现 ——
+模板一个字都不改。皮肤只决定 css 挂点长什么样，不决定 DOM 结构；运行时类挂点（`.poll-stale`、`.maintenance-*`、
 `overview-value--short|--prose`、`status-chip` 四色、`.dot.live` …）**两套皮肤都要各自覆盖**，漏一个就是"换了皮肤少一块"。
 主题（深/浅，`localStorage["sparkflow-theme"]`）与皮肤（`sparkflow-skin`）是**两个正交维度**，四种组合都要成立。
 切换机制、层叠约定与两条仓规（不许字符串拼 DOM、不许任何外链）见 [docs/webui.md](docs/webui.md) 第 7 节。
