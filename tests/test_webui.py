@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -2192,9 +2193,10 @@ class StaticAssetWebUITestCase(WebUITestCase):
     def test_版本串跟着文件_mtime_走(self) -> None:
         version = webui_app.asset_version()
         self.assertRegex(version, r"^\d{12}$", f"版本串应当是 12 位时间戳，实际 {version!r}")
-        # 取 app.css / app.js 里较新的那个 mtime（任何一个变了版本串就得变）
+        # 取静态文件里较新的那个 mtime（任何一个变了版本串就得变；两套皮肤都算）
         stamp = max(
-            (webui_app.STATIC_DIR / name).stat().st_mtime for name in ("app.css", "app.js")
+            (webui_app.STATIC_DIR / name).stat().st_mtime
+            for name in ("app.css", "app-aurora.css", "app.js")
         )
         expected = time.strftime("%Y%m%d%H%M", time.localtime(stamp))
         self.assertEqual(version, expected)
@@ -3878,6 +3880,94 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
         self.assertTrue(schedule["dispatcher"])
         self.assertIn("nextTriggerText", schedule, "app.js 读的就是这个键")
         self.assertIn("今天该发的都发完了", schedule["nextTriggerText"])
+
+
+
+class SkinWebUITestCase(unittest.TestCase):
+    """第二套皮肤「极光棱镜」：两套样式表互斥加载，切换不刷新页面。
+
+    原来那套是扁平控制台，这一套换成玻璃 + 极光 + 光谱流光。换皮肤只许动样式 ——
+    结构、挂点、文案一个字都不许变 —— 所以这里钉的都是"两套皮肤必须共同满足"的契约：
+
+    * 两套 CSS 都在，都带 `[hidden] { display: none !important }` 兜底（缺了就会把
+      藏起来的东西照样画出来）；
+    * 每张页面自己在 <head> 里**同步**挑皮肤：异步挑会先画一帧默认皮肤再跳一下；
+    * 模板里用到的类，这套皮肤必须全都覆盖 —— 漏一个就是"换了皮还有一块是旧的"。
+    """
+
+    AURORA = REPO_ROOT / "webui" / "static" / "app-aurora.css"
+    CLASSIC = REPO_ROOT / "webui" / "static" / "app.css"
+    SCRIPT = REPO_ROOT / "webui" / "static" / "app.js"
+    PAGES = ("base.html", "login.html")
+    # 只当 JS 挂点、不需要自己样式的类（现在没有）。
+    UNSTYLED_BY_DESIGN = frozenset()
+
+    def test_极光皮肤是完整一套而不是薄薄一层覆盖(self) -> None:
+        css = self.AURORA.read_text(encoding="utf-8")
+        self.assertGreater(
+            len(css.encode("utf-8")), 30 * 1024, "极光皮肤是独立的一整份样式表，不该只是覆盖几行"
+        )
+        for token in ("--bg", ".overview-value--short", ".overview-value--prose", ".aurora-scene"):
+            self.assertIn(token, css)
+
+    def test_两套皮肤都在且都过_hidden_兜底(self) -> None:
+        for path in (self.CLASSIC, self.AURORA):
+            css = path.read_text(encoding="utf-8")
+            self.assertRegex(
+                css,
+                r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important",
+                f"{path.name} 缺少 `[hidden] {{ display: none !important; }}` 兜底规则",
+            )
+
+    def test_浅色下渐变文字换成深色渐变(self) -> None:
+        """渐变文字（background-clip: text + color: transparent）在深色底上是白字，
+        浅色底上就等于把字藏了。凡是用光谱/亮色渐变画的标题都必须有一份浅色覆盖。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        for selector in (".brand-title", ".page-heading h1"):
+            self.assertIn(
+                f'html[data-theme="light"] {selector} {{',
+                css,
+                f"{selector} 缺浅色覆盖，浅色主题下会是一块看不见的渐变字",
+            )
+
+    def test_极光皮肤也能从静态路由取到(self) -> None:
+        client = TestClient(webui_app.create_app())
+        response = client.get("/static/app-aurora.css")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-cache", response.headers.get("cache-control", "").lower())
+
+    def test_模板里用到的类极光皮肤都覆盖了(self) -> None:
+        css = self.AURORA.read_text(encoding="utf-8")
+        styled = set(re.findall(r"\.([A-Za-z][A-Za-z0-9_-]*)", css))
+        used = set()
+        for name in sorted(p.name for p in (REPO_ROOT / "webui" / "templates").glob("*.html")):
+            text = (REPO_ROOT / "webui" / "templates" / name).read_text(encoding="utf-8")
+            for value in re.findall(r'class="([^"{}]*)"', text):
+                used.update(value.split())
+        missing = sorted(used - styled - set(self.UNSTYLED_BY_DESIGN))
+        self.assertEqual(missing, [], f"这些类换了极光皮肤就没人管了：{missing}")
+
+    def test_每张页面自己同步挑皮肤(self) -> None:
+        """皮肤要在 <head> 里、样式表之前就定下来：放到 app.js 里挑 = 先闪一帧默认皮肤。"""
+        for name in self.PAGES:
+            page = (REPO_ROOT / "webui" / "templates" / name).read_text(encoding="utf-8")
+            self.assertIn('id="app-stylesheet"', page, f"{name} 的样式表没有 id，切皮肤就换不了 href")
+            self.assertIn("sparkflow-skin", page, f"{name} 少了同步挑皮肤的脚本")
+            self.assertIn("app-aurora.css", page)
+            head = page.split("</head>", 1)[0]
+            self.assertIn("sparkflow-skin", head, f"{name} 挑皮肤的脚本必须在 <head> 里同步跑")
+            self.assertIn('getElementById("app-stylesheet")', head)
+
+    def test_皮肤开关桌面与手机各一个(self) -> None:
+        page = (REPO_ROOT / "webui" / "templates" / "base.html").read_text(encoding="utf-8")
+        self.assertEqual(page.count("data-skin-toggle"), 2, "手机顶栏与页头各要一个")
+        for icon in ("skin-icon-classic", "skin-icon-aurora"):
+            self.assertIn(icon, page)
+
+    def test_切换只换样式表不刷新页面(self) -> None:
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        for token in ("sparkflow-skin", "[data-skin-toggle]", "aurora-scene", "swapSheet"):
+            self.assertIn(token, script)
 
 
 

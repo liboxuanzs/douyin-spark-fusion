@@ -124,7 +124,7 @@ _ASSET_VERSION = ""
 
 
 def asset_version() -> str:
-    """静态资源的版本串：跟着 app.css / app.js 的 mtime 走。
+    """静态资源的版本串：跟着静态文件的 mtime 走（两套皮肤 + app.js）。
 
     以前这里是写死的 `20260919-3`，而 StaticFiles 只发 ETag 不发 Cache-Control，
     浏览器就按"上次修改时间"启发式缓存 —— 结果新 HTML 配上旧 CSS，页面看着像错位。
@@ -134,7 +134,7 @@ def asset_version() -> str:
     if _ASSET_VERSION:
         return _ASSET_VERSION
     stamp = 0.0
-    for name in ("app.css", "app.js"):
+    for name in ("app.css", "app-aurora.css", "app.js"):
         try:
             stamp = max(stamp, (STATIC_DIR / name).stat().st_mtime)
         except OSError:

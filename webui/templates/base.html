@@ -10,7 +10,25 @@
     {# 空图标：浏览器默认会去要 /favicon.ico，本服务没有这个路由，日志里每次
        访问都会多一条 404。用空的 data URI 就地满足它，不发任何请求。 #}
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}" id="app-stylesheet">
+    {# 皮肤：classic 用 app.css，aurora 用 app-aurora.css，两者互斥加载。
+       这段必须同步执行（放在样式表之后、<body> 之前），否则会先画一帧默认皮肤再换 = 闪一下。 #}
+    <script>
+      (function () {
+        var link = document.getElementById("app-stylesheet");
+        var classic = link.getAttribute("href");
+        var aurora = classic.replace("app.css", "app-aurora.css");
+        window.__DSF_STYLES = { classic: classic, aurora: aurora };
+        var skin = "classic";
+        try {
+          if (localStorage.getItem("sparkflow-skin") === "aurora") skin = "aurora";
+        } catch (error) {
+          skin = "classic";
+        }
+        document.documentElement.dataset.skin = skin;
+        if (skin === "aurora") link.setAttribute("href", aurora);
+      })();
+    </script>
   </head>
   <body data-page="{% block page_key %}dashboard{% endblock %}">
     <header class="mobile-topbar">
@@ -24,6 +42,10 @@
       <button class="icon-button" type="button" data-theme-toggle aria-label="切换主题" title="切换主题">
         <i data-lucide="sun" class="theme-light-icon"></i>
         <i data-lucide="moon" class="theme-dark-icon"></i>
+      </button>
+      <button class="icon-button" type="button" data-skin-toggle aria-label="切换界面风格" title="切换界面风格">
+        <i data-lucide="palette" class="skin-icon-classic"></i>
+        <i data-lucide="sparkles" class="skin-icon-aurora"></i>
       </button>
     </header>
 
@@ -107,6 +129,10 @@
             <button class="icon-button desktop-theme-toggle" type="button" data-theme-toggle aria-label="切换主题" title="切换主题">
               <i data-lucide="sun" class="theme-light-icon"></i>
               <i data-lucide="moon" class="theme-dark-icon"></i>
+            </button>
+            <button class="icon-button desktop-theme-toggle" type="button" data-skin-toggle aria-label="切换界面风格" title="切换界面风格">
+              <i data-lucide="palette" class="skin-icon-classic"></i>
+              <i data-lucide="sparkles" class="skin-icon-aurora"></i>
             </button>
             <div class="action-bar">
               {% block topbar_actions %}{% endblock %}

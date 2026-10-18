@@ -131,6 +131,15 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 - 关键约束：**`webui/` 不得 import `playwright` / `cloakbrowser`**，也不得在 import 期读 `.env` 里的 `TASKS`
   （C 的 `core.tasks` 是模块级快照 `config = get_config()`，import 即求值 —— 仪表盘必须绕开它）。
 
+### 两套皮肤（2026-10-18 起）
+
+样式表有两套**完整**实现，切换只是换一个 `<link>`，不刷新页面也不重建 DOM（HTML 与 `app.js` 始终只有一份）：
+`static/app.css`「扁平控制台」（默认）与 `static/app-aurora.css`「极光棱镜」（玻璃层 + 动态极光光斑 + 光谱描边）。
+皮肤只决定 css 挂点长什么样，不决定 DOM 结构；运行时类挂点（`.poll-stale`、`.maintenance-*`、
+`overview-value--short|--prose`、`status-chip` 四色、`.dot.live` …）**两套皮肤都要各自覆盖**，漏一个就是"换了皮肤少一块"。
+主题（深/浅，`localStorage["sparkflow-theme"]`）与皮肤（`sparkflow-skin`）是**两个正交维度**，四种组合都要成立。
+切换机制、层叠约定与两条仓规（不许字符串拼 DOM、不许任何外链）见 [docs/webui.md](docs/webui.md) 第 7 节。
+
 ## 8. 部署形态（`本机`）
 
 - 目录 `/opt/douyin-spark-fusion`；`.venv` 独立虚拟环境（不污染系统 Python）。

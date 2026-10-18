@@ -3,10 +3,11 @@
 融合版自带一个**只读为主 + 一个手动触发按钮**的网页仪表盘：看运行结果、看登录门禁、
 看限流冷却、看日志尾部，并能在面板上直接空跑或真跑一轮。部署步骤见 [deploy.md](deploy.md)。
 
-界面**直接来自 B（`halfwaystudent/douyin-sparkflow`）的原始 `webui/` 代码**：模板骨架
+界面骨架**来自 B（`halfwaystudent/douyin-sparkflow`）的原始 `webui/` 代码**：模板结构
 （`base.html` / `dashboard.html` / `send_console.html` → `runs.html` / `logs.html` / `login.html`）、
-`static/app.css`、`static/app.js`（前 378 行：主题、移动端导航、确认框、分段控件、总览轮询）
-与 vendored 的 `static/lucide.min.js` 都是原件，没有另起一套样式。移植时只做了两件事：
+`static/app.js`（前 378 行：主题、移动端导航、确认框、分段控件、总览轮询）与 vendored 的
+`static/lucide.min.js` 都还是原件。**样式表是我们自己维护的**：现在是两套可选皮肤 ——
+`static/app.css`「扁平控制台」（默认）与 `static/app-aurora.css`「极光棱镜」，见 §7。移植时只做了两件事：
 
 - **砍掉 C 没有的能力**：B 的交互式登录桌面（noVNC）、好友选择器、账号增删改、代理重启、
   调度编辑、用户管理、改密码、补发/全部重发 —— 这些按钮在 C 里没有对应实现，全部删除，
@@ -266,6 +267,43 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   `config.credential_fingerprint()`，**所有旧会话当场失效**。页面与 JSON 响应里从不出现口令
   或它的哈希（`PasswordPanelWebUITestCase::test_首页有口令面板且不回显任何凭据` 钉住）。
 
+## 7. 两套皮肤（classic / aurora）
+
+同一份模板、同一个 `app.js`，配两套**完整**样式表。切换只换 `<link>`：不刷新页面、不重建 DOM，
+`html[data-theme]`（深/浅）与 `html[data-skin]`（classic/aurora）是两个正交维度，四种组合都成立。
+
+| | classic（默认） | aurora「极光棱镜」 |
+|---|---|---|
+| 样式表 | `static/app.css` | `static/app-aurora.css` |
+| 观感 | 扁平控制台：1px 发丝线、单一强调色、信息密度高 | 玻璃层 + 动态极光光斑 + 光谱描边与走光高光 |
+| 装饰 | 无（只有静态背景色） | `app.js` 往 `body` 最前面插一层 `.aurora-scene`（网格 + 三个光斑 + 暗角），切回 classic 就删掉 |
+| 交互点缀 | 没有位移与光效 | 卡片鼠标跟随柔光、进度条跑光、进入动画 |
+
+怎么切、为什么不会闪、以及它撞上的两条仓规：
+
+- **开关**：页头（窄屏在顶栏）的调色板按钮 `[data-skin-toggle]`；选择记在 `localStorage["sparkflow-skin"]`，
+  与主题的 `sparkflow-theme` 分开。图标自带两枚（`skin-icon-classic` / `skin-icon-aurora`），按当前皮肤留一个。
+- **不闪第一帧**：`base.html` 与 `login.html`（登录页不继承 base，必须各写一份）的 `<head>` 里有一段**同步**内联脚本，
+  在样式表开始加载前就把 `document.documentElement.dataset.skin` 定下来、aurora 就当场换掉 `href`；
+  换成异步执行的话，第一帧画的会是 classic。
+- **换表不空白**：`app.js` 的 `swapSheet()` 走**双缓冲** —— clone 一个新 `<link>` 追加进 `<head>`，
+  等它 `load` 之后才删旧表、把 `id="app-stylesheet"` 挪过去；`error` 时把新表撤掉、退回旧表。
+  直接改旧表的 `href` 会先摘掉样式、再等 79KB 下载完，中间那一瞬是裸 HTML。
+- **层叠约定**：`.app-shell` / `.main-area` 是 `position: relative; z-index: 1`，装饰层是 `z-index: 0` + `pointer-events: none`，
+  所以极光永远在内容之下、也不吃点击。登录页没有 `.app-shell`，用 `.login-page > *:not(.aurora-scene) { z-index: 1 }` 把内容抬起来 ——
+  那个 `:not()` **不能省**，否则会把装饰层的 `position: fixed` 顶掉、整层消失。
+- **仓规一：不许字符串拼 DOM**（`tests/test_webui.py::test_webui_源码里没有_innerHTML`）。所以极光装饰层是
+  `createElement` 拼出来的一棵树；连注释里出现那个词都会判违规（它是纯子串扫描）。
+- **仓规二：零外链**（`test_模板与静态文件没有外网引用`）。所以自绘下拉箭头是两段 `linear-gradient` 拼的 V 形，
+  不是 SVG data URI —— data URI 里的 `xmlns='http://www.w3.org/2000/svg'` 一样会踩线。
+- **浅色主题要单独收一遍渐变文字**：用 `background-clip: text` + `color: transparent` 画的标题（`.brand-title`、`.page-heading h1`），
+  深色主题下用亮色渐变，浅色底上就等于把字藏了 —— 两处都另配了 `html[data-theme="light"] …` 的深色渐变，
+  以后新增这种标题要照着加（`SkinWebUITestCase::test_浅色下渐变文字换成深色渐变` 钉住）。
+- **版本串**：`asset_version()` 的 mtime 取自 `app.css` + `app-aurora.css` + `app.js`，改哪一套都会换 `?v=`。
+- **测试**：`SkinWebUITestCase` 钉住「两套都完整（>30KB，不是薄薄一层覆盖）、模板里用到的类两套都有样式、
+  每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache」；
+  上面两条仓规对新皮肤同样生效。
+
 ## 8. "面板说的"和"工具真做的"必须一致
 
 面板是**双写**结构：服务端渲染一次，前端每 **10 秒**（`webui/static/app.js` 的总览轮询）再覆盖一次。两处只要有一处说的不是同一个事实，
@@ -274,7 +312,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | 症状 | 真因 | 现在的做法 |
 |---|---|---|
 | 点「移除」账号还在 | 账号已从 `TASKS` 删掉，但上一轮的运行记录（`logs/runs.jsonl`）里还有它，`store.account_snapshots()` 会把它重新变成一张卡；对着这张幽灵卡点移除必然失败 | 幽灵卡带 `orphan=True`，界面标「已不在配置里」、**不给**「移除/重新登录」按钮，也不计入"共 N 个目标/账号被阻断"；`summarize()` 只对非幽灵卡求和 |
-| 页面看着错位（同一份 HTML，CSS 却是旧的） | `StaticFiles` 只发 `ETag` 不发 `Cache-Control`，浏览器按"上次修改时间的 10%"启发式缓存旧 `app.css` | 静态文件加 `Cache-Control: no-cache`；模板里的 `?v=` 改成 `asset_version()`（取 `app.css`/`app.js` 的 mtime，**必须写括号**，不然渲染成函数对象） |
+| 页面看着错位（同一份 HTML，CSS 却是旧的） | `StaticFiles` 只发 `ETag` 不发 `Cache-Control`，浏览器按"上次修改时间的 10%"启发式缓存旧 `app.css` | 静态文件加 `Cache-Control: no-cache`；模板里的 `?v=` 改成 `asset_version()`（取 `app.css`/`app-aurora.css`/`app.js` 的 mtime，**必须写括号**，不然渲染成函数对象） |
 | 「下次自动触发 12:30」其实不会跑 | 那个时间读的是 `.env` 的 `TASK_SCHEDULE_TIMES`（"打算几点跑"），而真正说了算的是 systemd 定时器；2026-10-01 之前 `本机` 上它是 **disabled**，那天的 12:30 从来没跑过 | `store.timer_state()` 只读 `/etc/systemd/system/**` 判断是否启用、从单元文件读真实 `OnCalendar`；没启用就画红框「不会自动跑」并给出 `systemctl enable --now …`；对不上时以单元时间为准并注明 `.env` 的值 |
 | 定时器到点了却一条都没发 | 禁跑时间窗（`QUIET_WINDOW`）把定时器那一刻盖住了 —— 定时任务整轮跳过，账本只有一行 `quiet_window` | `viewmodel._quiet_clash()` 拿 timer 的 `OnCalendar` 逐点对窗口，命中就在首页画红框「禁跑时间窗把定时器的时间盖住了」；默认窗已改成 `off` |
 | 「本轮结论」的数字是今天的合计 | 运行记录页复用了首页的 `data-overview-value` 挂点，而前端总览轮询按这个选择器全局覆盖 | 运行记录页改用 `data-run-value`（只由服务端渲染），`data-overview-value` 只留给首页 |

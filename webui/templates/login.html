@@ -7,7 +7,25 @@
     <meta name="robots" content="noindex, nofollow">
     <title>登录 | 续火花控制台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}" id="app-stylesheet">
+    {# 皮肤：classic 用 app.css，aurora 用 app-aurora.css，两者互斥加载。
+       这段必须同步执行（放在样式表之后、<body> 之前），否则会先画一帧默认皮肤再换 = 闪一下。 #}
+    <script>
+      (function () {
+        var link = document.getElementById("app-stylesheet");
+        var classic = link.getAttribute("href");
+        var aurora = classic.replace("app.css", "app-aurora.css");
+        window.__DSF_STYLES = { classic: classic, aurora: aurora };
+        var skin = "classic";
+        try {
+          if (localStorage.getItem("sparkflow-skin") === "aurora") skin = "aurora";
+        } catch (error) {
+          skin = "classic";
+        }
+        document.documentElement.dataset.skin = skin;
+        if (skin === "aurora") link.setAttribute("href", aurora);
+      })();
+    </script>
   </head>
   <body class="login-page">
     <aside class="login-brand-panel">

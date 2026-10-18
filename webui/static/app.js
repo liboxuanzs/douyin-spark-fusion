@@ -30,6 +30,140 @@
 })();
 
 (() => {
+  // 皮肤：classic（扁平控制台）与 aurora（极光棱镜）互斥加载，切换时只换 link 的 href，不刷新页面。
+  // 极光背景层 .aurora-scene 由这里注入 —— 它纯装饰，所以既不进模板也不进 app.css。
+  const root = document.documentElement;
+  let link = document.getElementById("app-stylesheet");
+  const storageKey = "sparkflow-skin";
+  const preset = window.__DSF_STYLES || null;
+
+  const skinNow = () => (root.dataset.skin === "aurora" ? "aurora" : "classic");
+
+  const storedSkin = () => {
+    try {
+      return localStorage.getItem(storageKey) === "aurora" ? "aurora" : "classic";
+    } catch {
+      return "classic";
+    }
+  };
+
+  const hrefFor = (skin) => {
+    const fallback = (link && link.getAttribute("href")) || "/static/app.css";
+    const pair = preset || {
+      classic: fallback.replace("app-aurora.css", "app.css"),
+      aurora: fallback.replace("app.css", "app-aurora.css"),
+    };
+    return skin === "aurora" ? pair.aurora : pair.classic;
+  };
+
+  let scene = null;
+  const setScene = (skin) => {
+    if (skin !== "aurora") {
+      if (scene) {
+        scene.remove();
+        scene = null;
+      }
+      return;
+    }
+    if (scene || !document.body) return;
+    // 全仓禁止用字符串拼 DOM 节点（tests/test_webui.py 里那条静态扫描），
+    // 所以这层装饰也老老实实 createElement 一棵树出来。
+    scene = document.createElement("div");
+    scene.className = "aurora-scene";
+    scene.setAttribute("aria-hidden", "true");
+    const grid = document.createElement("div");
+    grid.className = "aurora-grid";
+    scene.appendChild(grid);
+    ["a", "b", "c"].forEach((name) => {
+      const blob = document.createElement("span");
+      blob.className = "aurora-blob aurora-blob--" + name;
+      scene.appendChild(blob);
+    });
+    const vignette = document.createElement("div");
+    vignette.className = "aurora-vignette";
+    scene.appendChild(vignette);
+    document.body.insertBefore(scene, document.body.firstChild);
+  };
+
+  // 双缓冲换样式表：新表先挂上去，等它 load 完再摘掉旧表，切换过程中不会出现没样式的空档。
+  const swapSheet = (href) => {
+    const current = link;
+    if (!current) {
+      const fresh = document.createElement("link");
+      fresh.rel = "stylesheet";
+      fresh.id = "app-stylesheet";
+      fresh.href = href;
+      document.head.appendChild(fresh);
+      link = fresh;
+      return;
+    }
+    if (current.getAttribute("href") === href) return;
+    const next = current.cloneNode(false);
+    next.removeAttribute("id");
+    next.setAttribute("href", href);
+    next.addEventListener("load", () => {
+      current.remove();
+      next.id = "app-stylesheet";
+      link = next;
+    });
+    next.addEventListener("error", () => {
+      next.remove();
+    });
+    document.head.appendChild(next);
+  };
+
+  const applySkin = (skin, persist) => {
+    const value = skin === "aurora" ? "aurora" : "classic";
+    root.dataset.skin = value;
+    swapSheet(hrefFor(value));
+    setScene(value);
+    if (persist) {
+      try {
+        localStorage.setItem(storageKey, value);
+      } catch {
+        // 记不住也不影响本次切换。
+      }
+    }
+  };
+
+  applySkin(root.dataset.skin || storedSkin(), false);
+
+  document.querySelectorAll("[data-skin-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applySkin(skinNow() === "aurora" ? "classic" : "aurora", true);
+    });
+  });
+
+  // 卡片上的鼠标跟随柔光：只在极光皮肤下算，且一帧最多写一次样式。
+  let pointer = null;
+  let frame = 0;
+  const paintGlow = () => {
+    frame = 0;
+    const event = pointer;
+    pointer = null;
+    if (!event || skinNow() !== "aurora") return;
+    const card =
+      event.target && event.target.closest
+        ? event.target.closest(".metric-card, .overview-strip, .account-card")
+        : null;
+    if (!card) return;
+    const rect = card.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    card.style.setProperty("--mx", Math.round(((event.clientX - rect.left) / rect.width) * 100) + "%");
+    card.style.setProperty("--my", Math.round(((event.clientY - rect.top) / rect.height) * 100) + "%");
+  };
+  document.addEventListener(
+    "pointermove",
+    (event) => {
+      if (event.pointerType === "touch" || skinNow() !== "aurora") return;
+      pointer = event;
+      if (!frame) frame = window.requestAnimationFrame(paintGlow);
+    },
+    { passive: true }
+  );
+})();
+
+(() => {
   const body = document.body;
   document.querySelectorAll("[data-nav-toggle]").forEach((button) => {
     button.addEventListener("click", () => body.classList.add("nav-open"));
