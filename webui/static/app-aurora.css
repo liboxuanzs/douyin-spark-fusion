@@ -2909,6 +2909,23 @@ html[data-theme="light"] .logs-code .logs-meta { color: #6b7288; }
     grid-column: span 12;
   }
 }
+/* >=1280：回到两栏。让「立即运行」跨两行 —— 扫码登录卡只有 112px 高，压在它右边的
+   却是一张 280px 高的卡，按行对齐会在左栏中间留出 190px 的死白（1363px 宽实测）。
+   跨行之后左栏自动排「扫码登录 + 磁盘」，右栏由「立即运行」占满；运行配置再和
+   访问口令并排，整页就没有空洞了。
+   只写 grid-row: span，不写死行号：上面还有三块通栏 section 在自动排，写死行号会
+   把它们挤到面板后面去。 ================================================== */
+@media (min-width: 1280px) {
+  .dashboard-stack > #ops-panel {
+    grid-row: span 2;
+  }
+  .dashboard-stack > #config-panel {
+    grid-column: span 7;
+  }
+  .dashboard-stack > #password-panel {
+    grid-column: span 5;
+  }
+}
 /* 手机 / 平板（<=1080）：顶栏也做成一条贴顶的指挥条，按钮靠右 ============== */
 @media (max-width: 1080px) {
   .mobile-topbar {

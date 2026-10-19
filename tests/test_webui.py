@@ -4067,6 +4067,17 @@ class SkinWebUITestCase(unittest.TestCase):
         for panel in ("#login-panel", "#ops-panel", "#maintenance-panel", "#config-panel"):
             self.assertIn(f".dashboard-stack > {panel}", mid_block, f"1081-1279 的 {panel} 要跟着并回单列")
         self.assertIn("grid-column: span 12;", mid_block, "1081-1279 要真的把卡片放满一行")
+        # 反过来，回到 >=1280 的两栏档时左栏会留死白：第一行左卡（扫码登录）只有 112px 高，
+        # 右卡（立即运行）280px，行高按最高的算，左栏中间就空出 190px（1363px 宽实测，
+        # 用户第二张截图报的就是这个）。让右卡跨两行、配置卡拿 7 栏，12 栏刚好铺满。
+        wide = layer.split("@media (min-width: 1280px) {", 1)
+        self.assertEqual(len(wide), 2, ">=1280 的两栏补丁没了")
+        wide_block = wide[1].split("\n}", 1)[0]
+        self.assertIn(".dashboard-stack > #ops-panel {", wide_block, "立即运行卡要参与跨行")
+        self.assertIn("grid-row: span 2;", wide_block, "立即运行卡不跨行，左栏就会留一块死白")
+        self.assertIn(".dashboard-stack > #config-panel {", wide_block, "运行配置卡要改拿 7 栏")
+        self.assertEqual(wide_block.count("grid-column: span 7;"), 1, "运行配置卡要正好拿 7 栏")
+        self.assertIn("grid-column: span 5;", wide_block, "访问口令卡拿 5 栏，和配置卡凑满一行")
         self.assertIn("@media (max-width: 1080px) {", layer, "窄屏那边也要有配套补丁")
         narrow = layer.split("@media (max-width: 1080px) {", 1)[1]
         self.assertRegex(narrow, r"\.mobile-topbar \{[^}]*position: sticky;", "窄屏顶栏要贴顶")
