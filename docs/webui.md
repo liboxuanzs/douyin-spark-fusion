@@ -7,7 +7,7 @@
 （`base.html` / `dashboard.html` / `send_console.html` → `runs.html` / `logs.html` / `login.html`）、
 `static/app.js`（前 378 行：主题、移动端导航、确认框、分段控件、总览轮询）与 vendored 的
 `static/lucide.min.js` 都还是原件。**样式表是我们自己维护的**：现在是两套可选皮肤 ——
-`static/app.css`「扁平控制台」（默认）与 `static/app-aurora.css`「极光棱镜」，见 §7。移植时只做了两件事：
+`static/app.css`「扁平控制台」与 `static/app-aurora.css`「极光棱镜」（2026-10-19 起为新访客的默认皮肤），见 §7。移植时只做了两件事：
 
 - **砍掉 C 没有的能力**：B 的交互式登录桌面（noVNC）、好友选择器、账号增删改、代理重启、
   调度编辑、用户管理、改密码、补发/全部重发 —— 这些按钮在 C 里没有对应实现，全部删除，
@@ -272,7 +272,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 同一份模板、同一个 `app.js`，配两套**完整**样式表。切换只换 `<link>`：不刷新页面、不重建 DOM，
 `html[data-theme]`（深/浅）与 `html[data-skin]`（classic/aurora）是两个正交维度，四种组合都成立。
 
-| | classic（默认） | aurora「极光棱镜」 |
+| | classic「扁平控制台」 | aurora「极光棱镜」（默认） |
 |---|---|---|
 | 样式表 | `static/app.css` | `static/app-aurora.css` |
 | 观感 | 扁平控制台：1px 发丝线、单一强调色、信息密度高 | 玻璃层 + 动态极光光斑 + 光谱描边与走光高光 |
@@ -284,6 +284,10 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 
 - **开关**：页头（窄屏在顶栏）的调色板按钮 `[data-skin-toggle]`；选择记在 `localStorage["sparkflow-skin"]`，
   与主题的 `sparkflow-theme` 分开。图标自带两枚（`skin-icon-classic` / `skin-icon-aurora`），按当前皮肤留一个。
+- **默认皮肤是 aurora**（2026-10-19 起）：头脚本与 `app.js::storedSkin()` 的口径都是「`localStorage` 里没有
+  `sparkflow-skin`，或者读不出来（隐私模式）→ aurora；只有明确存过 `classic` 的浏览器才留在 classic」。
+  要整体退回 classic，把 `base.html` / `login.html` 头脚本里的初始值与 catch 兜底、以及 `storedSkin()` 的默认值
+  改回 `"classic"` 即可（`SkinWebUITestCase::test_默认皮肤是极光棱镜` 钉住这一条，改的时候测试会红）。
 - **不闪第一帧**：`base.html` 与 `login.html`（登录页不继承 base，必须各写一份）的 `<head>` 里有一段**同步**内联脚本，
   在样式表开始加载前就把 `document.documentElement.dataset.skin` 定下来、aurora 就当场换掉 `href`；
   换成异步执行的话，第一帧画的会是 classic。

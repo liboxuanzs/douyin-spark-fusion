@@ -30,7 +30,7 @@
 })();
 
 (() => {
-  // 皮肤：classic（扁平控制台）与 aurora（极光棱镜）互斥加载，切换时只换 link 的 href，不刷新页面。
+  // 皮肤：aurora（极光棱镜，默认）与 classic（扁平控制台）互斥加载，切换时只换 link 的 href，不刷新页面。
   // 极光背景层 .aurora-scene 由这里注入 —— 它纯装饰，所以既不进模板也不进 app.css。
   const root = document.documentElement;
   let link = document.getElementById("app-stylesheet");
@@ -39,11 +39,12 @@
 
   const skinNow = () => (root.dataset.skin === "aurora" ? "aurora" : "classic");
 
+  // 与模板头脚本同一套口径：没挑过就是 aurora，挑过 classic 的才留在 classic。
   const storedSkin = () => {
     try {
-      return localStorage.getItem(storageKey) === "aurora" ? "aurora" : "classic";
+      return localStorage.getItem(storageKey) === "classic" ? "classic" : "aurora";
     } catch {
-      return "classic";
+      return "aurora";
     }
   };
 

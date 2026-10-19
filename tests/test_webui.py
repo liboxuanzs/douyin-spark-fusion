@@ -3995,6 +3995,23 @@ class SkinWebUITestCase(unittest.TestCase):
             self.assertIn("sparkflow-skin", head, f"{name} 挑皮肤的脚本必须在 <head> 里同步跑")
             self.assertIn('getElementById("app-stylesheet")', head)
 
+    def test_默认皮肤是极光棱镜(self) -> None:
+        """2026-10-19 起线上默认给 aurora：新访客（localStorage 里没有 sparkflow-skin）打开就是这一版，
+        只有自己在这个浏览器里挑过 classic 的才留在 classic。三处口径必须一致 ——
+        两张页面的头脚本 + app.js 的 storedSkin()，否则轮询一跑就把皮肤跳回去。"""
+        for name in self.PAGES:
+            head = (REPO_ROOT / "webui" / "templates" / name).read_text(encoding="utf-8").split("</head>", 1)[0]
+            self.assertIn(
+                'localStorage.getItem("sparkflow-skin") === "classic"',
+                head,
+                f"{name} 的默认皮肤不是 aurora",
+            )
+            self.assertEqual(head.count('skin = "classic"'), 1, f"{name} 只该在「挑过 classic」那一支写 classic")
+            self.assertEqual(head.count('skin = "aurora"'), 2, f"{name} 的初始值与 catch 兜底都该是 aurora")
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('localStorage.getItem(storageKey) === "classic" ? "classic" : "aurora"', script)
+        self.assertIn('return "aurora";', script)
+
     def test_皮肤开关桌面与手机各一个(self) -> None:
         page = (REPO_ROOT / "webui" / "templates" / "base.html").read_text(encoding="utf-8")
         self.assertEqual(page.count("data-skin-toggle"), 2, "手机顶栏与页头各要一个")

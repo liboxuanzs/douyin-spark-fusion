@@ -11,7 +11,7 @@
        访问都会多一条 404。用空的 data URI 就地满足它，不发任何请求。 #}
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}" id="app-stylesheet">
-    {# 皮肤：classic 用 app.css，aurora 用 app-aurora.css，两者互斥加载。
+    {# 皮肤：aurora（极光棱镜，默认）用 app-aurora.css，classic（扁平控制台）用 app.css，两者互斥加载。
        这段必须同步执行（放在样式表之后、<body> 之前），否则会先画一帧默认皮肤再换 = 闪一下。 #}
     <script>
       (function () {
@@ -19,11 +19,12 @@
         var classic = link.getAttribute("href");
         var aurora = classic.replace("app.css", "app-aurora.css");
         window.__DSF_STYLES = { classic: classic, aurora: aurora };
-        var skin = "classic";
+        // 默认给极光棱镜：只有在这个浏览器里明确挑过 classic 的，才留在 classic。
+        var skin = "aurora";
         try {
-          if (localStorage.getItem("sparkflow-skin") === "aurora") skin = "aurora";
+          if (localStorage.getItem("sparkflow-skin") === "classic") skin = "classic";
         } catch (error) {
-          skin = "classic";
+          skin = "aurora";
         }
         document.documentElement.dataset.skin = skin;
         if (skin === "aurora") link.setAttribute("href", aurora);
