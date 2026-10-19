@@ -1621,6 +1621,8 @@ label > span {
 }
 
 .segmented-control {
+  /* 同 aurora：内层按钮的圆角 = 外层圆角 - (边框 + 内边距)，否则内外两条弧相交 */
+  --seg-inset: 4px;
   display: inline-flex;
   gap: 2px;
   padding: 3px;
@@ -1637,7 +1639,7 @@ label > span {
   height: 30px;
   padding: 0 14px;
   border: 0;
-  border-radius: var(--radius-xs);
+  border-radius: calc(var(--radius-sm) - var(--seg-inset));
   background: transparent;
   color: var(--text-2);
   font-family: inherit;

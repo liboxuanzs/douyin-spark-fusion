@@ -864,6 +864,10 @@ label { font-size: 13px; color: var(--text-2); }
 /* ---- 分段控件 ---- */
 
 .segmented-control {
+  /* 内层按钮的圆角要按「边框 + 内边距」从外层圆角里退回来，两条圆弧才是同心圆。
+     写成死数（原来是 10px，比 13 - 1 - 3 = 9 大 1px）会让内圆的弧顶到外圆的弧上，
+     看着就是「内外两个圆角矩形相交」。 */
+  --seg-inset: 4px;
   position: relative;
   display: inline-flex;
   gap: 3px;
@@ -882,7 +886,7 @@ label { font-size: 13px; color: var(--text-2); }
   height: 31px;
   padding: 0 15px;
   border: 0;
-  border-radius: 10px;
+  border-radius: calc(13px - var(--seg-inset));
   background: transparent;
   color: var(--text-3);
   font: inherit;

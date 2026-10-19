@@ -4032,6 +4032,36 @@ class SkinWebUITestCase(unittest.TestCase):
         hint = css.split(".config-form .config-cell > .config-hint {", 1)[1].split("}", 1)[0]
         self.assertIn("overflow-wrap: anywhere;", hint)
 
+    def test_分段控件的内外圆角是同心圆(self) -> None:
+        """分段控件（空跑档位那组 tab）是「有边框、有内边距的容器 + 里面的药丸按钮」。
+        内层圆角必须等于外层圆角减去（边框 + 内边距），两条弧才是同心圆：写死的
+        10px 比理想值 13-1-3=9 大 1px，内圆的弧顶就蹭在外圆的弧上 —— 用户报的
+        「选项卡的圆角矩形背景内外相交」就是这个。经典那套更狠：8px 的容器配 6px
+        的药丸，理想值只有 4px，两条弧直接交叉。
+        """
+        for path in (self.AURORA, self.CLASSIC):
+            css = path.read_text(encoding="utf-8")
+            control = css.split(".segmented-control {", 1)[1].split("}", 1)[0]
+            button = css.split(".segment-button {", 1)[1].split("}", 1)[0]
+            inset = re.search(r"--seg-inset:\s*(\d+)px;", control)
+            border = re.search(r"border:\s*(\d+)px", control)
+            padding = re.search(r"padding:\s*(\d+)px", control)
+            self.assertIsNotNone(inset, f"{path.name} 的分段控件少了 --seg-inset")
+            self.assertIsNotNone(border, f"{path.name} 的分段控件没有边框，量不出退让量")
+            self.assertIsNotNone(padding, f"{path.name} 的分段控件没有内边距，量不出退让量")
+            self.assertEqual(
+                int(inset.group(1)),
+                int(border.group(1)) + int(padding.group(1)),
+                f"{path.name} 的 --seg-inset 应该正好等于边框加内边距",
+            )
+            outer = re.search(r"border-radius:\s*([^;]+);", control).group(1).strip()
+            inner = re.search(r"border-radius:\s*([^;]+);", button).group(1).strip()
+            self.assertEqual(
+                inner,
+                f"calc({outer} - var(--seg-inset))",
+                f"{path.name} 的分段按钮圆角没按 --seg-inset 从容器圆角里退回来：{inner}",
+            )
+
     def test_极光皮肤在版式上也与经典不同(self) -> None:
         """换皮肤只换样式表，但版式要真的换：桌面端是「顶部指挥条 + 刊头 + 12 栏 bento
         + 卡片式运行记录 + 通栏日志 + 居中登录页」，经典那套是「左侧竖栏 + 单列流水」。
