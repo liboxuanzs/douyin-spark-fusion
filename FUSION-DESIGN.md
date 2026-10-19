@@ -140,7 +140,10 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 日志页改成通栏终端、登录页改成居中单列，classic 仍是左侧竖栏 + 单列流水。版式差异同样只能靠 CSS 重排**同一份 DOM** 实现 ——
 模板一个字都不改。皮肤只决定 css 挂点长什么样，不决定 DOM 结构；运行时类挂点（`.poll-stale`、`.maintenance-*`、
 `overview-value--short|--prose`、`status-chip` 四色、`.dot.live` …）**两套皮肤都要各自覆盖**，漏一个就是"换了皮肤少一块"。
-主题（深/浅，`localStorage["sparkflow-theme"]`）与皮肤（`sparkflow-skin`）是**两个正交维度**，四种组合都要成立。
+主题（深/浅，`localStorage["sparkflow-theme"]`）与皮肤（`sparkflow-skin`）是**两个正交维度**，四种组合都要成立 —— 也就是说同一套皮肤里，
+每个"文字压在色块上"的地方都得跟着主题换字色（aurora 用 `--accent-ink`：深色主题光谱浅、配近黑字，浅色主题光谱深、配白字；
+2026-10-19 之前那里写死近黑，浅色下主按钮只有 3.1:1）。次要文字（`--text-3`/`--text-4`）也按主题分开定档，
+浅色那一套压深过一档，保证在最白的面板上仍有 4:1 以上。
 切换机制、层叠约定与两条仓规（不许字符串拼 DOM、不许任何外链）见 [docs/webui.md](docs/webui.md) 第 7 节。
 
 ## 8. 部署形态（`本机`）

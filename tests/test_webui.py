@@ -3930,6 +3930,108 @@ class SkinWebUITestCase(unittest.TestCase):
                 f"{selector} 缺浅色覆盖，浅色主题下会是一块看不见的渐变字",
             )
 
+    # -------------------------------------------------------------- 对比度与列宽
+    @staticmethod
+    def _luminance(color: str) -> float:
+        channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    def _contrast(self, one: str, other: str) -> float:
+        high, low = sorted((self._luminance(one), self._luminance(other)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    def test_光谱底上的字色跟着主题走(self) -> None:
+        """光谱渐变既是主按钮、头像、勾选框的底色，又是登录页标题的渐变字。
+        深色主题的光谱是浅色（青→粉），字要近黑；浅色主题的光谱是深色，字要纯白 ——
+        写死一个色号必然有一边没法看（浅色下就是用户报的"蓝底加黑字"。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        self.assertIn("--accent-ink:    #070a16;", css, "深色主题少了光谱底上的字色")
+        self.assertIn("--accent-ink:    #ffffff;", css, "浅色主题少了光谱底上的字色")
+        self.assertNotRegex(css, r"color:\s*#0[78]0[ab][0-9a-f]{2};", "还有写死在光谱底上的深色字")
+        for selector in (".button-primary {", ".brand-mark {", ".user-avatar {", ".account-avatar {"):
+            block = css.split(selector, 1)[1].split("}", 1)[0]
+            self.assertIn("color: var(--accent-ink);", block, f"{selector} 的字色没跟着主题走")
+        box = css.split('input[type="checkbox"]:checked::after {', 1)[1].split("}", 1)[0]
+        self.assertIn("border-left: 2px solid var(--accent-ink);", box, "勾选框的对勾没跟着主题走")
+
+    def test_浅色主题的光谱白字与渐变字都够看(self) -> None:
+        """浅色主题的光谱一头当底色（上面写白字），一头当标题的渐变字画在白卡上：
+        两边是同一个对比度式子，都得 ≥ 4.5:1。原来最亮处是 #06b6d4，只有 2.2:1。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        light = css.split('html[data-theme="light"] {', 1)[1]
+        spectrum = re.search(r"--spectrum:\s*linear-gradient\([^;]*\);", light)
+        self.assertIsNotNone(spectrum, "浅色主题没有自己的光谱")
+        stops = re.findall(r"#[0-9a-fA-F]{6}", spectrum.group(0))
+        self.assertGreaterEqual(len(stops), 4, "浅色光谱的色标不该少于 4 个")
+        for stop in stops:
+            self.assertGreaterEqual(
+                round(self._contrast(stop, "#ffffff"), 2),
+                4.5,
+                f"{stop} 上放白字、或把它画在白底上，都太淡",
+            )
+
+    def test_浅色主题的次要文字不再淡到看不清(self) -> None:
+        """KPI 标签、表头、字段名都用 text-3/text-4 画，浅色底上原来最淡只有 2.4:1。
+        这里按住"最淡的一档也要够看"，同时保证层级没被拉平（text-2 > text-3 > text-4）。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        light = css.split('html[data-theme="light"] {', 1)[1]
+        values = {}
+        for name in ("text-2", "text-3", "text-4"):
+            found = re.search(rf"--{name}:\s*(#[0-9a-fA-F]{{6}});", light)
+            self.assertIsNotNone(found, f"浅色主题少了 --{name}")
+            values[name] = found.group(1)
+        for name, value in values.items():
+            self.assertGreaterEqual(
+                round(self._contrast(value, "#ffffff"), 2), 4.0, f"浅色主题的 --{name} 在白底上太淡"
+            )
+        ordered = [self._contrast(values[n], "#ffffff") for n in ("text-2", "text-3", "text-4")]
+        self.assertEqual(ordered, sorted(ordered, reverse=True), "浅色主题的三档灰蓝层级被拉平了")
+
+    def test_浅色主题的状态色在白底和淡底上都够看(self) -> None:
+        """状态色既当文字（状态胶囊、指标数字、危险按钮）又当 12% 淡底上的字。
+        浅色主题原稿的绿字在淡绿底上只有 3.0:1、红字 3.7-4.4:1、蓝字 4.0:1，
+        这里按住四档语义色在白底上也够 4.5:1 —— 淡底只会比白底更接近，所以一并覆盖。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        light = css.split('html[data-theme="light"] {', 1)[1]
+        for name in ("success", "warning", "danger", "info"):
+            found = re.search(rf"--{name}:\s*(#[0-9a-fA-F]{{6}});", light)
+            self.assertIsNotNone(found, f"浅色主题少了 --{name}")
+            self.assertGreaterEqual(
+                round(self._contrast(found.group(1), "#ffffff"), 2),
+                4.5,
+                f"浅色主题的 --{name} 当文字太淡：{found.group(1)}",
+            )
+            # 淡底得是不透明色：半透明会被面板的斜向渐变染色，实测绿字只剩 4.27:1
+            soft = re.search(rf"--{name}-soft:\s*(#[0-9a-fA-F]{{6}});", light)
+            self.assertIsNotNone(soft, f"浅色主题的 --{name}-soft 应该是写死的不透明淡色")
+            self.assertGreaterEqual(
+                round(self._contrast(found.group(1), soft.group(1)), 2),
+                4.5,
+                f"浅色主题的 --{name} 压在自己的淡底上不够看：{found.group(1)} on {soft.group(1)}",
+            )
+
+    def test_运行配置的行不随卡片变窄塌掉(self) -> None:
+        """自动表格布局下 th 的宽度只是"建议值"：卡片一窄，中文标签被压成一字一行、
+        hint 被裁，整张表还顶出卡片外（页面不产生滚动条，直接看不见）。这里钉住
+        "固定布局 + 可收缩输入框 + 能换行的格子"这三件一套的东西。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        self.assertIn(".config-form .table-shell table { table-layout: fixed; width: 100%;", css)
+        self.assertNotIn("flex: 0 0 330px", css, "配置表的输入框又变回不可收缩的硬宽了")
+        cell = css.split(".config-form .config-cell {", 1)[1].split("}", 1)[0]
+        for prop in ("display: flex;", "flex-wrap: wrap;", "min-width: 0;"):
+            self.assertIn(prop, cell)
+        input_rule = css.split('.config-form .config-cell > input[type="password"]', 1)[1].split("\n", 1)[0]
+        self.assertIn("flex: 1 1 260px", input_rule)
+        self.assertIn("max-width: 330px", input_rule)
+        hint = css.split(".config-form .config-cell > .config-hint {", 1)[1].split("}", 1)[0]
+        self.assertIn("overflow-wrap: anywhere;", hint)
+
     def test_极光皮肤在版式上也与经典不同(self) -> None:
         """换皮肤只换样式表，但版式要真的换：桌面端是「顶部指挥条 + 刊头 + 12 栏 bento
         + 卡片式运行记录 + 通栏日志 + 居中登录页」，经典那套是「左侧竖栏 + 单列流水」。
@@ -3957,6 +4059,14 @@ class SkinWebUITestCase(unittest.TestCase):
             self.assertIn(f'content: "{label}";', layer, f"运行记录卡片列表缺「{label}」这一列的小标签")
         self.assertRegex(layer, r"\.overview-primary \{[^}]*grid-column: 1 / -1;", "概览主卡要独占一行")
         self.assertRegex(layer, r"\.login-page \{[^}]*flex-direction: column;", "登录页要收成居中单列")
+        # 1081-1279 这一段两栏各 5/12，运行配置卡会被挤到 364-447px（比 <=1080 的单列还窄），
+        # 所以这一段要并回单列 —— 钉住它，免得以后又只留 7/5。
+        mid = layer.split("@media (min-width: 1081px) and (max-width: 1279px) {", 1)
+        self.assertEqual(len(mid), 2, "1081-1279 那一段的单列补丁没了")
+        mid_block = mid[1].split("\n}", 1)[0]
+        for panel in ("#login-panel", "#ops-panel", "#maintenance-panel", "#config-panel"):
+            self.assertIn(f".dashboard-stack > {panel}", mid_block, f"1081-1279 的 {panel} 要跟着并回单列")
+        self.assertIn("grid-column: span 12;", mid_block, "1081-1279 要真的把卡片放满一行")
         self.assertIn("@media (max-width: 1080px) {", layer, "窄屏那边也要有配套补丁")
         narrow = layer.split("@media (max-width: 1080px) {", 1)[1]
         self.assertRegex(narrow, r"\.mobile-topbar \{[^}]*position: sticky;", "窄屏顶栏要贴顶")

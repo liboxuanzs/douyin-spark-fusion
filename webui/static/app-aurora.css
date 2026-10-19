@@ -47,6 +47,8 @@
   --accent-soft:   rgba(124, 131, 255, 0.14);
   --accent-soft-2: rgba(124, 131, 255, 0.07);
   --accent-glow:   rgba(124, 131, 255, 0.5);
+  /* 光谱底上的字色：深色主题的光谱是浅色（青→粉），要近黑的字才压得住。 */
+  --accent-ink:    #070a16;
 
   --spectrum:      linear-gradient(100deg, #22d3ee 0%, #6366f1 34%, #a855f7 68%, #f472b6 100%);
   --spectrum-soft: linear-gradient(100deg, rgba(34, 211, 238, 0.20), rgba(99, 102, 241, 0.22) 34%, rgba(168, 85, 247, 0.22) 68%, rgba(244, 114, 182, 0.18));
@@ -106,27 +108,37 @@ html[data-theme="light"] {
 
   --text:          #10142a;
   --text-2:        #4c5474;
-  --text-3:        #79809c;
-  --text-4:        #9aa1b8;
+  /* 浅色底上"次要文字"原来最淡只有 2.4:1（KPI 标签、表头、字段名全在这档），
+     压深一档换成 4.5:1 上下的同色系灰蓝，层级（text-2 > text-3 > text-4）不变。 */
+  --text-3:        #5f6784;
+  --text-4:        #626a88;
 
   --accent:        #5b63e8;
   --accent-2:      #9333ea;
   --accent-soft:   rgba(91, 99, 232, 0.12);
   --accent-soft-2: rgba(91, 99, 232, 0.06);
   --accent-glow:   rgba(91, 99, 232, 0.35);
+  /* 浅色下光谱本身是深色（见下面的 --spectrum），底上的字就反过来用白的。 */
+  --accent-ink:    #ffffff;
 
-  --spectrum:      linear-gradient(100deg, #06b6d4 0%, #4f46e5 34%, #9333ea 68%, #db2777 100%);
-  --spectrum-soft: linear-gradient(100deg, rgba(6, 182, 212, 0.16), rgba(79, 70, 229, 0.16) 34%, rgba(147, 51, 234, 0.16) 68%, rgba(219, 39, 119, 0.14));
-  --spectrum-line: linear-gradient(90deg, rgba(6, 182, 212, 0), rgba(6, 182, 212, 0.65) 18%, rgba(147, 51, 234, 0.65) 62%, rgba(219, 39, 119, 0));
+  /* 浅色主题的光谱整体压深一档：原版最亮处（#06b6d4）当底色，白字只有 2.2:1、
+     当渐变文字画在白卡上同样看不清。换成 700 号色阶后，白字与渐变字都在 4.5:1 以上。 */
+  --spectrum:      linear-gradient(100deg, #0e7490 0%, #4338ca 34%, #7e22ce 68%, #be185d 100%);
+  --spectrum-soft: linear-gradient(100deg, rgba(14, 116, 144, 0.16), rgba(67, 56, 202, 0.16) 34%, rgba(126, 34, 206, 0.16) 68%, rgba(190, 24, 93, 0.14));
+  --spectrum-line: linear-gradient(90deg, rgba(14, 116, 144, 0), rgba(14, 116, 144, 0.65) 18%, rgba(126, 34, 206, 0.65) 62%, rgba(190, 24, 93, 0));
 
-  --success:       #059669;
-  --success-soft:  rgba(5, 150, 105, 0.12);
+  /* 状态色也一样：绿/红/蓝三档在白卡上、以及在它们自己那层淡底上都够 4.5:1。
+     实测原稿的绿字在淡绿底上只有 3.0-3.25:1、红字 3.7-4.4:1、蓝字 4.0:1。
+     淡底在浅色主题下必须是不透明的：面板底色是一条斜向渐变，半透明的淡底会把
+     "淡绿底"染成偏蓝灰（实测绿字只有 4.27:1），写死的浅色反倒稳定。 */
+  --success:       #047857;
+  --success-soft:  #eaf6f1;
   --warning:       #b45309;
-  --warning-soft:  rgba(180, 83, 9, 0.12);
-  --danger:        #dc2626;
-  --danger-soft:   rgba(220, 38, 38, 0.12);
-  --info:          #2563eb;
-  --info-soft:     rgba(37, 99, 235, 0.12);
+  --warning-soft:  #fcf4e6;
+  --danger:        #b91c1c;
+  --danger-soft:   #fdeaea;
+  --info:          #1d4ed8;
+  --info-soft:     #e8eefc;
 
   --shadow-1: 0 1px 2px rgba(21, 28, 56, 0.07);
   --shadow-2: 0 20px 44px -28px rgba(21, 28, 56, 0.35), 0 2px 10px -6px rgba(21, 28, 56, 0.18);
@@ -390,7 +402,7 @@ html[data-theme="light"] .aurora-vignette {
   flex: 0 0 auto;
   border-radius: 13px;
   background: var(--spectrum);
-  color: #080b18;
+  color: var(--accent-ink);
   box-shadow: 0 10px 24px -12px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 .brand-mark svg.lucide { width: 19px; height: 19px; stroke-width: 2.1; }
@@ -498,7 +510,7 @@ html[data-theme="light"] .nav-item.active { color: #1a1f3d; box-shadow: inset 0 
   border-radius: 11px;
   font-size: 14px;
   font-weight: 650;
-  color: #070a16;
+  color: var(--accent-ink);
   background: var(--spectrum);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
@@ -663,7 +675,7 @@ html[data-theme="light"] svg.lucide.theme-dark-icon { display: inline-block; }
 
 /* 主按钮：光谱渐变 + 掠过式高光 */
 .button-primary {
-  color: #070a16;
+  color: var(--accent-ink);
   font-weight: 650;
   background: var(--spectrum);
   background-size: 200% 100%;
@@ -826,8 +838,8 @@ input[type="checkbox"]:checked::after {
   width: 9px;
   height: 5px;
   margin: 4px 0 0 3.6px;
-  border-left: 2px solid #070a16;
-  border-bottom: 2px solid #070a16;
+  border-left: 2px solid var(--accent-ink);
+  border-bottom: 2px solid var(--accent-ink);
   transform: rotate(-45deg);
 }
 input[type="checkbox"]:focus-visible { box-shadow: var(--ring); }
@@ -1661,7 +1673,7 @@ html[data-theme="light"] .logs-code {
   border-radius: 15px;
   font-size: 17px;
   font-weight: 650;
-  color: #070a16;
+  color: var(--accent-ink);
   background: var(--spectrum);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 12px 28px -16px var(--accent-glow);
 }
@@ -1851,12 +1863,15 @@ input.time-input { width: 118px; flex: 0 0 auto; text-align: center; font-varian
 
 .config-form { display: flex; flex-direction: column; gap: 12px; }
 
-.config-form .table-shell table { font-size: 12.5px; }
+/* 固定表格布局：列宽只看第一行的 th，跟内容的 min-content 无关。
+   自动布局下 th 的 190px 只是"建议值"，卡片一窄就被压成中文一字一行的竖排
+   （1080~1400px 这段尤其明显），整张表还会顶出卡片外被裁掉。 */
+.config-form .table-shell table { table-layout: fixed; width: 100%; font-size: 12.5px; }
 .config-form .table-shell tbody tr:hover { background: transparent; }
 .config-form .table-shell thead th { padding: 10px 14px; }
 
 .config-form .table-shell th[scope="row"] {
-  width: 210px;
+  width: 190px;
   padding: 12px 14px;
   text-align: left;
   vertical-align: top;
@@ -1877,25 +1892,33 @@ input.time-input { width: 118px; flex: 0 0 auto; text-align: center; font-varian
 
 .config-form .table-shell td { padding: 11px 14px; }
 
-.config-cell {
+.config-form .config-cell {
   display: flex;
   align-items: center;
-  gap: 18px;
+  flex-wrap: wrap;
+  gap: 8px 18px;
   width: 100%;
   min-width: 0;
 }
-.config-cell > select,
-.config-cell > input[type="text"],
-.config-cell > input[type="number"],
-.config-cell > input[type="password"] { flex: 0 0 330px; width: 330px; max-width: 330px; }
-.config-cell > input[type="time"] { flex: 0 0 150px; width: 150px; max-width: 150px; }
+/* 输入框从 330px 硬宽改成"基准 260px、可伸可缩"：窄卡片里能让位给 hint，
+   宽卡片里仍旧长到 330px 为止，跟改版前一样宽。 */
+.config-form .config-cell > select,
+.config-form .config-cell > input[type="text"],
+.config-form .config-cell > input[type="number"],
+.config-form .config-cell > input[type="password"] { flex: 1 1 260px; min-width: 0; max-width: 330px; }
+.config-form .config-cell > input[type="time"] { flex: 1 1 130px; min-width: 0; max-width: 150px; }
 
+/* 通用一条（口令面板等地方也在用），横向那套只加在配置表的格子里。 */
 .config-hint {
-  flex: 1 1 auto;
   min-width: 0;
   font-size: 12px;
   line-height: 1.65;
   color: var(--text-3);
+}
+
+.config-form .config-cell > .config-hint {
+  flex: 1 1 170px;
+  overflow-wrap: anywhere;
 }
 
 /* ---- 口令面板 ---- */
@@ -2149,11 +2172,18 @@ html[data-theme="light"] .login-brand-panel { background: linear-gradient(158deg
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  /* 面板里那行日志路径是 code（全局 nowrap），260px 的窄栏装不下就顶穿卡片、
+     再被 details 的 overflow 裁掉 —— 这里让它就地折断。 */
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--glass-2);
   text-align: center;
 }
+
+/* 二维码面板里的日志路径、以及"消息模板原文"这种长串，都不该把卡片顶穿 */
+.login-qr-panel code,
+[data-message-raw] { white-space: normal; overflow-wrap: anywhere; }
 
 img.login-shot {
   display: block;
@@ -2325,12 +2355,12 @@ html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora { displa
   .login-features { display: none; }
   .login-form-panel { padding: 26px 18px 46px; place-items: start center; }
   .login-card { width: 100%; max-width: 520px; }
-  .config-cell { flex-direction: column; align-items: stretch; gap: 9px; }
-  .config-cell > select,
-  .config-cell > input[type="text"],
-  .config-cell > input[type="number"],
-  .config-cell > input[type="password"],
-  .config-cell > input[type="time"] { flex: 1 1 auto; width: 100%; max-width: none; }
+  .config-form .config-cell { flex-direction: column; align-items: stretch; gap: 9px; }
+  .config-form .config-cell > select,
+  .config-form .config-cell > input[type="text"],
+  .config-form .config-cell > input[type="number"],
+  .config-form .config-cell > input[type="password"],
+  .config-form .config-cell > input[type="time"] { flex: 1 1 auto; width: 100%; max-width: none; }
   .config-form .table-shell th[scope="row"] { width: 44%; }
 }
 
@@ -2866,6 +2896,17 @@ html[data-theme="light"] .logs-code .logs-meta { color: #6b7288; }
   #account-management, #login-panel, #ops-panel, #maintenance-panel,
   #config-panel, #password-panel, #run-history, #account-detail {
     scroll-margin-top: 150px;
+  }
+}
+/* 1081-1279：两栏各 5/12 时「运行配置」卡只剩 364-447px —— 标签列固定 190px 后输入框只有 160px、
+   hint 折成 8-11 行，比 <=1080 的单列（1024 下这张表有 948px）还窄，是个明显的倒挂。
+   这一段就把仪表盘并回单列，卡片各自拿满宽。 ====================================== */
+@media (min-width: 1081px) and (max-width: 1279px) {
+  .dashboard-stack > #login-panel,
+  .dashboard-stack > #ops-panel,
+  .dashboard-stack > #maintenance-panel,
+  .dashboard-stack > #config-panel {
+    grid-column: span 12;
   }
 }
 /* 手机 / 平板（<=1080）：顶栏也做成一条贴顶的指挥条，按钮靠右 ============== */
