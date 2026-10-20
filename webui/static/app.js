@@ -135,7 +135,27 @@
     });
   });
 
-  // 卡片上的鼠标跟随柔光：只在极光皮肤下算，且一帧最多写一次样式。
+  // 背景视差 + 卡片上的鼠标跟随柔光：只在极光皮肤下算，且一帧最多写一次样式。
+  // 三层光斑的视差系数：a 反向最大、b 同向、c 反向最小，拉开前后景。
+  // 背景层是随皮肤注入/移除的（见上面的 setScene），所以引用要现查、按节点缓存，
+  // 不能在这里抓一次就完 —— 切回极光皮肤时会是一个新节点。
+  const PARALLAX_LAYERS = [
+    [".aurora-blob--a", -26, -18],
+    [".aurora-blob--b", 20, 14],
+    [".aurora-blob--c", 14, -10],
+  ];
+  let parallaxHost = null;
+  let parallax = [];
+  const currentParallax = () => {
+    const host = document.querySelector(".aurora-scene");
+    if (!host || host === parallaxHost) return parallax;
+    parallaxHost = host;
+    parallax = PARALLAX_LAYERS.map(([selector, x, y]) => {
+      const el = host.querySelector(selector);
+      return el ? { el, x, y } : null;
+    }).filter(Boolean);
+    return parallax;
+  };
   let pointer = null;
   let frame = 0;
   const paintGlow = () => {
@@ -143,6 +163,16 @@
     const event = pointer;
     pointer = null;
     if (!event || skinNow() !== "aurora") return;
+    // 背景：指针位置归一化成 -0.5 ~ 0.5，按每层系数折成 px 位移，形成纵深。
+    const layers = currentParallax();
+    if (layers.length && window.innerWidth && window.innerHeight) {
+      const px = event.clientX / window.innerWidth - 0.5;
+      const py = event.clientY / window.innerHeight - 0.5;
+      layers.forEach(({ el, x, y }) => {
+        el.style.setProperty("--tx", (px * x).toFixed(1) + "px");
+        el.style.setProperty("--ty", (py * y).toFixed(1) + "px");
+      });
+    }
     const card =
       event.target && event.target.closest
         ? event.target.closest(".metric-card, .overview-strip, .account-card")
@@ -162,6 +192,14 @@
     },
     { passive: true }
   );
+  // 指针离开窗口时把视差归零，否则光斑会永远偏在一侧。
+  document.addEventListener("pointerleave", () => {
+    if (!parallax.length || skinNow() !== "aurora") return;
+    parallax.forEach(({ el }) => {
+      el.style.setProperty("--tx", "0px");
+      el.style.setProperty("--ty", "0px");
+    });
+  });
 })();
 
 (() => {
@@ -798,10 +836,11 @@
     const level = raw.replace(/^dry-/, "");
     if (input) input.value = level;
     if (submit) {
-      // 真实发送是破坏性操作，用危险色；空跑用柔和色。文案跟着变，
-      // 避免出现"按钮写着发送、其实是空跑"这种骗人的界面。
+      // 真实发送是不可撤回的动作，用实心红的主按钮（button-send）；空跑用柔和色。
+      // 注意：这里是按档位**重画**按钮类的唯一位置 —— 只改模板里的 class 会被这段覆盖，
+      // 所以两处必须写同一个类名（tests/test_webui.py 有契约测试钉住）。
       const real = level === "off";
-      submit.className = real ? "button button-danger" : "button button-soft";
+      submit.className = real ? "button button-send" : "button button-soft";
       const label = submit.querySelector("[data-run-now-label]");
       if (label) label.textContent = real ? "立即发送" : "开始空跑";
     }

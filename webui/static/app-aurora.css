@@ -79,6 +79,11 @@
   --shadow-2: 0 20px 44px -26px rgba(2, 4, 20, 0.95), 0 2px 10px -6px rgba(2, 4, 20, 0.9);
   --shadow-3: 0 40px 90px -40px rgba(2, 4, 20, 1), 0 2px 12px -6px rgba(2, 4, 20, 0.9);
   --inner-top: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  /* 材质：卡片上沿一道天光、下沿一道暗边，玻璃才有「厚度」而不只是一块半透明色。
+     浅色主题给同名变量换一套值（见下面 html[data-theme="light"]），组件规则不用分主题写。 */
+  --card-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 46%);
+  --edge-bottom: inset 0 -1px 0 rgba(2, 4, 20, 0.55);
+  --grain-opacity: 0.055;
   --ring: 0 0 0 1px rgba(139, 147, 255, 0.55), 0 0 0 4px rgba(139, 147, 255, 0.18);
 
   --blur: 18px;
@@ -112,8 +117,10 @@ html[data-theme="light"] {
   --seg-track:        rgba(21, 28, 56, 0.10);
   --seg-track-inner:  rgba(21, 28, 56, 0.07);
 
-  --line:          rgba(21, 28, 56, 0.09);
-  --line-2:        rgba(21, 28, 56, 0.16);
+  /* 浅色主题的卡是白瓷压在粉彩上，边框比深色更需要「看得见」：0.09 在白卡边缘几乎消失，
+     卡片像没有边。提到 0.11 后与 --card-sheen 一起把轮廓立起来。 */
+  --line:          rgba(21, 28, 56, 0.11);
+  --line-2:        rgba(21, 28, 56, 0.18);
   --line-3:        rgba(21, 28, 56, 0.28);
 
   --text:          #10142a;
@@ -154,6 +161,10 @@ html[data-theme="light"] {
   --shadow-2: 0 20px 44px -28px rgba(21, 28, 56, 0.35), 0 2px 10px -6px rgba(21, 28, 56, 0.18);
   --shadow-3: 0 40px 90px -44px rgba(21, 28, 56, 0.45), 0 2px 12px -6px rgba(21, 28, 56, 0.2);
   --inner-top: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  /* 浅色卡面本身是白的，天光要更实一点才看得出上亮下暗；下沿暗边降到 5.5% 就够。 */
+  --card-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0) 48%);
+  --edge-bottom: inset 0 -1px 0 rgba(21, 28, 56, 0.055);
+  --grain-opacity: 0.04;
 }
 
 /* == 02 重置与基础 ======================================================== */
@@ -228,6 +239,13 @@ code {
   background: rgba(139, 147, 255, 0.35);
   color: #fff;
 }
+/* 浅色下选中块本身是淡紫，白字几乎消失；换成与正文同色的深字。 */
+html[data-theme="light"] ::selection {
+  background: rgba(91, 99, 232, 0.22);
+  color: var(--text);
+}
+/* 光标跟强调色走，输入框里的小细节也算质感。 */
+input, select, textarea { caret-color: var(--accent); }
 
 /* 滚动条：细、发光、不吃版面 */
 * { scrollbar-width: thin; scrollbar-color: var(--line-3) transparent; }
@@ -273,7 +291,11 @@ code {
   filter: blur(72px);
   opacity: 0.5;
   mix-blend-mode: screen;
-  will-change: transform;
+  will-change: transform, translate;
+  /* 鼠标视差：app.js 按指针位置给每层写 --tx/--ty（单位 px，三层系数不同），
+     过渡拉长到 700ms，三层错开的位移就有了纵深，而且是「跟着缓，不是跟着抖」。 */
+  translate: var(--tx, 0px) var(--ty, 0px);
+  transition: translate 700ms var(--ease);
 }
 
 .aurora-blob--a {
@@ -311,6 +333,21 @@ code {
   position: absolute;
   inset: 0;
   background: radial-gradient(130% 110% at 50% 40%, rgba(0, 0, 0, 0) 42%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/* 胶片颗粒：宽屏上极光渐变容易出现色带（banding），一层很淡的噪点把台阶磨平，
+   同时让玻璃面有真实的材质感，而不是一张纯色渐变图。
+   噪点用内联 SVG：零外链、零额外请求。命名空间里的冒号写成 %3A（连双斜杠一起编码），
+   因为 tests/test_webui.py 会纯文本扫描前端源码里的协议头，写裸链接会被判外链。 */
+.aurora-scene::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http%3A//www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+  pointer-events: none;
 }
 
 html[data-theme="light"] .aurora-scene::before {
@@ -735,7 +772,8 @@ html[data-theme="light"] svg.lucide.theme-dark-icon { display: inline-block; }
   transform: translateY(-1px);
 }
 
-/* 危险按钮：红玻璃 + 红光 */
+/* 危险按钮：红玻璃 + 红光。它表达的是破坏性（移除、卸载），不是主操作 ——
+   真正会发消息的按钮走下面那档 .button-send，别让用户把淡红当禁用。 */
 .button-danger {
   color: var(--danger);
   background: var(--danger-soft);
@@ -748,6 +786,21 @@ html[data-theme="light"] svg.lucide.theme-dark-icon { display: inline-block; }
   transform: translateY(-1px);
   box-shadow: 0 16px 32px -18px rgba(244, 63, 94, 0.9);
 }
+
+/* 真发按钮：整个页面只有它会真的把消息发出去，必须一眼看出「主操作、不可撤销」。
+   实心红 + 白字（白字在 #be123c 上约 6:1），hover 只抬 1px，不闪烁。 */
+.button-send {
+  color: #fff;
+  font-weight: 650;
+  background: linear-gradient(180deg, #e11d48, #9f1239);
+  border-color: transparent;
+  box-shadow: 0 12px 28px -14px rgba(190, 18, 60, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+.button-send:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 34px -14px rgba(190, 18, 60, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.36);
+}
+.button-send:active:not(:disabled) { transform: translateY(0); }
 
 .button-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .form-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 4px; }
@@ -1027,7 +1080,8 @@ html[data-theme="light"] .segment-button.active { color: #1a1f3d; background: #f
   height: 7px;
   border-radius: 99px;
   background: rgba(255, 255, 255, 0.07);
-  box-shadow: inset 0 1px 2px rgba(2, 4, 20, 0.8);
+  /* 凹槽要「刻进去」：顶部投影 + 一圈 1px 内描边，否则只是一块灰色。 */
+  box-shadow: inset 0 1px 2px rgba(2, 4, 20, 0.8), inset 0 0 0 1px var(--line);
   overflow: hidden;
   min-width: 64px;
 }
@@ -1052,7 +1106,8 @@ html[data-theme="light"] .progress-track { background: rgba(21, 28, 56, 0.08); }
   z-index: 2;
   background: var(--spectrum);
   background-size: 200% 100%;
-  box-shadow: 0 0 14px -2px var(--accent-glow);
+  /* 填充条也是实体：上沿受光、下沿落暗边，再带一点外发光。 */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), inset 0 -1px 0 rgba(0, 0, 0, 0.22), 0 0 14px -2px var(--accent-glow);
   overflow: hidden;
 }
 /* 流光：让进度条“活”起来（纯装饰，reduced-motion 下关闭） */
@@ -1325,22 +1380,35 @@ html[data-theme="light"] .overview-primary .overview-value {
   box-shadow: var(--inner-top), var(--shadow-3);
 }
 
-/* 顶部一条极短的语义色光线 */
+/* 顶端的语义色不是一根「彩条」，而是一道从左侧渗进来、右端渐隐的光：
+   画成等宽的实心条会像一根浮在卡外的荧光棒，渐隐之后它才属于卡面本身。
+   四档只换 --metric-tone / --metric-wash 两个变量，色条与左上角的渗光共用它们。 */
+.metric-card { --metric-tone: var(--text-3); --metric-wash: rgba(139, 147, 255, 0.12); }
+.metric-card.success { --metric-tone: var(--success); --metric-wash: rgba(52, 211, 153, 0.16); }
+.metric-card.warning { --metric-tone: var(--warning); --metric-wash: rgba(251, 191, 36, 0.14); }
+.metric-card.danger  { --metric-tone: var(--danger);  --metric-wash: rgba(251, 113, 133, 0.16); }
+.metric-card.info    { --metric-tone: var(--info);    --metric-wash: rgba(96, 165, 250, 0.16); }
+
 .metric-card::before {
   content: "";
   position: absolute;
-  left: 19px;
+  left: 16px;
   top: 0;
-  width: 42px;
+  width: 76px;
   height: 2px;
-  border-radius: 0 0 3px 3px;
-  background: var(--text-3);
-  opacity: 0.85;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--metric-tone) 0%, rgba(0, 0, 0, 0) 100%);
+  opacity: 0.9;
 }
-.metric-card.success::before { background: var(--success); box-shadow: 0 0 16px var(--success); }
-.metric-card.warning::before { background: var(--warning); box-shadow: 0 0 16px var(--warning); }
-.metric-card.danger::before  { background: var(--danger);  box-shadow: 0 0 16px var(--danger); }
-.metric-card.info::before    { background: var(--info);    box-shadow: 0 0 16px var(--info); }
+
+/* 浅色下卡面是白的，这类渗光要收到「隐约有色」的程度，否则又变成荧光棒。 */
+html[data-theme="light"] .metric-card { --metric-wash: rgba(91, 99, 232, 0.06); }
+html[data-theme="light"] .metric-card.success { --metric-wash: rgba(4, 120, 87, 0.07); }
+html[data-theme="light"] .metric-card.warning { --metric-wash: rgba(180, 83, 9, 0.07); }
+html[data-theme="light"] .metric-card.danger  { --metric-wash: rgba(185, 28, 28, 0.06); }
+html[data-theme="light"] .metric-card.info    { --metric-wash: rgba(29, 78, 216, 0.06); }
+/* 数字背后的同色光晕在深色下是「发光」，在浅色下只会糊掉笔画，浅色不要。 */
+html[data-theme="light"] .metric-card:is(.success, .warning, .danger, .info) .metric-value { text-shadow: none; }
 
 /* 鼠标跟随的柔光（--mx/--my 由 app.js 写入；没有 JS 时靠 hover 兜底） */
 .metric-card::after,
@@ -2325,6 +2393,49 @@ html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora { displa
   }
   .metric-value, .overview-value, .page-heading h1 { color: #000 !important; -webkit-text-fill-color: #000 !important; background: none !important; }
 }
+/* == 18.5 材质：天光、暗边与边缘 ======================================== */
+/* 卡片原先只有 --inner-top 一道上沿高光：上沿亮、下沿和背景糊成一片，整块像贴纸。
+   这里统一叠一层「上亮下暗」的天光 + 下沿一道暗边，圆角处才有厚度。
+   只动材质不动尺寸，断点和版式都不用跟着改。 */
+.panel,
+.metric-card,
+.overview-strip,
+.account-card {
+  background-image: var(--card-sheen);
+  box-shadow: var(--inner-top), var(--shadow-2), var(--edge-bottom);
+}
+
+/* KPI 卡在材质之上再加一层从左上角渗进来的语义色（--metric-wash 定义在 KPI 那一节）。 */
+.metric-card {
+  background-image: radial-gradient(190px 130px at 24% -34%, var(--metric-wash), rgba(0, 0, 0, 0) 72%), var(--card-sheen);
+}
+
+/* 浅色卡面提到 80% 白：66% 时粉紫极光会整块透上来，白卡被染成淡紫，文字也发灰。
+   80% 还看得见底色，但卡已经是「磨砂白瓷」而不是「彩色玻璃」。 */
+html[data-theme="light"] .panel,
+html[data-theme="light"] .metric-card,
+html[data-theme="light"] .overview-strip,
+html[data-theme="light"] .account-card {
+  background-color: rgba(255, 255, 255, 0.8);
+}
+
+/* 登录卡的光比仪表盘集中，保留它自己的 90px 外发光。 */
+.login-card {
+  background-image: var(--card-sheen);
+  box-shadow: var(--inner-top), var(--shadow-3), var(--edge-bottom), 0 0 90px -40px var(--accent-glow);
+}
+
+/* 进度槽的 1px 内描边在浅色下要更淡，深色那条会变灰线。 */
+html[data-theme="light"] .progress-track {
+  box-shadow: inset 0 1px 2px rgba(21, 28, 56, 0.16), inset 0 0 0 1px rgba(21, 28, 56, 0.08);
+}
+
+/* 键盘焦点：只有键盘操作时画一圈强调色，鼠标点击不画。 */
+:where(a, button, summary, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* == 19 响应式 =========================================================== */
 
 /* 宽屏：内容不无限拉长，留出极光可见的余量 */
@@ -2463,7 +2574,9 @@ html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora { displa
     scroll-behavior: auto !important;
   }
   .metric-card:hover, .account-card:hover, .target-record:hover, .nav-item:hover, .icon-button:hover, .button:hover { transform: none; }
-  .aurora-blob { animation: none !important; }
+  /* 之前只压了时长，没压 delay：KPI 卡仍会先空白 40/90/140/190ms 再出现。 */
+  *, *::before, *::after { animation-delay: 0.001ms !important; }
+  .aurora-blob { animation: none !important; translate: none !important; }
 }
 /* == 21 与 app.js 运行时挂点对齐（增补） ================================= */
 
@@ -2790,7 +2903,9 @@ html[data-theme="light"] .logs-code .logs-meta { color: #6b7288; }
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--glass);
-    box-shadow: var(--inner-top);
+    /* 卡片式列表的行也要有厚度：和面板同一套天光 + 下沿暗边。 */
+    background-image: var(--card-sheen);
+    box-shadow: var(--inner-top), var(--edge-bottom);
     transition: border-color var(--speed) var(--ease), background var(--speed) var(--ease);
   }
   #run-history tbody tr:hover { background: var(--glass-2); border-color: var(--line-2); }
@@ -2901,6 +3016,9 @@ html[data-theme="light"] .logs-code .logs-meta { color: #6b7288; }
     -webkit-backdrop-filter: none;
     text-align: center;
   }
+  /* 上面那条 background:none 只有 (0,1,0)，压不过 :2192 的浅色规则 (0,2,0)：
+     浅色下品牌区会露出一块没有圆角的硬边白矩形。这里用同特异性、更晚的规则盖掉。 */
+  html[data-theme="light"] .login-brand-panel { background: none; }
   .login-brand-panel .brand { justify-content: center; }
   .login-brand-copy h1 { font-size: clamp(30px, 2.8vw + 12px, 50px); letter-spacing: -0.03em; }
   .login-brand-copy p { margin-inline: auto; max-width: 52ch; }

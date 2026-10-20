@@ -4248,6 +4248,84 @@ class SkinWebUITestCase(unittest.TestCase):
         for token in ("sparkflow-skin", "[data-skin-toggle]", "aurora-scene", "swapSheet"):
             self.assertIn(token, script)
 
+    # ---------------------------------------------------------- 材质与特效
+    def test_材质令牌两套主题各一份(self) -> None:
+        """卡片的天光、下沿暗边、胶片颗粒浓度都写在令牌里：换主题只换值，规则不动。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        for name in ("--card-sheen:", "--edge-bottom:", "--grain-opacity:"):
+            self.assertEqual(css.count(name), 2, f"{name} 应该在深色 / 浅色各定义一次")
+
+    def test_颗粒层是内联的_svg_不引外链(self) -> None:
+        """胶片颗粒用 feTurbulence 现画，省一张图；但 SVG 的 xmlns 里带着一个 `//`，
+        写成裸链接会被「零外链」那两条测试拦下，所以百分号编码成 http%3A//。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split(".aurora-scene::after {", 1)[1].split("}", 1)[0]
+        for token in (
+            "var(--grain-opacity)",
+            "mix-blend-mode: overlay",
+            "feTurbulence",
+            "background-size: 180px 180px",
+        ):
+            self.assertIn(token, block, f"颗粒层缺 {token}")
+        self.assertIn("http%3A//www.w3.org/2000/svg", block)
+        self.assertNotIn("http://", block)
+
+    def test_KPI_色条是渐隐的光而不是浮着的实心条(self) -> None:
+        """42px 等宽实心条 + 16px 外发光，浅色下像一根浮在卡外的荧光棒。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split(".metric-card::before {", 1)[1].split("}", 1)[0]
+        self.assertIn("width: 76px;", block)
+        self.assertIn("linear-gradient(90deg, var(--metric-tone) 0%, rgba(0, 0, 0, 0) 100%)", block)
+        self.assertNotIn("box-shadow", block, "色条不该再带外发光")
+        for tone in ("success", "warning", "danger", "info"):
+            self.assertNotIn(f".metric-card.{tone}::before", css, f"{tone} 还留着旧的实心色条")
+
+    def test_浅色卡面是磨砂白而不是彩色玻璃(self) -> None:
+        """66% 白时粉紫极光整块透上来，白卡被染成淡紫、字也发灰；88% 又丢了底色。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split('html[data-theme="light"] .panel,', 1)[1].split("}", 1)[0]
+        found = re.search(r"background-color:\s*rgba\(255,\s*255,\s*255,\s*([\d.]+)\)", block)
+        self.assertIsNotNone(found, "浅色卡面没有单独的不透明度")
+        alpha = float(found.group(1))
+        self.assertGreaterEqual(alpha, 0.72, "再透下去极光会把白卡染成淡紫")
+        self.assertLessEqual(alpha, 0.9, "太实就丢了底色，极光皮肤变回纯白卡片")
+
+    def test_真发按钮是实心红而不是淡红边框(self) -> None:
+        """「立即发送」原来与「移除」共用 button-danger：淡红底红字，看着就是 disabled。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split(".button-send {", 1)[1].split("}", 1)[0]
+        for token in ("color: #fff;", "linear-gradient(180deg, #e11d48, #9f1239)"):
+            self.assertIn(token, block)
+        self.assertIn(".button-danger {", css, "移除 / 确认这类破坏性动作仍走 button-danger")
+        page = (REPO_ROOT / "webui" / "templates" / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("'button-send' if view.dry_run.default == 'off'", page)
+        # 首屏的类会被下面这段按档位重画（切到空跑再切回来），只改模板等于白改：
+        script = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('submit.className = real ? "button button-send" : "button button-soft";', script)
+        self.assertNotIn("button button-danger", script.split("const real = level", 1)[1].split("};", 1)[0])
+
+    def test_登录页品牌区在浅色下也不画矩形(self) -> None:
+        """版式层的 `background: none` 特异性是 (0,1,0)，压不过浅色那套 (0,2,0) 的渐变，
+        浅色下品牌区会露出一块没有圆角的硬边白矩形。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        self.assertIn('html[data-theme="light"] .login-brand-panel { background: none; }', css)
+
+    def test_减少动效时连入场延迟也一起停(self) -> None:
+        """只压时长不压 delay，KPI 卡仍会先空白 40/90/140/190ms 再出现。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split("@media (prefers-reduced-motion: reduce) {", 1)[1]
+        self.assertIn("animation-delay: 0.001ms !important;", block)
+        self.assertIn(".aurora-blob { animation: none !important; translate: none !important; }", block)
+
+    def test_背景层跟着指针做轻微视差(self) -> None:
+        """三层光斑按深浅各给一个系数，位移由 JS 直接算成 px 写进 --tx/--ty。"""
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        for token in ("PARALLAX_LAYERS", "currentParallax", "--tx", "--ty", "pointerleave"):
+            self.assertIn(token, script)
+        css = self.AURORA.read_text(encoding="utf-8")
+        blob = css.split(".aurora-blob {", 1)[1].split("}", 1)[0]
+        self.assertIn("translate: var(--tx, 0px) var(--ty, 0px);", blob)
+
 
 
 class MaintenanceWebUITestCase(WebUITestCase):

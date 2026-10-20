@@ -725,7 +725,7 @@
 
       <div class="form-actions">
         <button
-          class="button {{ 'button-danger' if view.dry_run.default == 'off' else 'button-soft' }}"
+          class="button {{ 'button-send' if view.dry_run.default == 'off' else 'button-soft' }}"
           type="submit"
           id="run-now-submit"
           {% if not view.can_run %}disabled{% endif %}

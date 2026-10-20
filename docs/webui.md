@@ -358,11 +358,37 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   `.mobile-brand` 靠左把主题/皮肤按钮推到右侧）。顶部指挥条会挡住锚点跳转的落点，所以另配了
   `html { scroll-padding-top: 104px } `（1081–1399 的折行档 150px）与各 section 的 `scroll-margin-top`。
   `SkinWebUITestCase::test_极光皮肤在版式上也与经典不同` 钉住这些骨架选择，也钉住 `body.nav-open .sidebar` 没被压掉。
+- **材质是三层，不是一张半透明底**：卡片现在同时有 `--card-sheen`（上亮下暗的天光）、`--inner-top` + `--edge-bottom`
+  （上下各一道内描边）和 `--shadow-2`（外投影）。只靠 `background-color` 时圆角处没有厚度，浅色下更像一张贴纸。
+  材质只改 `background-image` / `box-shadow`，不动尺寸，所以断点和版式都不用跟着改（`::test_材质令牌两套主题各一份`）。
+- **浅色卡面是 80% 白**：66% 时粉紫极光整块透上来，白卡被染成淡紫、字跟着发灰；88% 又太实、丢了底色。
+  80% 是两档之间试出来的（`::test_浅色卡面是磨砂白而不是彩色玻璃` 钉住 0.72–0.9 这个区间）。
+- **胶片颗粒是内联 SVG，`xmlns` 必须百分号编码**：`.aurora-scene::after` 用 `feTurbulence` 现画 180×180 噪声，
+  浓度走 `--grain-opacity`（深色 0.055 / 浅色 0.04）、`mix-blend-mode: overlay`。仓规二扫的是裸 `http://` 子串，
+  所以写 `http%3A//www.w3.org/2000/svg` —— 直接写链接会被判外链（`::test_颗粒层是内联的_svg_不引外链`）。
+- **KPI 的语义色改成「一道渐隐的光」**：原来 42px 等宽实心条 + `0 0 16px` 外发光，浅色下像一根浮在卡外的荧光棒；
+  现在四档只换 `--metric-tone` / `--metric-wash`，色条 76px、右端渐隐、无发光，左上角另有一层同色 radial 渗光
+  （`::test_KPI_色条是渐隐的光而不是浮着的实心条`）。
+- **「真发」自己一条 `button-send`**：它原来与「移除」共用 `button-danger`（淡红底红字），看着就是 disabled。
+  `button-danger` 留给破坏性动作（移除、确认清空），`button-send` 是实心红 + 白字 + 红色投影，
+  模板按 `view.dry_run.default == "off"` 选类，**app.js 的档位切换又按同一个档位重画一次类** ——
+  两处必须写同一个类名，只改模板的话首屏会被脚本改回 `button-danger`
+  （`::test_真发按钮是实心红而不是淡红边框` 把模板与脚本一起钉住）。
+- **背景层跟指针做视差**：三层光斑各给一个系数（`PARALLAX_LAYERS`：-26/-18、20/14、14/-10 px），
+  `paintGlow` 里按 `clientX / innerWidth - .5` 算成 px 写进 `--tx` / `--ty`，`.aurora-blob` 用
+  `translate: var(--tx, 0px) var(--ty, 0px)` + 700ms 过渡吃掉抖动，`pointerleave` 归零。
+  背景层是 `setScene()` 动态注入的，节点不能只查一次（`::test_背景层跟着指针做轻微视差`）。
+- **减少动效要连 `animation-delay` 一起压**：原来只压 `animation-duration`，KPI 卡仍会先空白 40/90/140/190ms
+  再出现；现在 `prefers-reduced-motion` 里把 delay 也归零、`translate` 清掉（`::test_减少动效时连入场延迟也一起停`）。
+- **登录页品牌区的浅色白矩形是特异性问题**：版式层 `.login-brand-panel { background: none }` 是 (0,1,0)，
+  压不过浅色那套 (0,2,0) 的渐变，浅色下品牌区露出一块没有圆角的硬边白矩形；补一条同特异性的
+  `html[data-theme="light"] .login-brand-panel { background: none; }`（`::test_登录页品牌区在浅色下也不画矩形`）。
 - **版本串**：`asset_version()` 的 mtime 取自 `app.css` + `app-aurora.css` + `app.js`，改哪一套都会换 `?v=`。
 - **测试**：`SkinWebUITestCase` 钉住「两套都完整（>30KB，不是薄薄一层覆盖）、模板里用到的类两套都有样式、
   每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache、
   浅色主题的对比度（光谱底上的字色、次要文字）、配置表列宽不随卡片塌、嵌套分段控件的内外圆角是同心圆、
-  分段控件的滑轨与胶囊有色差、四张折叠卡只留一层圆角」；
+  分段控件的滑轨与胶囊有色差、四张折叠卡只留一层圆角、材质令牌与颗粒层、KPI 渐隐色条、实心红真发按钮、
+  登录页浅色覆盖、减少动效时连延迟一起停、背景层视差」；
   上面两条仓规对新皮肤同样生效。
 
 ## 8. "面板说的"和"工具真做的"必须一致
