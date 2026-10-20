@@ -4062,6 +4062,43 @@ class SkinWebUITestCase(unittest.TestCase):
                 f"{path.name} 的分段按钮圆角没按 --seg-inset 从容器圆角里退回来：{inner}",
             )
 
+    def test_分段控件的滑轨和胶囊分得开(self) -> None:
+        """几何上同心了还不够：滑轨和胶囊如果几乎同色，两条圆角在屏幕上照样糊成一团，
+        用户看到的仍然是"内外相交"。极光原来把滑轨写成 rgba(255,255,255,0.035)，
+        浅色主题等于往白卡上又刷一层白，白胶囊压上去就分不出边界了。
+        这里钉住：滑轨走 --seg-track 令牌、深浅两套各自给值、浅色那套必须"压暗"而不是提亮。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        root = css.split(":root {", 1)[1].split("}", 1)[0]
+        light = css.split('html[data-theme="light"] {', 1)[1].split("}", 1)[0]
+        control = css.split(".segmented-control {", 1)[1].split("}", 1)[0]
+        for name, block in ((":root", root), ('html[data-theme="light"]', light)):
+            self.assertIn("--seg-track:", block, f"{name} 没给分段控件滑轨的颜色")
+            self.assertIn("--seg-track-inner:", block, f"{name} 没给滑轨的内阴影颜色")
+        self.assertIn(
+            "background: var(--seg-track);",
+            control,
+            "分段控件没走 --seg-track，滑轨又会跟胶囊同色",
+        )
+        self.assertRegex(
+            control,
+            r"box-shadow:\s*inset\s+0\s+1px\s+2px\s+var\(--seg-track-inner\)",
+            "滑轨缺那道内阴影凹槽",
+        )
+        m = re.search(r"--seg-track:\s*rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)", light)
+        self.assertIsNotNone(m, "浅色滑轨要写成具体的 rgba，才量得出是不是压暗")
+        r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+        alpha = float(m.group(4))
+        self.assertLessEqual(max(r, g, b), 60, "浅色滑轨必须是压暗的蓝灰，不能是提亮的白")
+        self.assertGreaterEqual(alpha, 0.08, "浅色滑轨太淡，白胶囊压上去还是看不出边界")
+        classic = self.CLASSIC.read_text(encoding="utf-8")
+        classic_control = classic.split(".segmented-control {", 1)[1].split("}", 1)[0]
+        self.assertIn(
+            "background: var(--surface-2);",
+            classic_control,
+            "经典皮肤的滑轨本来就靠 --surface-2 压出底色，别退回透明",
+        )
+
     def test_极光皮肤在版式上也与经典不同(self) -> None:
         """换皮肤只换样式表，但版式要真的换：桌面端是「顶部指挥条 + 刊头 + 12 栏 bento
         + 卡片式运行记录 + 通栏日志 + 居中登录页」，经典那套是「左侧竖栏 + 单列流水」。

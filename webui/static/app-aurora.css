@@ -28,6 +28,12 @@
   --glass-3:       rgba(255, 255, 255, 0.115);
   --glass-solid:   #0c0f1e;
 
+  /* 分段控件的滑轨要跟上面的胶囊分得开：深色下是一层更亮的玻璃，浅色下是一层压暗的灰。
+     原来是 rgba(255,255,255,0.035)——浅色主题里等于往白卡上又刷了 3.5% 白，
+     滑轨和白胶囊几乎同色，两条圆角就糊成一团，看着像"内外相交"。 */
+  --seg-track:        rgba(255, 255, 255, 0.085);
+  --seg-track-inner:  rgba(0, 0, 0, 0.32);
+
   --line:          rgba(255, 255, 255, 0.085);
   --line-2:        rgba(255, 255, 255, 0.15);
   --line-3:        rgba(255, 255, 255, 0.26);
@@ -101,6 +107,10 @@ html[data-theme="light"] {
   --glass-2:       rgba(255, 255, 255, 0.82);
   --glass-3:       rgba(255, 255, 255, 0.95);
   --glass-solid:   #ffffff;
+
+  /* 浅色主题的滑轨：往白卡上压一层蓝灰（≈#e4e6ec），白色胶囊才浮得出来 */
+  --seg-track:        rgba(21, 28, 56, 0.10);
+  --seg-track-inner:  rgba(21, 28, 56, 0.07);
 
   --line:          rgba(21, 28, 56, 0.09);
   --line-2:        rgba(21, 28, 56, 0.16);
@@ -874,7 +884,10 @@ label { font-size: 13px; color: var(--text-2); }
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 13px;
-  background: rgba(255, 255, 255, 0.035);
+  /* 滑轨：浅色下压暗、深色下提亮，再压一道内阴影当"凹槽"，
+     这样白色/渐变胶囊和滑轨之间才有一道看得见的分界（原来两边几乎同色）。 */
+  background: var(--seg-track);
+  box-shadow: inset 0 1px 2px var(--seg-track-inner);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   flex-wrap: wrap;
