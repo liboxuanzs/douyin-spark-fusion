@@ -4099,6 +4099,43 @@ class SkinWebUITestCase(unittest.TestCase):
             "经典皮肤的滑轨本来就靠 --surface-2 压出底色，别退回透明",
         )
 
+    def test_四张折叠卡只有一层圆角(self) -> None:
+        """「扫码登录 / 运行配置 / 磁盘与资料目录 / 修改密码」这四张卡里只有一个折叠块。
+        以前外层画成卡片、折叠块用负边距贴到卡片边线上：外 22px、内 16px，左右只差
+        1px、四角却差 6px，两道弧挤在一起 —— 用户说「两个圆角矩形重叠」就是这个。
+        现在照经典皮肤的做法：外层不画边框和底，折叠块就是卡片本身，只剩一层圆角。
+        """
+        css = self.AURORA.read_text(encoding="utf-8")
+        for dead in ("margin-inline: -22px", "margin-inline: -19px", "margin-inline: -15px"):
+            self.assertNotIn(dead, css, f"折叠块又贴回卡片边线了：{dead}")
+        flush = css.split(".dashboard-section.section-flush {", 1)
+        self.assertEqual(len(flush), 2, "flush 卡片那段没了")
+        block = flush[1].split("\n}", 1)[0]
+        for rule in ("padding: 0;", "border: 0;", "background: transparent;"):
+            self.assertIn(rule, block, f"外层还在画卡片：缺 {rule}")
+        self.assertRegex(
+            css,
+            r"\.dashboard-section \{\n  --panel-radius: var\(--radius-lg\);",
+            "卡片圆角的令牌没定义",
+        )
+        self.assertRegex(
+            css,
+            r"\.dashboard-section \{[^}]*border-radius: var\(--panel-radius\);",
+            "卡片圆角没走 --panel-radius",
+        )
+        inner = css.split(".dashboard-section.section-flush > .collapsible-section {", 1)
+        self.assertEqual(len(inner), 2, "折叠块跟卡片同半径那条没了")
+        self.assertIn(
+            "border-radius: var(--panel-radius);",
+            inner[1].split("\n}", 1)[0],
+            "折叠块的圆角没跟卡片走，又会画出两层弧",
+        )
+        self.assertIn(
+            ".dashboard-section { --panel-radius: var(--radius); }",
+            css,
+            "560px 以下卡片圆角换成 --radius，折叠块必须跟着换",
+        )
+
     def test_极光皮肤在版式上也与经典不同(self) -> None:
         """换皮肤只换样式表，但版式要真的换：桌面端是「顶部指挥条 + 刊头 + 12 栏 bento
         + 卡片式运行记录 + 通栏日志 + 居中登录页」，经典那套是「左侧竖栏 + 单列流水」。

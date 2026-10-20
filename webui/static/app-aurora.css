@@ -1387,13 +1387,14 @@ html[data-theme="light"] .overview-primary .overview-value {
 /* == 08 区块 / 折叠面板 ================================================== */
 
 .dashboard-section {
+  --panel-radius: var(--radius-lg);
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 15px;
   padding: 20px 22px 22px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: var(--panel-radius);
   background: var(--glass);
   backdrop-filter: blur(var(--blur)) saturate(150%);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(150%);
@@ -1402,8 +1403,24 @@ html[data-theme="light"] .overview-primary .overview-value {
   scroll-margin-top: 24px;
   animation: rise-in 560ms var(--ease) both;
 }
+/* 这四张卡（扫码登录 / 运行配置 / 磁盘与资料目录 / 修改密码）里只有一个折叠块：
+   折叠块才是卡片本身，外层不再画边框和底 —— 经典皮肤一直这么写。
+   之前外层画成卡片、折叠块用负边距贴到卡片边线上，内外两个圆角矩形在四角
+   挤出两道弧，看着像两块叠在一起。 */
+.dashboard-section.section-flush {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 .dashboard-section > .section-flush,
-.dashboard-section > .section-collapse { margin-inline: -22px; }
+.dashboard-section > .section-collapse { margin: 0; }
+.dashboard-section.section-flush > .collapsible-section {
+  border-radius: var(--panel-radius);
+  box-shadow: var(--inner-top), var(--shadow-2);
+}
 
 .section-header {
   display: flex;
@@ -2318,8 +2335,6 @@ html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora { displa
 @media (max-width: 1240px) {
   .main-area { padding: 24px 24px 50px; }
   .dashboard-section, .panel { padding: 18px 19px 20px; }
-  .dashboard-section > .section-flush,
-  .dashboard-section > .section-collapse { margin-inline: -19px; }
 }
 
 @media (max-width: 1120px) {
@@ -2421,8 +2436,7 @@ html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora { displa
   .overview-primary + .overview-cell { border-top: 0; }
   .metric-grid { grid-template-columns: minmax(0, 1fr); }
   .dashboard-section, .panel { padding: 16px 15px 18px; border-radius: var(--radius); }
-  .dashboard-section > .section-flush,
-  .dashboard-section > .section-collapse { margin-inline: -15px; }
+  .dashboard-section { --panel-radius: var(--radius); }
   .account-card { padding: 16px 15px 18px; }
   .account-card-actions { grid-template-columns: minmax(0, 1fr); }
   .page-heading h1 { font-size: 20px; }

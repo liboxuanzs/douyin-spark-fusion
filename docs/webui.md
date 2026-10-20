@@ -339,6 +339,15 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   （浅色 `rgba(21, 28, 56, 0.10)` 压暗、深色 `rgba(255, 255, 255, 0.085)` 提亮），再加一道 `inset 0 1px 2px` 的凹槽；
   `SkinWebUITestCase::test_分段控件的滑轨和胶囊分得开` 钉住"浅色滑轨必须是压暗的蓝灰"。
    这三条也一并被 `::test_极光皮肤在版式上也与经典不同` 钉住。
+- **「只有折叠块」的卡片只留一层圆角**：「扫码登录 / 运行配置 / 磁盘与资料目录 / 修改密码」这四张卡里只有一个
+  `<details class="collapsible-section">`。极光原来把外层也画成卡片（1px 边框 + `--glass` 底 + `padding: 16px 22px 22px`），
+  再用 `.dashboard-section > .section-collapse { margin-inline: -22px }` 让折叠块抵消左右内边距贴到卡片边线上：
+  内层因此离边框左右各 1px、上方 17px、下方 22px，外 22px 内 16px 两道弧在四角挤在一起 ——
+  用户报的「两个圆角矩形重叠」就是这个。经典皮肤一直是另一套写法：
+  `.dashboard-section.section-flush { padding: 0; border: 0; background: transparent; }`，折叠块自己就是卡片。
+  极光现在照这个来，并把卡片圆角收进 `--panel-radius` 令牌（560px 以下换成 `--radius`），折叠块写
+  `border-radius: var(--panel-radius)`，整张卡只剩一层圆角；`SkinWebUITestCase::test_四张折叠卡只有一层圆角`
+  钉住负边距不再出现、外层不再画卡片、内层圆角跟着令牌换。
 - **版式也换了，不只是配色**：`app-aurora.css` 末尾是一层 `/* == 21 版式重排 … */`，整段包在
   `@media (min-width: 1081px)` 里，把七块重排了一遍 —— 外壳（`.app-shell` 退出栅格、`.sidebar` 变 sticky 顶部指挥条）、
   主区（`.main-area::before` 刊头柔光带 + `.page-header` 大字标题 + 1360px 宽画布）、仪表盘（`.dashboard-stack` 12 栏栅格，
@@ -353,7 +362,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 - **测试**：`SkinWebUITestCase` 钉住「两套都完整（>30KB，不是薄薄一层覆盖）、模板里用到的类两套都有样式、
   每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache、
   浅色主题的对比度（光谱底上的字色、次要文字）、配置表列宽不随卡片塌、嵌套分段控件的内外圆角是同心圆、
-  分段控件的滑轨与胶囊有色差」；
+  分段控件的滑轨与胶囊有色差、四张折叠卡只留一层圆角」；
   上面两条仓规对新皮肤同样生效。
 
 ## 8. "面板说的"和"工具真做的"必须一致
