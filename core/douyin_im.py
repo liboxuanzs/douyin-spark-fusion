@@ -1012,6 +1012,26 @@ def _envelope_code(buf):
     return None
 
 
+def decision_of(buf):
+    """回执如果不是 protobuf 信封，而是一句 JSON 判决，就把它读出来。
+
+    实测形状：`{"decision": "KICK"}` —— 服务端把会话踢下线时回的就是这一句。
+    它连信封都不是，所以 `envelope()` 只能解出 `code=None status=""`，上游一直
+    把它当"普通发送失败"重试 1 次再白等 20 秒回执，把当天的名额一条条烧光
+    （2026-10-20 🌈LBW🌈 wheat 两个账号整天没发出去就是这个形态）。
+    认得出来的判决值原样返回（大写），认不出来返回空串。
+    """
+    try:
+        raw = bytes(buf or b"").decode("utf-8", "replace").strip()
+        if raw.startswith("{"):
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return str(obj.get("decision") or "").strip().upper()
+    except Exception:
+        pass
+    return ""
+
+
 def decode_send_resp(buf):
     """任务三的验收信号。ok = code==0 且 status=='OK'。"""
     env = envelope(buf)
@@ -1034,10 +1054,15 @@ def decode_send_resp(buf):
             self_uid = str(f[2])
     except Exception:
         pass
+    decision = decision_of(buf)
     return {
         "ok": env["code"] == 0 and (env["status"] or "").lower() == "ok",
         "code": env["code"], "status": env["status"], "cmd": env["cmd"],
         "message_id": message_id, "server_uuid": server_uuid, "self_uid": self_uid,
+        # 服务端的判决（`{"decision": "KICK"}`）。kicked 单独给一个布尔，
+        # 调用方不必自己去比字符串。
+        "decision": decision,
+        "kicked": decision == "KICK",
     }
 
 
@@ -1441,6 +1466,18 @@ class ImMonitor:
         r = decode_send_resp(body)
         r["at"] = time.time()
         self.sends.append(r)
+        if r.get("kicked"):
+            # 不是信封，而是一句 JSON 判决：`{"decision": "KICK"}`。服务端已经不认
+            # 这个会话了 —— 页面还长着 IM 的样子、点发送也"成功"，但回执永远不来。
+            # 当成普通失败重试只会把当天名额一条条烧光（2026-10-20 的真实事故）。
+            self._login_dead = True
+            self._login_dead_reason = "KICK:" + (r.get("decision") or "KICK")
+            logger.error(
+                f"[SEND] ⛔ 服务端把会话踢下线（decision={r.get('decision')}）："
+                "这个账号的登录态已经作废，本轮不再尝试发送，需要重新扫码登录")
+            self._emit_login_lost(
+                None, reason=f"发送回执 decision={r.get('decision')}（会话被踢下线）",
+                head="[LOGIN] ⛔ 服务端把会话踢下线（decision=KICK）")
         _msg = (f"[SEND] {'✅ 成功' if r['ok'] else '❌ 失败'}  code={r['code']}  "
                 f'status="{r["status"]}"'
                 + (f"  message_id={r['message_id']}" if r["message_id"] else ""))
@@ -1705,9 +1742,12 @@ class DouyinIM:
             pass
         self._on_resp_login_lost = on_resp
 
-    def _emit_login_lost(self, code, reason=""):
-        head = (f"[LOGIN] ⛔ 运行期检测到掉登录（status_code={code}）" if code is not None
-                else "[LOGIN] ⛔ 运行期检测到掉登录（发送失败后复检）")
+    def _emit_login_lost(self, code, reason="", head=""):
+        # `head` 给"不是掉登录、但同样是这个会话不能再用"的情况（如 decision=KICK）
+        # 留一条自己的说明；默认两句仍按原来的两种来源写。
+        head = head or (f"[LOGIN] ⛔ 运行期检测到掉登录（status_code={code}）"
+                        if code is not None
+                        else "[LOGIN] ⛔ 运行期检测到掉登录（发送失败后复检）")
         logger.error(head + (f"  {reason}" if reason else ""))
         for cb in list(self._login_lost):
             try:
@@ -3039,6 +3079,19 @@ class DouyinIM:
                         reason="" if ok else "没拿到发送凭据（按钮没找到或点击失败）")
 
         rc = self._wait_receipt(sends_before, msg_before, text, timeout, hit=hit)
+        if rc.get("kicked"):
+            # 会话被踢 ≠ 发送失败：重试同一个死会话没有意义，更不能记成
+            # "今天已发"（一条都没送达）。交给 tasks 记 session_kicked 并停手。
+            self._login_dead = True
+            self._login_dead_reason = "KICK:" + (rc.get("kick_decision") or "KICK")
+            out = dict(base)
+            out.update({"ok": False, "via": None, "reason": "session_kicked",
+                        "login_lost": True, "kicked": True,
+                        "login_state": self._login_dead_reason or "KICK",
+                        "kick_decision": rc.get("kick_decision") or "KICK",
+                        "message_id": None, "code": None, "status": None,
+                        "level": "none", "text_len": len(text)})
+            return out
         if rc["http"]:
             h = rc["http"]
             # 一律用 .get()：这条日志在**消息已经发出去之后**才执行，
@@ -3255,6 +3308,7 @@ class DouyinIM:
         """
         t0 = time.time()
         http = dom = None
+        kicked = None             # 服务端把会话踢下线（`{"decision": "KICK"}`）
         last_http = None          # 最后一条响应（可能是失败的，用来解释原因）
         dom_conv_off = False
         last_conv = None          # 最后**读到过**的"当前会话 id"（气泡没涨也要留着）
@@ -3263,8 +3317,15 @@ class DouyinIM:
         while time.time() - t0 < timeout:
             for rec in self.mon.sends[sends_before:]:
                 last_http = rec
+                if rec.get("kicked"):
+                    kicked = rec
+                    break
                 if http is None and rec.get("ok"):
                     http = rec
+            if kicked:
+                # 会话被踢：等到超时也不会有回执，只会白等 20 秒，再让调用方
+                # 把它当成"发送失败"重试一次 —— 也正是在这里把名额烧光的。
+                break
             if dom is None:
                 st = self._msg_state()
                 st_conv = st.get("convId")
@@ -3289,6 +3350,16 @@ class DouyinIM:
             if dom and time.time() - t0 > 2.0:
                 break
             self.page.wait_for_timeout(150)
+
+        if kicked:
+            logger.error(
+                f"[SEND] ⛔ 回执是 decision={kicked.get('decision') or 'KICK'}："
+                "会话已被踢下线，这条不算「发送失败」，也不再等 DOM 证据")
+            return {"ok": False, "http": None, "dom": None, "verdict": None,
+                    "dom_conv_off": False,
+                    "receipts": list(self.mon.sends[sends_before:]),
+                    "kicked": True,
+                    "kick_decision": kicked.get("decision") or "KICK"}
 
         # 组装给 strict_verify 的观测快照
         after = dict(dom or {})

@@ -998,6 +998,37 @@ class RuntimeLoginLostTests(_TasksCase):
         self.assertEqual(state["accounts"]["111"]["status"], "error")
         self.assertIn("login_lost", state["accounts"]["111"]["note"])
 
+    def _kicked(self, dry_run="off"):
+        return {"ok": False, "via": None, "message_id": None, "code": None,
+                "status": None, "conv_id": "0:1:2", "display": "甲同学",
+                "reason": "session_kicked", "level": "none", "dry_run": dry_run,
+                "login_lost": True, "kicked": True, "kick_decision": "KICK",
+                "login_state": "KICK:KICK", "rate_limited": False, "limit": None}
+
+    def test_session_kicked_stops_and_is_not_recorded_as_sent(self):
+        """被服务端踢下线：立刻停手，而且**绝不能记成"今天已发"**。
+
+        2026-10-20 的真实事故：首条发送的响应就是 `{"decision": "KICK"}`，旧代码按
+        普通失败重试 1/1、每条再白等 20 秒超时，整天一条都没出去；账本却是 ok，
+        调度认定今天发过了，不会补发，面板也没有任何提示。
+        """
+        from core import schedule
+        self._set_users(self.users)
+        _FakeIM.result = self._kicked()
+        rec = tasks_mod.runTasks(dry_run="off", source="test")
+        acct = rec["accounts"][0]
+        self.assertEqual(acct["status"], "error")
+        self.assertIn("session_kicked", acct["error"])
+        self.assertIn("KICK", acct["error"])
+        self.assertEqual(acct["sent_ok"], 0)
+        self.assertEqual(acct["sent_fail"], 1)
+        # 只试了第一个目标：被踢之后不再去喂第二个
+        self.assertEqual(len(_FakeIM.instances[0].messages), 1)
+        self.assertEqual([e["reason"] for e in acct["entries"]], ["session_kicked"])
+        state = schedule.load_state(path=self.schedule_file)
+        self.assertEqual(state["accounts"]["111"]["status"], "error")
+        self.assertIn("session_kicked", state["accounts"]["111"]["note"])
+
     def test_all_sends_failing_is_not_recorded_as_success(self):
         """**一条都没送达**绝不能记成 ok。
 

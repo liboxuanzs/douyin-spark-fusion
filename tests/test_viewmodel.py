@@ -814,6 +814,18 @@ class OverviewPayloadTests(unittest.TestCase):
         payload = viewmodel.overview_payload(self._view())
         self.assertEqual(payload["accounts"][0]["uniqueId"], "10001")
 
+    def test_轮询也带着扫码会话状态(self) -> None:
+        """「重新登录」按钮的禁用理由有两路：正在跑（task.running）与扫码会话开着。
+
+        后者以前只写在首屏 HTML 的 `data-login-active` 上，轮询从不刷新 ——
+        会话取消之后按钮一直灰着，只能手动刷新页面（2026-10-20 的真实投诉）。
+        这里钉住服务端：payload 里必须有 `login.active`，前端才有的可同步。
+        """
+        payload = viewmodel.overview_payload(self._view())
+        self.assertEqual(payload["login"], {"active": False}, "没有 login 时按未开会话算")
+        busy = self._view(login={"session": {"active": True}})
+        self.assertIs(viewmodel.overview_payload(busy)["login"]["active"], True)
+
 
 class TaskStateTests(unittest.TestCase):
     def test_运行中会算年龄(self) -> None:
@@ -1450,6 +1462,33 @@ class WholeRunErrorTests(unittest.TestCase):
         texts = " ".join(issue["text"] for issue in card["issues"])
         self.assertNotIn("本轮异常结束", texts)
         self.assertIn("登录已失效", texts)
+
+    def test_被踢下线要说清是_KICK_而不是普通失效(self):
+        """`{"decision": "KICK"}` 与"cookie 过期"是两件事：页面看着还登录着，
+
+        是服务端把这个会话踢了。文案要给出唯一出路（重新扫码）并说明会自动补发，
+        而且不能叠「本轮异常结束」—— 那会让用户以为已经发出去几条了。
+        """
+        account = _account(
+            status="error",
+            sent_ok=0,
+            sent_fail=1,
+            error="session_kicked: 服务端把会话踢下线（decision=KICK），本轮发送成功 0 条、失败 1 条",
+            entries=[_entry(ok=False, level="none", reason="session_kicked")],
+        )
+        card = viewmodel.build_account(
+            _snapshot(status="error", status_text="出错"),
+            _record(status="error", status_text="出错", accounts=[account]),
+        )
+        texts = " ".join(issue["text"] for issue in card["issues"])
+        self.assertIn("KICK", texts)
+        self.assertIn("扫码登录", texts)
+        self.assertIn("自动补发", texts)
+        # 补发这句话只说一遍：`_REQUEUE_NOTE` 自己就带着"登录成功后会自动补发一次"，
+        # 卡面再手写一句就是「自动补发一次（…登录成功后会自动补发一次）」（线上真踩到）。
+        self.assertEqual(texts.count("自动补发"), 1, texts)
+        self.assertNotIn("本轮异常结束", texts)
+        self.assertEqual(card["state"], "blocked", "一条都没发出去，当天要人处理")
 
 
 class MaintenanceViewTests(unittest.TestCase):

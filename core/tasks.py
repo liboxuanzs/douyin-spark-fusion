@@ -169,6 +169,7 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
     guard = guard or limit_guard.LimitGuard()
     sent_ok = sent_fail = 0     # 必须在 try 之外初始化：门禁阶段抛异常也要能走到收尾
     login_lost = False          # 运行期掉登录（发送时复检出来的）—— 决定账号级结论
+    kicked = ""                 # 非空 = 服务端把会话踢下线（回执 decision=KICK）
     out = {
         "username": username, "unique_id": unique_id,
         "status": "ok", "gate": None, "sent_ok": 0, "sent_fail": 0,
@@ -302,11 +303,23 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                     # 回执再复检一次，只会把风控喂大）。账号级结论由下面标成 error，
                     # 面板据此提示「请重新扫码登录」—— 见 core/douyin_im.recheck_login。
                     login_lost = True
-                    logger.error(
-                        f"账号 {username} → {friend['display']} 发送时发现登录已失效"
-                        f"（{r.get('login_state') or 'UNKNOWN'}）：停止本轮发送，"
-                        f"请到面板「扫码登录」重新登录这个账号"
-                    )
+                    if r.get("kicked"):
+                        # 服务端直接回 `{"decision": "KICK"}`：这个会话已经作废。
+                        # 与掉登录同样是"账号级、立即停手"，但要分开说 —— 重试同一个
+                        # 死会话只会白等 20 秒超时，把当天的名额一条条烧光
+                        # （2026-10-20 两个账号整天没发出去就是这个形状）。
+                        kicked = r.get("kick_decision") or "KICK"
+                        logger.error(
+                            f"账号 {username} → {friend['display']} 被服务端踢下线"
+                            f"（decision={kicked}）：这个登录态已经作废，本轮立即停止，"
+                            f"不重试也不占今天的名额 —— 请到面板「扫码登录」重新登录"
+                        )
+                    else:
+                        logger.error(
+                            f"账号 {username} → {friend['display']} 发送时发现登录已失效"
+                            f"（{r.get('login_state') or 'UNKNOWN'}）：停止本轮发送，"
+                            f"请到面板「扫码登录」重新登录这个账号"
+                        )
                     if len(out["entries"]) < ENTRY_CAP:
                         out["entries"].append(_entry(friend, r, dry_run))
                     else:
@@ -349,6 +362,8 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                             break
                         if r2.get("login_lost"):
                             login_lost = True
+                            if r2.get("kicked"):
+                                kicked = r2.get("kick_decision") or "KICK"
                             logger.error(
                                 f"账号 {username} → {friend['display']} 重试时发现登录已失效"
                                 f"（{r2.get('login_state') or 'UNKNOWN'}）：停止本轮发送，"
@@ -413,11 +428,20 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
             # 面板计入「需要处理」，人只要重新扫码登录，当天就会被补发
             # （见 webui/app.py 的扫码成功回调）。
             out["status"] = "error"
-            out["error"] = (
-                "login_lost: 登录已失效（服务端不认这个 sessionid），"
-                f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
-                "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
-            )
+            if kicked:
+                # 同一个"账号级、今天别再试"的结论，但换个前缀让面板说真话：
+                # 用户看到的是"登录已被踢下线"，不是一句含糊的"登录已失效"。
+                out["error"] = (
+                    f"session_kicked: 服务端把会话踢下线（decision={kicked}），"
+                    f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
+                    "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+                )
+            else:
+                out["error"] = (
+                    "login_lost: 登录已失效（服务端不认这个 sessionid），"
+                    f"本轮发送成功 {sent_ok} 条、失败 {sent_fail} 条；"
+                    "请到面板「扫码登录」重新登录该账号，登录成功后当天会自动补发"
+                )
         elif dry_run == DRY_RUN_OFF and sent_ok == 0 and out.get("abort_run"):
             # **发送过程中命中风控熔断，而这一轮一条都没送出去**。同一次熔断，
             # 上面门禁处写的是 `status="skipped"`，这里却什么状态都不写 → 保持

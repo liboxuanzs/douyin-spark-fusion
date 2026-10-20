@@ -121,6 +121,25 @@ A 的做法（`core/automation.py:27-40`）是 12 个中文关键词 + `bounding
   （`sent_ok > 0`）的账号才记 `ok`。从前"发送中熔断"这一格不写状态，被 `_mark_status()`
   兜成 `ok`：面板写"今天已发"、当天名额被吃掉，而消息一条都没送到（GitHub issue #14）。
 
+### 6.1 会话被踢（`{"decision": "KICK"}`）
+
+2026-10-20 的真实事故：两个账号到点时，首条发送的响应体是一句 `{"decision": "KICK"}`（不是 protobuf 信封）。
+`decode_send_resp()` 当时只解出 `code=None status=""`，于是被当成"这一条没发出去"：每个目标重试一次、
+每次白等 20 秒回执超时，整天一条都没送出去；而账号级状态还是 `ok` —— 调度认定"今天已发"、不会补发，
+面板上一切正常。判定拆成四层，缺一层就又退回旧行为：
+
+1. **解码**：`decision_of(buf)` 只认 JSON 判决（body 以 `{` 开头才试），`decode_send_resp()` 返回
+   `kicked = decision == "KICK"`；`ok` 仍是 `False` —— 它永远不是一次成功发送。
+2. **监视器**：`ImMonitor._handle_send` 见到 kicked 立刻置 `_login_dead = True`、
+   `_login_dead_reason = "KICK:KICK"`，并触发掉登录回调（`_emit_login_lost` 的 `head` 参数给这条自己的说明）。
+3. **不白等**：`_wait_receipt()` 一看到 kicked 就 break；`type_and_send()` 直接返回 `reason="session_kicked"`，
+   **不复检登录态、不重试同一个死会话**（复检在这里是反作用的：页面还长着 IM 的样子，复检也可能说"登录着"）。
+4. **记账**：`core/tasks.py` 记 `session_kicked`（`status="error"`，不是 `ok`）→ 当天名额不被吃掉；
+   重新扫码后 `core/schedule.requeue_after_relogin()` 照常撤回这条账；`viewmodel.build_account` 把它翻成
+   「账号阻断 · 重扫一次即可，登录成功后自动补发」。
+
+判断口径：**KICK 属于"账号级、今天别再试"，不属于"这一条失败了"**。前者要停手并等人扫码，
+后者才轮到重试预算（见上一节的熔断口径，两者都落在"error/skipped ≠ 已发送"这一条上）。
 ## 7. 仪表盘（借鉴 B 的形态）
 
 B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入强耦合。融合版**重写一层薄 webui**，

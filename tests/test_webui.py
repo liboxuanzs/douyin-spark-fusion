@@ -3451,6 +3451,22 @@ class FrontendAgreementTests(unittest.TestCase):
         cls.logs = (REPO_ROOT / "webui" / "templates" / "logs.html").read_text(encoding="utf-8")
         cls.js = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
 
+    def test_扫码会话结束后重新登录按钮要能自己解锁(self) -> None:
+        """「重新登录」的禁用理由有两路：正在跑、以及扫码会话还开着。
+
+        后者以前只写在首屏 HTML 的 `data-login-active` 上，轮询只读不写 ——
+        会话取消之后按钮一直灰着，用户必须手动刷新页面（2026-10-20 的投诉）。
+        """
+        self.assertIn(
+            'data-login-active="{{ 1 if view.login.session.active else 0 }}"',
+            self.dashboard,
+        )
+        self.assertIn("const login = data.login || {};", self.js)
+        self.assertIn("button.dataset.loginActive = loginActive ? \"1\" : \"0\";", self.js)
+        self.assertIn(
+            "login.active === undefined ? undefined : Boolean(login.active)", self.js
+        )
+
     def test_运行记录页的本轮数字不会被总览轮询改写(self) -> None:
         """`data-overview-value` 是"今天总览"的挂点，前端每 10 秒往里写一次。
 

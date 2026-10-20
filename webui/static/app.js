@@ -598,8 +598,15 @@
   // 只按 running 写 disabled 是不行的：服务端首屏还会因为"扫码会话开着"禁用重新登录，
   // 轮询手里没有那个状态，10 秒后就会把按钮重新点亮。所以服务端把这条理由也渲染成
   // data-login-active 发给这里，两处判断必须同源。
-  const updateDisableWhileRunning = (running) => {
+  // 第二个参数是**扫码会话是否还开着**（服务端 overview 的 login.active）。只按首屏
+  // 那份 data-login-active 判断是不够的：会话被取消或结束后属性仍是 "1"，10 秒后
+  // 轮询照样把按钮写回 disabled —— 用户看到的就是"重新登录永远是灰的、必须刷新页面"
+  // （2026-10-20 的真实缺陷）。轮询拿到状态就同步回属性，两处判断才真正同源。
+  const updateDisableWhileRunning = (running, loginActive) => {
     document.querySelectorAll("[data-disable-while-running]").forEach((button) => {
+      if (loginActive !== undefined && button.hasAttribute("data-login-active")) {
+        button.dataset.loginActive = loginActive ? "1" : "0";
+      }
       button.disabled = Boolean(running) || button.dataset.loginActive === "1";
     });
   };
@@ -742,7 +749,11 @@
             : schedule.timerText || "",
     );
     updateAccounts(data.accounts || []);
-    updateDisableWhileRunning(Boolean(task.running));
+    const login = data.login || {};
+    updateDisableWhileRunning(
+      Boolean(task.running),
+      login.active === undefined ? undefined : Boolean(login.active),
+    );
 
     if (previousRunning === true && !task.running) {
       document

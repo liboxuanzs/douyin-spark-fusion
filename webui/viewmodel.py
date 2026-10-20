@@ -128,6 +128,9 @@ REASON_LABELS: Dict[str, str] = {
     # core/douyin_im.py 的登录态复检（2026-10-09 示例号 掉登录那次加的）：
     # 页面还长着 IM 的样子，回执却永远不来 —— 这不是"没发出去"，是"没登录"。
     "login_lost": "登录已失效（要重新扫码登录）",
+    # 2026-10-20：回执不是信封而是 `{"decision": "KICK"}` —— 服务端把这个会话踢了。
+    # 与 `login_lost` 分开说：页面看着还登录着，用户不会自己去想着重扫。
+    "session_kicked": "会话被服务端踢下线（要重新扫码登录）",
 }
 
 #: 回执来源（``core.douyin_im`` 的 ``via`` 字段）。
@@ -617,13 +620,16 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     # —— 必须从 `account` 上取。
     account_error = str(_get(account, "error") or "")
     login_lost = account_error.startswith("login_lost")
+    # 服务端把会话踢下线（回执 `{"decision": "KICK"}`）：和掉登录一样是"账号级、
+    # 今天别再试"，但原因不同 —— 页面还长着 IM 的样子，是服务端单方面踢了这个会话。
+    kicked = account_error.startswith("session_kicked")
     nothing_sent = account_error.startswith("nothing_sent")
     # 门禁阶段就判出「登录态已死」的那一档（core/tasks.py 的 GATE_DEAD_STATUSES）：
     # 一条都没发出去、当天也不会再重试 —— 和 login_lost 一样是"根本上没法干活"。
     login_dead = account_error.startswith("login_dead")
     state = _account_state_for(
         data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed,
-        login_lost=login_lost or nothing_sent or login_dead,
+        login_lost=login_lost or kicked or nothing_sent or login_dead,
     )
 
     issues: List[Dict[str, str]] = []
@@ -659,6 +665,16 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
                     "重新登录成功后会自动补发一次（不用手点「立即运行」，但只补"
                     "今天还没成功发出去的账号）",
         })
+    elif kicked:
+        # 与「掉登录」分开说：这一档是**服务端单方面把会话踢下线**（回执
+        # `{"decision": "KICK"}`），页面还长着 IM 的样子、点发送也"成功"，但回执
+        # 永远不来。当成普通失败重试只会白等 20 秒再烧掉一条名额
+        # （2026-10-20 两个账号整天没发出去就是这个形状）。
+        issues.append({
+            "level": "danger",
+            "text": "上一轮被服务端踢下线（回执 decision=KICK），一条都没发出去 —— "
+                    "这个账号的登录态已经作废，到下面「扫码登录」重新扫一次即可" + _REQUEUE_NOTE,
+        })
     elif nothing_sent:
         # 更隐蔽的一档：门禁当时还是 READY、校验全 strong、输入也对，抖音那边
         # 一条都不收（响应体是空的，或者解不出 code）—— 页面看着一切正常。
@@ -667,10 +683,9 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             "level": "danger",
             "text": "上一轮**一条都没送达**（每个目标都没拿到回执；门禁当时还是通过的）—— "
                     "通常是登录已被服务端作废或风控拦截；"
-                    "到下面「扫码登录」重新扫一次，登录成功后会自动补发一次"
-                    + _REQUEUE_NOTE,
+                    "到下面「扫码登录」重新扫一次" + _REQUEUE_NOTE,
         })
-    if status == "error" and not orphan and not (login_lost or nothing_sent or login_dead):
+    if status == "error" and not orphan and not (login_lost or kicked or nothing_sent or login_dead):
         # 整轮异常结束（浏览器崩了 / 账号级异常）—— 和"被跳过""登录失效"分开说。
         # 已经发出去的部分算数，剩下的目标**当天不会再重试**（`core/schedule.py::select`
         # 只把 skipped 当"名额还在"，error 等同于"今天办过了"）。
@@ -1415,6 +1430,8 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
     summary = view.get("summary") or {}
     task = view.get("task") or {}
     schedule = view.get("schedule") or {}
+    login = view.get("login") or {}
+    login_session = login.get("session") or {}
     accounts = view.get("accounts") or []
     return {
         "ok": True,
@@ -1466,6 +1483,13 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             "running": bool(task.get("running")),
             "stale": bool(task.get("stale")),
             "ageSeconds": _int(task.get("ageSeconds")),
+        },
+        # 扫码会话是否开着。首屏把它写成按钮上的 data-login-active，轮询原来拿不到
+        # 这份状态，于是会话取消/结束后「重新登录」按钮**永远**是灰的，必须手动
+        # 刷新页面才解锁（2026-10-20 用户报的真实缺陷）。键名与 static/app.js
+        # 里那处消费必须逐字一致。
+        "login": {
+            "active": bool(login_session.get("active")),
         },
         "schedule": {
             "nextTriggerAt": schedule.get("nextTriggerAt", ""),

@@ -2133,6 +2133,69 @@ class IdentitySelectionTests(unittest.TestCase):
                          sorted([self._conv(1), self._conv(40)]))
 
 
+class KickDecisionTests(unittest.TestCase):
+    """`{"decision": "KICK"}` 是"这个会话作废了"，不是"这一条没发出去"。
+
+    2026-10-20 的真实事故：两个账号到点时首条发送的响应就是一句
+    `{"decision": "KICK"}`（不是 protobuf 信封）。旧代码只解出
+    `code=None status=""` → 按普通发送失败重试 1/1、后续每条白等 20 秒超时，
+    整天一条都没送出去，面板上还写着"已发"。这里钉住三层：
+    解码层认得出、监视器置"登录已死"并回调、发起来不复检也不重试。
+    """
+
+    class _Page(object):
+        def on(self, *a, **kw):
+            pass
+
+    def test_kick_body_is_decoded_as_kicked(self):
+        r = douyin_im.decode_send_resp(b'{"decision": "KICK"}')
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["kicked"])
+        self.assertEqual(r["decision"], "KICK")
+
+    def test_ordinary_envelope_is_not_a_kick(self):
+        for body in (b"", b'{"decision": "OK"}'):
+            r = douyin_im.decode_send_resp(body)
+            self.assertFalse(r["kicked"], f"body={body!r} 被误判成被踢")
+
+    def test_monitor_marks_login_dead_and_emits_login_lost(self):
+        class _Mon(douyin_im.ImMonitor):
+            # `_emit_login_lost` 在 DouyinIM 上（生产里 DouyinIM 继承 ImMonitor）。
+            # 这里只借它的实现，不必为了一个回调把整台浏览器对象造出来。
+            _emit_login_lost = douyin_im.DouyinIM._emit_login_lost
+
+        mon = _Mon(self._Page())
+        mon._login_dead = False
+        mon._login_dead_reason = ""
+        seen = []
+        mon._login_lost = [lambda info: seen.append(info)]
+        with self.assertLogs("douyin_im", level="ERROR") as cm:
+            mon._handle_send(b'{"decision": "KICK"}')
+        self.assertTrue(mon._login_dead)
+        self.assertEqual(mon._login_dead_reason, "KICK:KICK")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("KICK", seen[0]["reason"])
+        self.assertTrue(any("踢下线" in line for line in cm.output))
+
+    def test_kicked_send_is_reported_as_session_kicked(self):
+        """复用 LoginRecheckTests 的替身：回执被换成"被踢"这一种。"""
+        im = LoginRecheckTests._IM(receipt_ok=False, login_state="LOGGED_IN")
+        im._wait_receipt = lambda *a, **kw: {
+            "ok": False, "http": None, "dom": None, "verdict": None,
+            "dom_conv_off": False, "receipts": [],
+            "kicked": True, "kick_decision": "KICK",
+        }
+        out = im.type_and_send({"conv_id": f"0:1:{ME}:{PEER_A}", "uid": PEER_A,
+                                "display": "甲同学"}, "你好", dry_run="off")
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["kicked"])
+        self.assertTrue(out["login_lost"])
+        self.assertEqual(out["reason"], "session_kicked")
+        self.assertEqual(out["kick_decision"], "KICK")
+        self.assertTrue(im._login_dead)
+        self.assertEqual(im.rechecks, 0, "会话都被踢了，再去复检登录态没有意义")
+        self.assertEqual(im.send_clicks, 1, "被踢之后不该再点第二次发送")
+
 class LoginRecheckTests(unittest.TestCase):
     """「发送拿不到回执」与「登录已失效」必须分开报。
 
