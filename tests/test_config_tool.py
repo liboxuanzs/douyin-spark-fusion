@@ -450,6 +450,61 @@ class AutoPruneKeyTests(unittest.TestCase):
                 self.assertEqual(env["MAINTENANCE_AUTO_PRUNE_HOURS"], expected)
 
 
+class BrowserStateDirKeyTests(unittest.TestCase):
+    """`BROWSER_STATE_DIR`（2026-10-21 新增，core/browser_state.py 直读）的登记一致性。
+
+    和 `MAINTENANCE_AUTO_PRUNE_HOURS` 同一类东西：界面里**没有输入框**，但它必须
+    出现在 `BASE_ENV_KEYS` 与 `to_env_map()` 里，否则 configTool 保存一次就把它从
+    用户的 .env 里删掉了。这里的静默失效格外隐蔽 —— 程序回落到同一个默认值，
+    用户只会觉得"我明明设过"。
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_default_matches_runtime(self):
+        """configTool 的默认值必须等于 core/browser_state.py 的 DEFAULT_DIR。"""
+        from core import browser_state
+
+        self.assertEqual(models.DEFAULT_BROWSER_STATE_DIR, browser_state.DEFAULT_DIR)
+
+    def test_example_file_registers_the_key(self):
+        """.env.example 抄出来的值也要等于默认值（否则"抄示例"就漂了）。"""
+        for line in (self.ROOT / ".env.example").read_text(
+                encoding="utf-8").splitlines():
+            if line.startswith("BROWSER_STATE_DIR="):
+                self.assertEqual(line.split("=", 1)[1].strip(), "logs/browser-state")
+                break
+        else:
+            self.fail(".env.example 里没有登记 BROWSER_STATE_DIR")
+
+    def test_docs_mention_it(self):
+        """部署文档要写清它在哪、删了会怎样 —— 它等价于凭据，别进备份。"""
+        text = (self.ROOT / "docs/deploy.md").read_text(encoding="utf-8")
+        self.assertIn("BROWSER_STATE_DIR", text)
+        self.assertIn("浏览器状态快照", text)
+
+    def test_key_is_registered_and_emitted(self):
+        self.assertIn("BROWSER_STATE_DIR", models.BASE_ENV_KEYS)
+        env = models.Config.from_env_map({}).to_env_map()
+        self.assertEqual(env["BROWSER_STATE_DIR"], "logs/browser-state",
+                         "新建配置必须写默认值 logs/browser-state")
+
+    def test_manual_value_survives_a_save(self):
+        """用户手改的目录不能被一次保存抹回默认值。"""
+        for raw in ("/srv/browser-state", "data/state"):
+            with self.subTest(raw=raw):
+                env = models.Config.from_env_map(
+                    {"BROWSER_STATE_DIR": raw}).to_env_map()
+                self.assertEqual(env["BROWSER_STATE_DIR"], raw)
+
+    def test_blank_falls_back(self):
+        """空串/纯空白回落默认值：空目录等于把快照写到仓库根。"""
+        for raw in ("", "   "):
+            with self.subTest(raw=repr(raw)):
+                env = models.Config.from_env_map(
+                    {"BROWSER_STATE_DIR": raw}).to_env_map()
+                self.assertEqual(env["BROWSER_STATE_DIR"], "logs/browser-state")
+
 class ScheduleTimesSurviveSaveTests(unittest.TestCase):
     """面板/手改的发送时间与抖动窗口，GUI 保存时不能被静默改写。
 

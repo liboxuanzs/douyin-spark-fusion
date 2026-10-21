@@ -111,6 +111,7 @@ cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh '我的新口
 | `SCHEDULE_STATE_FILE` | `logs/schedule_state.json` | 发送时间表：哪个账号哪天发过了。删掉它等于「今天全都没发过」，当天还会补发 |
 | `WEBUI_DEFAULT_DRY_RUN` | `off` | 面板"立即运行"默认选中的档位（`off`/`select`/`full`）；只是默认值，点按钮前仍能改 |
 | `LOGIN_PROFILE_DIR` | `logs/login-profile` | 面板扫码登录用的浏览器资料目录；**等价于凭据**，别进备份/别共享 |
+| `BROWSER_STATE_DIR` | `logs/browser-state` | 每个账号的浏览器状态快照（`<抖音号>.json`，发送时挂上去，让每轮都还是同一台设备）；**等价于凭据**。删掉不炸，只是下一个账号首次运行会以新设备身份重新登录一次 |
 | `QR_LOGIN_TTL_SECONDS` | `300` | 面板扫码登录的二维码有效期（秒） |
 | `FRIEND_SCAN_TIMEOUT_SECONDS` | `300` | 面板"读取好友列表"单次扫描的超时（秒）；超时标成读取失败，已读到的部分仍可用 |
 
@@ -260,6 +261,18 @@ cd /opt/douyin-spark-fusion
 也**不会**推进计时器，但至少隔 1 小时才重试一次，免得每 5 分钟刷一行错误。
 两个边界：**空跑（dry-run）不碰磁盘**（人正盯着屏幕时不该有东西被删）；面板的「立即运行」
 走的是进程内调用、也**不做**自动清理 —— 只用面板、不开定时器的话，要清就在上面那个区块里点。
+
+### 浏览器状态快照
+
+`logs/browser-state/<抖音号>.json` 是 Playwright 的 `storage_state`：设备号、localStorage 和那一批
+服务端签发的 cookie。发送时用它开上下文、跑完再存回来，让每轮发送都是**同一台设备**。
+没有它的时候每轮都是新设备，抖音会把会话当异常，实测登录态只活 9 天左右（见 `FUSION-DESIGN.md` 6.2）。
+
+- 文件 `0600`、目录 `0700`，**等价于凭据**，不进备份、不进 git。
+- 删掉/清掉不会报错：下一次运行按全新设备走一遍，不影响当天发送。
+- 它和 `.env` 里的 `COOKIES_<抖音号>` 是同一份登录会话：**重新扫码后 `.env` 赢**（新票），
+  快照里的设备号照旧沿用（换票不换设备）；平时服务端新签发的 cookie 由 `core/cookie_sync.py`
+  自动回写 `.env`，值没变就一个字节都不写。
 
 ---
 

@@ -185,6 +185,10 @@ class _TasksCase(unittest.TestCase):
             "TASK_SCHEDULE_TIMES": "00:00",
             "SCHEDULE_JITTER_MINUTES": "0",
             "SCHEDULE_STATE_FILE": self.schedule_file,
+            # 浏览器状态快照（P1）落到临时目录：既别读仓库里可能存在的真实快照，
+            # 也别把用例造的状态写回仓库。
+            "BROWSER_STATE_DIR": os.path.join(self._dir.name, "browser-state"),
+            "ENV_FILE": os.path.join(self._dir.name, ".env"),
         }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()

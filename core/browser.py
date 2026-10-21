@@ -43,7 +43,9 @@ BASE_CHROME_ARGS = [
     "--disable-background-networking",
     "--metrics-recording-only",
     "--ignore-gpu-blocklist",
-    "--disable-gpu",
+    # 不要 --disable-gpu：那会让指纹档案自报的 GPU 与 WebGL 全部落空（页面里
+    # WebGL 直接报 "no context"），是这台设备最容易被分辨的硬特征之一。
+    # 无 GPU 的机器上 Chrome 会自己退到软件渲染，--enable-unsafe-swiftshader 兜住它。
     "--enable-unsafe-swiftshader",
 ]
 

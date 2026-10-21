@@ -10,7 +10,9 @@
 丢掉的只是不可用条目，其它字段一律不动；**全部**不可用时宁可当场报错，也不要
 把一批注定被拒的 cookie 塞给 Playwright（那会伪装成"登录态失效"）。
 """
+import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -98,6 +100,17 @@ class CookieInjectionTests(unittest.TestCase):
         patcher = mock.patch.object(tasks_mod, "DouyinIM", _StubIM)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 浏览器状态快照（P1）用临时目录：假浏览器没有 storage_state，本来就不会
+        # 读写，但不隔离的话，某台机器上真跑过一次任务就会留下 logs/browser-state，
+        # 用例从此取决于那台机器的磁盘内容。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {
+            "BROWSER_STATE_DIR": os.path.join(tmp.name, "browser-state"),
+            "ENV_FILE": os.path.join(tmp.name, ".env"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
 
     def _run(self, cookies):
         return tasks_mod.do_user_task(

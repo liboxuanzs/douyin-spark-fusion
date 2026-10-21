@@ -23,6 +23,8 @@ from core.douyin_im import (
     DouyinIM, STATUS_READY, STATUS_EXPIRED, STATUS_LOGGED_OUT, STATUS_LOGIN_LOST,
     target_name, target_refs,
 )
+from core import browser_state
+from core import cookie_sync
 from core import cookie_utils
 from core import limit_guard
 from core import quiet_window
@@ -148,6 +150,21 @@ def _entry(friend, r, dry_run):
     }
 
 
+def _new_context(browser, state):
+    """开一个任务上下文；有状态快照就带上去。
+
+    真实浏览器（Playwright / cloakbrowser）的 new_context() 收 storage_state；
+    测试里的假浏览器只收 self，多给一个关键字就是 TypeError —— 那就退回到不带
+    快照的调用。这一层是「锦上添花」，不能让它把整轮发送变成失败。
+    """
+    if state:
+        try:
+            return browser.new_context(storage_state=state)
+        except TypeError:
+            logger.debug("⚠️ 这个浏览器实现不支持 new_context(storage_state=...)，本轮不带快照")
+    return browser.new_context()
+
+
 def do_user_task(browser, username, cookies, targets, unique_id=None,
                  dry_run=DRY_RUN_OFF, guard=None, run_id=None, message=""):
     """一个账号的完整流程：门禁 → 滚动找人 → 发送 → 回执确认。
@@ -180,7 +197,10 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
         "limit": None, "error": None, "note": None, "dry_run": dry_run,
     }
 
-    context = browser.new_context()  # 每个任务使用独立的上下文
+    # 恢复这台「设备」上一次的浏览器状态（cookie + localStorage，见 core/browser_state.py）。
+    # 没有快照就是全新上下文 —— 换票不换设备，设备身份才能连续。
+    state = browser_state.read(unique_id)
+    context = _new_context(browser, state)  # 每个任务使用独立的上下文
     context.set_default_navigation_timeout(
         config["browserActionTimeout"]
     )  # 导航超时（毫秒，config 已换算好）
@@ -203,7 +223,19 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
         )
     if not safe_cookies:
         raise RuntimeError("cookie 全部不可用（空 name/domain），无法注入登录态")
-    context.add_cookies(safe_cookies)
+    if state is not None and browser_state.same_session(state, safe_cookies):
+        # 快照里的登录会话与 .env 是同一份：以快照为准，别拿 .env 的旧值把服务端
+        # 刚签发的 ttwid / x-web-secsdk-uid / web_sign_token 又盖回去（见 P2）。
+        logger.info(
+            f"账号 {username} 沿用上次的浏览器状态（与 .env 是同一份登录会话，不再注入旧 cookie）"
+        )
+    else:
+        context.add_cookies(safe_cookies)
+        if state is not None:
+            logger.info(
+                f"账号 {username} 的 .env 登录会话与浏览器状态快照不同"
+                f"（重新扫码或换过 Cookie），本轮以 .env 为准"
+            )
 
     im = None
     try:
@@ -536,6 +568,25 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 im.detach()
             except Exception:
                 pass
+        # 收尾：存下这一轮的浏览器状态（下一轮接着用），再把新签发的 cookie 回写 .env。
+        # 两件事都不许改变本轮结果 —— 它们只是让这台设备更像一台真的设备。
+        snapshot = None
+        try:
+            snapshot = context.storage_state()
+        except Exception as exc:                                  # noqa: BLE001
+            logger.debug(f"账号 {username} 取浏览器状态失败：{type(exc).__name__}: {exc}")
+        if isinstance(snapshot, dict):
+            try:
+                browser_state.write(unique_id, snapshot)
+                cookie_sync.sync(
+                    unique_id,
+                    snapshot.get("cookies") or [],
+                    allow=not (kicked or login_lost),
+                )
+            except Exception as exc:                              # noqa: BLE001
+                # 这两个函数自己已经吃掉了 OSError / 坏 JSON；这里兜的是它们没想
+                # 到的形状。收尾永远不许改变本轮结果 —— 上面 out 已经写好了。
+                logger.debug(f"账号 {username} 保存浏览器状态失败：{type(exc).__name__}: {exc}")
         context.close()  # 任务完成后关闭上下文
 
     out["sent_ok"] = sent_ok

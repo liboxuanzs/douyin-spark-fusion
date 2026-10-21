@@ -34,6 +34,11 @@ LOG_LEVEL_OPTIONS = ["Debug", "Info", "Warning", "Error"]
 # 默认值与取值范围
 # ---------------------------------------------------------------------------
 DEFAULT_PROXY_ADDRESS = ""
+# 每账号浏览器状态快照目录（core/browser_state.py 直读，界面没有输入框）。
+# 和 PROXY_ADDRESS 一样是字符串键，但**必须登记**：漏了它，用户在 GUI 里
+# 保存一次就把 .env 里这一行删掉 —— 程序回落到同一个默认值，所以不报错，
+# 只是"我明明设过"变成静默失效。
+DEFAULT_BROWSER_STATE_DIR = "logs/browser-state"
 DEFAULT_RUN_TIME = "09:00:00"
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_MESSAGE_TEMPLATE = "[盖瑞]今日火花[加一]\n—— [右边] 每日一言 [左边] ——\n[API]"
@@ -95,6 +100,9 @@ RETRY_TIMES_RANGE = (0, 5)   # 0 = 不重试（与面板 webui/settings.py 的 m
 # 写进 .env 的键顺序：先基础变量，再按账户顺序追加 COOKIES_*
 BASE_ENV_KEYS = [
     "PROXY_ADDRESS",
+    # 浏览器状态快照目录：core/browser_state.py 直读，界面没有输入框；
+    # 读回来再写回去，GUI 保存不会把它从 .env 里抹掉。
+    "BROWSER_STATE_DIR",
     # CRON_* 只有 Docker 定时器（docker/entrypoint-cron.sh）读，
     # 但它就是"到点了叫醒程序"的那个闹钟，删了 Docker 部署就不发消息了 → 保留。
     # ⚠️ 光有 CRON_* 不够：程序内的发送闸门只认 TASK_SCHEDULE_TIMES（见下），
@@ -321,6 +329,9 @@ class Account:
 @dataclass
 class Config:
     proxy_address: str = DEFAULT_PROXY_ADDRESS
+    # 浏览器状态快照目录（见 DEFAULT_BROWSER_STATE_DIR）。**空串回落默认值**：
+    # 不能像 PROXY_ADDRESS 那样"空就写空"，否则等于把快照写到仓库根。
+    browser_state_dir: str = DEFAULT_BROWSER_STATE_DIR
     run_time: str = DEFAULT_RUN_TIME
     tz: str = DEFAULT_TZ
     # 内存里保存真实换行，写盘时才转成字面 \n
@@ -376,6 +387,10 @@ class Config:
 
         env = {
             "PROXY_ADDRESS": self.proxy_address or "",
+            # 浏览器状态快照目录：界面没有输入框，值从 .env 读回来再原样写回去
+            # （空串回落默认值，理由见 DEFAULT_BROWSER_STATE_DIR 的注释）。
+            "BROWSER_STATE_DIR": (self.browser_state_dir or "").strip()
+            or DEFAULT_BROWSER_STATE_DIR,
             # ① Docker 闹钟：docker/entrypoint-cron.sh 生成 cron 表达式时读这三个。
             #    ⚠️ systemd 部署下**完全无效**（没有任何 systemd 单元读它们）。
             "CRON_HOUR": hour,
@@ -541,6 +556,10 @@ class Config:
 
         return cls(
             proxy_address=text("PROXY_ADDRESS"),
+            # 空/纯空白回落默认值（与 to_env_map 同口径，否则一个空的
+            # BROWSER_STATE_DIR= 会把快照写到仓库根）。
+            browser_state_dir=text("BROWSER_STATE_DIR", DEFAULT_BROWSER_STATE_DIR).strip()
+            or DEFAULT_BROWSER_STATE_DIR,
             run_time=run_time,
             tz=text("TZ", DEFAULT_TZ) or DEFAULT_TZ,
             # 磁盘上是字面 \n，换回真实换行方便在文本框里编辑。

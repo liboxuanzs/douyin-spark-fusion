@@ -140,6 +140,39 @@ A 的做法（`core/automation.py:27-40`）是 12 个中文关键词 + `bounding
 
 判断口径：**KICK 属于"账号级、今天别再试"，不属于"这一条失败了"**。前者要停手并等人扫码，
 后者才轮到重试预算（见上一节的熔断口径，两者都落在"error/skipped ≠ 已发送"这一条上）。
+### 6.2 登录态只活了九天：每账号的浏览器状态快照（2026-10-21）
+
+10-20 那次 KICK 修完之后接着查"两个账号同一天掉登录"。两份会话的存活期是 9.3 天和 9.9 天，
+而同一批账号在用户自己的浏览器里挂了 15 天以上没掉。四条实测差异：**WebGL 全无**（Chrome 启动参数里有
+`--disable-gpu`，`WEBGL_debug_renderer_info` 两个字段都是 null）、**`x-web-secsdk-uid` 每轮都换**、
+`localStorage` / CacheStorage 每轮清零、`.env` 里的 cookie 从扫码那一刻起**再没被回写过**。
+合起来是一句话：每轮发送都是一个"全新的陌生设备"在复用一张九天前的旧票。
+
+抖音的会话是设备绑定的：新上下文会重新生成 secsdk 设备号并下发新 cookie，服务端据此认为换了设备，
+旧会话被降级甚至判为异常。三处一起改，缺一处都还会继续掉：
+
+1. **P1 状态快照（主因）**：每个账号一份 `logs/browser-state/<抖音号>.json`（Playwright `storage_state`），
+   下一轮 `new_context(storage_state=…)`，跑完再 `storage_state()` 存回来。
+   **不用 `launch_persistent_context(LOGIN_PROFILE_DIR/<uid>)`**：那份资料目录同时被面板扫码和"读取好友列表"
+   占用（SingletonLock + `kill_profile_processes`），发送路径去抢锁会失败；快照是无锁的单文件。
+2. **P2 cookie 回写**：服务端新签发的 cookie 写回 `.env` 的 `COOKIES_<抖音号>`，复用 `webui/envfile.save_cookie()`
+   （自带备份、0600、dotenv 转义），`core/` 侧**惰性 import**，拿不到写入器就安静跳过。
+   不回写的话 `.env` 里的会话永远停在扫码那一刻，面板"是否登录"、发送前复检都在拿旧值判断。
+3. **P3 指纹**：`BASE_CHROME_ARGS` 去掉 `--disable-gpu`，让浏览器自报 GPU/WebGL，
+   没有 GPU 的机器由 `--enable-unsafe-swiftshader` 兜底（SwiftShader 软渲染，WebGL 照样可用）。
+
+三条判定，都是"宁可少做不可做错"：
+
+- **同一份会话只信快照**：快照与 `.env` 的 `login_cookie_signature` 相同 → 不再 `add_cookies` 注入 `.env` 的旧值
+  （快照更全，含服务端后来签发的）；不同（重新扫码 / 手动换过 Cookie）→ `.env` 赢、照旧注入，但快照里的
+  `localStorage` / 设备号仍然挂上去 —— 换票不该换设备。
+- **状态层只降级不报错**：读不出按全新上下文、写不进只记 warning，绝不改变本轮结果；
+  `write()` / `sync()` 外面还包一层 try —— 收尾阶段的任何意外都不许把一次成功发送改判成失败。
+- **被踢 / 掉登录时只存设备状态、不回写 `.env`**：别把已经死掉的会话盖到可能还好的票上。
+
+验收口径：真机上 `logs/browser-state/<uid>.json` 生成且只有抖音域的 cookie；两轮之间
+`x-web-secsdk-uid` 不变；跑完 `.env` 的 `COOKIES_<uid>` 有刷新（设备号那几个值会变）。
+这两份状态文件**等价于凭据**（`0600` / 目录 `0700`），别进备份、别提交。
 ## 7. 仪表盘（借鉴 B 的形态）
 
 B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入强耦合。融合版**重写一层薄 webui**，
@@ -184,6 +217,8 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 - systemd 两个 unit：`douyin-spark-fusion-web.service`（webui 常驻，`0.0.0.0:8xxx`）+
   `douyin-spark-fusion-task.timer`（每日定时跑一轮，替代被删掉的 `schedule.yml`）。
 - 浏览器复用 C 的方式：本地 `chrome/` 目录或 `CLOAKBROWSER_BINARY_PATH`。
+- 每账号的浏览器状态快照落在 `BROWSER_STATE_DIR`（默认 `logs/browser-state`，见 6.2），**等价于凭据**；
+  删掉它不影响发送，只是下一个账号首次运行会以全新设备身份重新登录一次。
 - 与既有 `douyin-spark.service`（A 的部署，8000 端口）**并存**，端口不冲突。
 
 ## 9. 验收记录（2026-10-01，实测）
