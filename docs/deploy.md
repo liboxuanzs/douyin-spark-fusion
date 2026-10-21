@@ -273,6 +273,22 @@ cd /opt/douyin-spark-fusion
 - 它和 `.env` 里的 `COOKIES_<抖音号>` 是同一份登录会话：**重新扫码后 `.env` 赢**（新票），
   快照里的设备号照旧沿用（换票不换设备）；平时服务端新签发的 cookie 由 `core/cookie_sync.py`
   自动回写 `.env`，值没变就一个字节都不写。
+- **扫码登录成功时也会写这份快照**（2026-10-22 起）：以"登录这一台"为准覆盖，之后发送沿用同一设备
+  （`core/qr_login._save_device_snapshot`）。在此之前登录的账号没有这份快照，首轮发送仍会新开一台，
+  下次重新扫码才会统一；也可以在没人用面板时一次性回填（先确认没有"扫码登录"/"读取好友列表"在跑，
+  这两个功能会占着同一个资料目录）：
+
+  ```python
+  # 在 /opt/douyin-spark-fusion 下用项目 venv 跑
+  from core import browser, browser_state
+  ctx = browser.launch_persistent_context("logs/login-profile/<抖音号>", headless=True)
+  state = ctx.storage_state(); ctx.close()
+  browser_state.write("<抖音号>", state)   # → logs/browser-state/<抖音号>.json（0600）
+  ```
+
+  回填只写快照、不动 `.env`：同一份会话（`same_session` 为真）下一轮直接沿用；不同则仍注入 `.env` 的票、
+  设备号取快照里的。2026-10-22 线上按这个办法回填了两个账号，并用真实浏览器各跑一遍门禁：都是
+  `READY`，`web_runtime_security_uid` 与登录资料目录一致。
 
 ---
 

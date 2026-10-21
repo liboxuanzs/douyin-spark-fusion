@@ -24,6 +24,7 @@ import time
 
 from utils.config import get_config
 from utils.logger import setup_logger
+from core import browser_state
 from core import cookie_utils
 from core import douyin_im
 
@@ -1362,6 +1363,7 @@ class QrLoginSession(threading.Thread):
             target = str(self.persist.get("adopt_profile") or "")
             if target and os.path.abspath(target) != os.path.abspath(self.profile_dir):
                 self._adopt = target
+        self._save_device_snapshot(state, account)
         self._set(STATE_DONE, self._done_message(result))
         logger.info(
             f"[QR] 登录成功：账号={account.get('nickname') or '-'}"
@@ -1369,6 +1371,30 @@ class QrLoginSession(threading.Thread):
             f" cookie={len(cookies)} 条"
             f" 落盘={'ok' if isinstance(self.persist, dict) and self.persist.get('ok') else '失败'}"
             f" profile={self.profile_dir}")
+
+    def _save_device_snapshot(self, state, account) -> None:
+        """把这次登录用的设备身份存成发送快照（P4，见 `core/browser_state.py`）。
+
+        为什么：扫码登录开的是**持久化资料目录**，每天的发送开的是
+        `browser.new_context()` —— 只保存 cookie 的话，"登录这台"和"干活这台"
+        永远是两台设备。实测两者的 `web_runtime_security_uid` / `__msuuid__`
+        / `a11y_device_id` 完全不同（2026-10-22）。这里把整份 storage_state
+        落盘，`core.tasks.do_user_task` 下一轮 `new_context(storage_state=...)`
+        就会沿用登录这一台。
+
+        失败只记 warning：快照是锦上添花，不能因为它让"登录成功"变成失败。
+        """
+        uid = str((account or {}).get("unique_id") or "").strip()
+        if not uid:
+            logger.info("[QR] 这次没读到抖音号，先不写发送快照（下次登录成功再写）")
+            return
+        try:
+            path = browser_state.write(uid, state)
+        except Exception as exc:                             # noqa: BLE001
+            logger.warning(f"[QR] 保存登录设备快照失败：{type(exc).__name__}: {exc}")
+            return
+        if path is not None:
+            logger.info(f"[QR] 已把这次登录的设备状态存成发送快照：{path}")
 
     def adopt_profile(self, target_dir: str) -> None:
         """把这次登录用的资料目录改挂到账号名下（浏览器关闭后执行）。

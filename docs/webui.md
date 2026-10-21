@@ -187,7 +187,9 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
    不会被认（`_detect_code_page`），也不会去点登录页上的「获取验证码」；
 
 5. 通过之后：读到昵称与抖音号 → 把这份 cookie（转义过的单行 JSON）写进 `.env` 的
-   `COOKIES_<抖音号>` → 缺账号就补进 `TASKS`（顺手分配一个 `fingerprint`）→ 重载配置；
+   `COOKIES_<抖音号>` → **把"登录这一台设备"的整份浏览器状态存成 `logs/browser-state/<抖音号>.json`**
+   （`core/qr_login._save_device_snapshot`，之后的发送沿用同一台设备，见 `FUSION-DESIGN.md` 6.2 P4）→
+   缺账号就补进 `TASKS`（顺手分配一个 `fingerprint`）→ 重载配置；
 6. 面板整页刷新一次，账号表里那份 cookie 变成"已配置"。
 
 写盘纪律（`webui/envfile.py`，与 `configTool/env_store.py` 同一口径）：

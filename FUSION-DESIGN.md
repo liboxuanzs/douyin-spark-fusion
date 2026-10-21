@@ -160,6 +160,16 @@ A 的做法（`core/automation.py:27-40`）是 12 个中文关键词 + `bounding
    不回写的话 `.env` 里的会话永远停在扫码那一刻，面板"是否登录"、发送前复检都在拿旧值判断。
 3. **P3 指纹**：`BASE_CHROME_ARGS` 去掉 `--disable-gpu`，让浏览器自报 GPU/WebGL，
    没有 GPU 的机器由 `--enable-unsafe-swiftshader` 兜底（SwiftShader 软渲染，WebGL 照样可用）。
+4. **P4 登录设备统一（2026-10-22）**：扫码成功后把持久化上下文的整份 `storage_state` 也写进
+   `logs/browser-state/<抖音号>.json`（`core/qr_login._save_device_snapshot`）。此前**登录是一台设备、
+   发送是另一台**：实测登录资料目录的 `web_runtime_security_uid` 是 `283d8355…`，发送快照是
+   `21d1e1d3…`，`__msuuid__` / `a11y_device_id` 也各不相同 —— "同一个账号天天换机器"本身就是信号。
+   登录成功时以登录这台为准覆盖快照，之后每轮发送沿用；写快照失败只记 warning，不影响登录结果。
+   P4 上线前就已经登录的账号，要等**下一次重新扫码**才会统一（之前没有快照，首轮发送仍会新开一台）；
+   也可以在停机窗口里做一次性回填（2026-10-22 对线上两个账号做过）：用各自的登录资料目录开一次持久化上下文、
+   取 `storage_state()` 写进 `logs/browser-state/<抖音号>.json`（`core/browser_state.write`，目录 0700 / 文件 0600）。
+   回填后**不碰 `.env`**：两者是同一份会话就只信快照，不同（例如 `.env` 是手动粘的浏览器 cookie）就仍以 `.env` 的票为准、
+   只沿用快照里的设备号 —— 换票不换设备。
 
 三条判定，都是"宁可少做不可做错"：
 

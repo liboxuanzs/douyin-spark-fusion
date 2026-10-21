@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -20,12 +21,13 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core import qr_login  # noqa: E402
+from core import browser_state, qr_login  # noqa: E402
 
 
 class SessionStateTests(unittest.TestCase):
@@ -1121,6 +1123,124 @@ class GotoTimeoutBudgetTests(unittest.TestCase):
         """源码级守卫：光有引用没有定义也能过前几条（别处可能碰巧有同名变量）。"""
         src = (pathlib.Path(ROOT) / "core" / "qr_login.py").read_text(encoding="utf-8")
         self.assertRegex(src, r"(?m)^MIN_GOTO_TIMEOUT_MS\s*=\s*\d")
+
+
+class _SnapshotCtx:
+    """假上下文：cookie 里混一条别的域，origins 里带设备身份。"""
+
+    def storage_state(self):
+        return {
+            "cookies": [
+                {"name": "sessionid", "value": "s3", "domain": ".douyin.com", "path": "/"},
+                {"name": "x-web-secsdk-uid", "value": "283d8355",
+                 "domain": ".douyin.com", "path": "/"},
+                {"name": "tracker", "value": "no", "domain": ".example.com", "path": "/"},
+            ],
+            "origins": [{
+                "origin": "https://www.douyin.com",
+                "localStorage": [
+                    {"name": "web_runtime_security_uid",
+                     "value": "283d8355-d3ed-418c-9d8c-30068c151a9f"},
+                    {"name": "__msuuid__", "value": "89ab5ee2-0982-402e-ac3b-34a7937ee387"},
+                ],
+            }],
+        }
+
+
+class _AccountPage:
+    """假页面：`window.__dySelfHook` 里已经有账号资料。"""
+
+    def __init__(self, unique_id="10050yi", nickname="测试号"):
+        self.unique_id = unique_id
+        self.nickname = nickname
+
+    def evaluate(self, script, *args):
+        if "__dySelfHook" in str(script):
+            user = {"nickname": self.nickname}
+            if self.unique_id:
+                user["unique_id"] = self.unique_id
+            return {"profile": {"status_code": 0, "user": user}}
+        return "Mozilla/5.0 (test)"
+
+    def wait_for_timeout(self, ms):
+        return None
+
+
+class LoginDeviceSnapshotTests(unittest.TestCase):
+    """P4：登录成功后顺带保存"登录这一台设备"的浏览器快照。
+
+    真机实测（2026-10-22）：扫码登录的资料目录与每天发送的上下文是两套设备
+    身份 —— `web_runtime_security_uid` 分别是 283d8355… 与 21d1e1d3…。
+    登录时把整份 storage_state 存成发送快照，之后的任务才会沿用登录这一台。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        self.state_dir = os.path.join(self.root, "browser-state")
+        old = os.environ.get("BROWSER_STATE_DIR")
+        os.environ["BROWSER_STATE_DIR"] = self.state_dir
+        self.addCleanup(self._restore_env, old)
+
+    @staticmethod
+    def _restore_env(old):
+        if old is None:
+            os.environ.pop("BROWSER_STATE_DIR", None)
+        else:
+            os.environ["BROWSER_STATE_DIR"] = old
+
+    def make(self):
+        profile = os.path.join(self.root, "default")
+        os.makedirs(os.path.join(profile, "Default"), exist_ok=True)
+        with open(os.path.join(profile, "Default", "Cookies"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+        return qr_login.QrLoginSession(profile)
+
+    def test_登录成功要留下发送快照(self):
+        session = self.make()
+        session._finish(_SnapshotCtx(), _AccountPage(), None)
+        path = os.path.join(self.state_dir, "10050yi.json")
+        self.assertTrue(os.path.isfile(path), "登录成功要留下发送快照")
+        with open(path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        names = [cookie["name"] for cookie in saved["cookies"]]
+        self.assertIn("sessionid", names)
+        self.assertIn("x-web-secsdk-uid", names, "服务端签发的设备 cookie 要带过去")
+        self.assertNotIn("tracker", names, "非抖音域的 cookie 不落盘")
+        self.assertEqual(saved["origins"][0]["origin"], "https://www.douyin.com")
+        self.assertTrue(
+            any(item["name"] == "web_runtime_security_uid"
+                for item in saved["origins"][0]["localStorage"]),
+            "localStorage 里的设备身份才是这一层的重点")
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertTrue(browser_state.same_session(saved, session.result["cookies"]),
+                        "快照与这次登录的 cookie 必须被认成同一份会话")
+
+    def test_没有抖音号就不写快照(self):
+        session = self.make()
+        session._finish(_SnapshotCtx(), _AccountPage(unique_id=""), None)
+        self.assertEqual(session.snapshot()["state"], qr_login.STATE_DONE)
+        self.assertEqual(os.listdir(self.state_dir) if os.path.isdir(self.state_dir) else [], [],
+                         "不知道存给谁，就别留下一个会串号的快照")
+
+    def test_抖音号不合法就不碰磁盘(self):
+        session = self.make()
+        session._finish(_SnapshotCtx(), _AccountPage(unique_id="../etc/passwd"), None)
+        self.assertEqual(session.snapshot()["state"], qr_login.STATE_DONE)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "etc", "passwd")))
+
+    def test_写快照失败不影响登录结果(self):
+        session = self.make()
+        with mock.patch.object(qr_login.browser_state, "write",
+                               side_effect=RuntimeError("boom")):
+            with self.assertLogs("qr_login", level="WARNING") as logs:
+                session._finish(_SnapshotCtx(), _AccountPage(), None)
+        self.assertEqual(session.snapshot()["state"], qr_login.STATE_DONE)
+        self.assertTrue(session.result["logged_in"])
+        self.assertTrue(any("保存登录设备快照失败" in line for line in logs.output),
+                        logs.output)
 
 
 if __name__ == "__main__":
