@@ -4253,6 +4253,18 @@ class SkinWebUITestCase(unittest.TestCase):
         self.assertIn('localStorage.getItem(storageKey) === "classic" ? "classic" : "aurora"', script)
         self.assertIn('return "aurora";', script)
 
+    def test_浅色主题首屏不闪深色(self) -> None:
+        """`<html data-theme="dark">` 是静态默认，恢复存过的浅色要等 app.js 的 defer ——
+        浅色用户每次打开都先闪一帧深色。两张页面都要在 <head> 里同步改回来。"""
+        for name in self.PAGES:
+            head = (REPO_ROOT / "webui" / "templates" / name).read_text(encoding="utf-8").split("</head>", 1)[0]
+            self.assertIn('localStorage.getItem("sparkflow-theme") === "light"', head,
+                          f"{name} 少了同步恢复主题的脚本")
+            self.assertIn('document.documentElement.dataset.theme = "light"', head)
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('const storageKey = "sparkflow-theme";', script,
+                      "app.js 的主题键必须与头脚本一致")
+
     def test_皮肤开关桌面与手机各一个(self) -> None:
         page = (REPO_ROOT / "webui" / "templates" / "base.html").read_text(encoding="utf-8")
         self.assertEqual(page.count("data-skin-toggle"), 2, "手机顶栏与页头各要一个")
@@ -4263,6 +4275,24 @@ class SkinWebUITestCase(unittest.TestCase):
         script = self.SCRIPT.read_text(encoding="utf-8")
         for token in ("sparkflow-skin", "[data-skin-toggle]", "aurora-scene", "swapSheet"):
             self.assertIn(token, script)
+
+    def test_连续切换皮肤不会留下两张样式表(self) -> None:
+        """双击皮肤按钮时，第一张候选表还没 load 完就被新的一次切换取代。
+
+        没有 pending 守卫的话，它晚一步落地会抢走 id=app-stylesheet：页面最终
+        生效的样式表与 dataset / localStorage 记下的选择不一致，且每点一次都被
+        「href 相同就直接 return」，要点两次才恢复（2026-10-22 全量检查发现的竞态）。
+        """
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("let pending = null;", script)
+        block = script.split("const swapSheet = (href) => {", 1)[1].split("\n  };", 1)[0]
+        self.assertIn("if (pending) {", block, "新候选落地前必须先作废上一张")
+        self.assertIn("pending.remove();", block)
+        self.assertIn("if (pending !== next) return;", block, "被取代的那张 load 完不许抢 id")
+        # 加载失败也必须回滚：dataset/localStorage 在 applySkin 里已写成新皮肤，
+        # 只 remove 那张表的话开关记着新皮肤、页面还在用旧表。
+        self.assertIn('root.dataset.skin = previous;', block)
+        self.assertIn("localStorage.setItem(storageKey, previous);", block)
 
     # ---------------------------------------------------------- 材质与特效
     def test_材质令牌两套主题各一份(self) -> None:
@@ -4319,6 +4349,18 @@ class SkinWebUITestCase(unittest.TestCase):
         script = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn('submit.className = real ? "button button-send" : "button button-soft";', script)
         self.assertNotIn("button button-danger", script.split("const real = level", 1)[1].split("};", 1)[0])
+
+    def test_经典皮肤也有真发按钮和皮肤图标(self) -> None:
+        """模板与 app.js 在两套皮肤下都写 `button button-send`，两枚皮肤图标也一起渲染；
+        经典皮肤缺这两组规则时，按钮回落成灰底、palette 与 sparkles 一起亮。"""
+        css = self.CLASSIC.read_text(encoding="utf-8")
+        block = css.split(".button-send {", 1)[1].split("}", 1)[0]
+        for token in ("color: #fff;", "linear-gradient(180deg, #e11d48, #9f1239)"):
+            self.assertIn(token, block)
+        for skin in ("classic", "aurora"):
+            self.assertIn(
+                f'html[data-skin="{skin}"] [data-skin-toggle] svg.lucide.skin-icon-{skin}', css,
+                f"经典皮肤下 {skin} 的图标没有二选一规则")
 
     def test_登录页品牌区在浅色下也不画矩形(self) -> None:
         """版式层的 `background: none` 特异性是 (0,1,0)，压不过浅色那套 (0,2,0) 的渐变，

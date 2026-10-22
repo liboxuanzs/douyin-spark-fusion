@@ -178,7 +178,10 @@ A 的做法（`core/automation.py:27-40`）是 12 个中文关键词 + `bounding
   `localStorage` / 设备号仍然挂上去 —— 换票不该换设备。
 - **状态层只降级不报错**：读不出按全新上下文、写不进只记 warning，绝不改变本轮结果；
   `write()` / `sync()` 外面还包一层 try —— 收尾阶段的任何意外都不许把一次成功发送改判成失败。
-- **被踢 / 掉登录时只存设备状态、不回写 `.env`**：别把已经死掉的会话盖到可能还好的票上。
+- **被踢 / 掉登录 / 门禁判死时只存设备状态、不回写 `.env`**：别把已经死掉的会话盖到可能还好的票上。
+  门禁（`LOGGED_OUT` / `EXPIRED` / `LOGIN_LOST`）一条都没发出去时同样算死会话 —— 页面可能已经把它换成一份
+  **匿名** `sessionid`（名字还叫 `sessionid`、过期时间在未来，`has_login_cookie` 照样认），写回去就把真凭据
+  盖掉了；设备号（`localStorage`）仍然值得留下，所以快照照写。
 
 验收口径：真机上 `logs/browser-state/<uid>.json` 生成且只有抖音域的 cookie；两轮之间
 `x-web-secsdk-uid` 不变；跑完 `.env` 的 `COOKIES_<uid>` 有刷新（设备号那几个值会变）。

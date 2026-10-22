@@ -90,6 +90,17 @@ def read(unique_id) -> dict | None:
     if not isinstance(data, dict) or not isinstance(data.get("cookies"), list):
         logger.warning(f"⚠️ 浏览器状态快照结构不对（{path.name}），本轮按全新上下文跑")
         return None
+    raw_origins = data.get("origins")
+    if raw_origins is not None and not isinstance(raw_origins, list):
+        # Playwright 对 `origins` 的形状是挑剔的：不是 list 会直接抛 Error，而那个异常
+        # 发生在任务 try 之外（见 core/tasks._new_context），整个账号当天就被记 error。
+        logger.warning(f"⚠️ 浏览器状态快照的 origins 结构不对（{path.name}），本轮按全新上下文跑")
+        return None
+    origins, dropped = _clean_origins(raw_origins)
+    if dropped:
+        logger.warning(f"⚠️ 浏览器状态快照里有 {dropped} 条 origins 形状不对（{path.name}），已丢弃")
+    data = dict(data)
+    data["origins"] = origins
     return data
 
 
@@ -105,12 +116,18 @@ def write(unique_id, state) -> Path | None:
     if not payload["cookies"]:
         # 一条目标域的 cookie 都没有：存下去只有害处（下轮会拿一个空 jar 覆盖注入）
         return None
+    # 死会话（未登录上下文 / 被踢之后）的 localStorage 可能是空的，而设备身份就存在
+    # 那里。新快照没带来内容时沿用旧的那份，别让一次坏会话把设备身份抹成空白。
+    previous = read(unique_id)
+    if not payload["origins"] and previous:
+        payload["origins"] = previous.get("origins") or []
 
     directory = path.parent
     tmp_name = None
     try:
+        created = not directory.exists()
         directory.mkdir(parents=True, exist_ok=True)
-        _lock_down_dir(directory)
+        _lock_down_dir(directory, owned=created or _is_default_dir(directory))
         handle_fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=path.name + ".", suffix=".tmp")
         with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
@@ -129,14 +146,45 @@ def write(unique_id, state) -> Path | None:
                 pass
 
 
-def _lock_down_dir(directory: Path) -> None:
-    """状态目录只给本用户读：里面就是整份登录态。已有目录不强行改权限（可能被别人共享）。"""
+def _is_default_dir(directory: Path) -> bool:
+    """是不是本模块自己的默认目录（这种目录可以放心改成 0700）。"""
+    try:
+        return directory.resolve() == Path(resolve_path(DEFAULT_DIR)).resolve()
+    except OSError:
+        return False
+
+
+def _lock_down_dir(directory: Path, *, owned: bool) -> None:
+    """状态目录只给本用户读：里面就是整份登录态。
+
+    只收紧**本次新建**的目录或本模块的默认目录。`BROWSER_STATE_DIR` 可能指向
+    /tmp、家目录甚至共享目录，那些地方的所有者不是我们，无条件 chmod 0700 会把
+    别人锁在门外（旧实现与这句注释正好相反）。
+    """
+    if not owned:
+        return
     try:
         mode = directory.stat().st_mode & 0o777
         if mode != 0o700:
             os.chmod(directory, 0o700)
     except OSError:
         pass
+
+
+def _clean_origins(raw) -> tuple[list, int]:
+    """把 `origins` 里形状不对的条目挑掉，返回 (干净列表, 丢弃条数)。"""
+    if not isinstance(raw, list):
+        return [], 0
+    cleaned, dropped = [], 0
+    for item in raw:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("origin"), str)
+                or not item.get("origin")
+                or not isinstance(item.get("localStorage"), list)):
+            dropped += 1
+            continue
+        cleaned.append({"origin": item["origin"], "localStorage": item["localStorage"]})
+    return cleaned, dropped
 
 
 def _trim(state: dict) -> dict:

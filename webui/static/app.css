@@ -336,6 +336,26 @@ html[data-theme="light"] i.theme-dark-icon {
   display: inline-block;
 }
 
+/* 皮肤开关的两枚图标（palette / sparkles）在 base.html 里**同时**渲染，靠
+   html[data-skin] 二选一。极光皮肤有这套规则，经典皮肤以前没有 ⇒ 两枚一起亮。
+   同样要带 svg.lucide / i 前缀，理由见上面主题图标那段注释。 */
+svg.lucide.skin-icon-classic,
+svg.lucide.skin-icon-aurora,
+i.skin-icon-classic,
+i.skin-icon-aurora {
+  display: none;
+}
+
+html[data-skin="classic"] [data-skin-toggle] svg.lucide.skin-icon-classic,
+html[data-skin="classic"] [data-skin-toggle] i.skin-icon-classic {
+  display: inline-block;
+}
+
+html[data-skin="aurora"] [data-skin-toggle] svg.lucide.skin-icon-aurora,
+html[data-skin="aurora"] [data-skin-toggle] i.skin-icon-aurora {
+  display: inline-block;
+}
+
 /* ==========================================================================
    2. 外壳 / 侧栏
    ========================================================================== */
@@ -708,6 +728,39 @@ html[data-theme="light"] i.theme-dark-icon {
   background: transparent;
   border-color: var(--danger-line);
   color: var(--danger);
+}
+
+/* 真发按钮：两套皮肤、模板与 app.js 都写 `button button-send`（见
+   dashboard.html 的「立即发送」和 app.js 的档位回调）。经典皮肤以前没有这条，
+   按钮会回落成普通灰底——同一句"真实发送"在两套皮肤下份量完全不同。
+   颜色写死深红而不是 var(--danger)：经典深色主题的 --danger 是浅红，
+   白字压上去对比不足。 */
+.button-send {
+  background: linear-gradient(180deg, #e11d48, #9f1239);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 650;
+  box-shadow: 0 12px 28px -14px rgba(190, 18, 60, .55),
+              inset 0 1px 0 rgba(255, 255, 255, .28);
+}
+
+.button-send:hover {
+  background: linear-gradient(180deg, #f02d57, #a81440);
+  border-color: transparent;
+  color: #fff;
+}
+
+.button-send:disabled,
+.button-send[disabled] {
+  background: linear-gradient(180deg, #b3405a, #7d283c);
+  color: rgba(255, 255, 255, .85);
+}
+
+.button-send:disabled:hover,
+.button-send[disabled]:hover {
+  background: linear-gradient(180deg, #b3405a, #7d283c);
+  border-color: transparent;
+  color: rgba(255, 255, 255, .85);
 }
 
 .button-success {

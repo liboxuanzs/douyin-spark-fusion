@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -729,6 +730,62 @@ class EnvSymlinkTests(EnvFileTestCase):
     def test_plain_file_is_unaffected(self):
         self.assertEqual(envfile.symlink_write_problem(self.env), "")
         self.assertTrue(envfile.set_account_time(UID, "09:30")["ok"])
+
+
+class EnvWriteLockTests(EnvFileTestCase):
+    """跨进程写 .env 的排它锁。
+
+    背景（2026-10-22 全量检查）：P2 之后**定时任务进程**也会写 `.env`（cookie 回写），
+    与 web 面板、扫码回调是两个进程。只在进程内加锁时，两边会「读全文件 → 改一处 →
+    整份写回」交错，把对方刚写的那一行盖掉 —— 丢的是 TASKS / COOKIES。
+    """
+
+    def _lock_path(self) -> Path:
+        return Path(os.path.realpath(str(self.env)) + envfile.ENV_LOCK_SUFFIX)
+
+    @unittest.skipIf(envfile.fcntl is None, "Windows 没有 fcntl，退化为进程内串行")
+    def test_写盘会在_env_旁边留一把_600_的锁文件(self):
+        self.assertTrue(envfile.set_account_time(UID, "08:00")["ok"])
+        lock = self._lock_path()
+        self.assertTrue(lock.exists(), "跨进程写锁应该落在 <env>.lock")
+        self.assertEqual(lock.stat().st_size, 0, "锁文件里不该有内容（它只是根桩）")
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(envfile.fcntl is None, "Windows 没有 fcntl")
+    def test_另一个进程拿着锁时这边要排队(self):
+        script = (
+            "import fcntl, os, time\n"
+            f"fd = os.open({str(self._lock_path())!r}, os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('READY', flush=True)\n"
+            "time.sleep(1.2)\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual((child.stdout.readline() or "").strip(), "READY")
+            started = time.monotonic()
+            result = envfile.set_account_time(UID, "09:30")
+            waited = time.monotonic() - started
+        finally:
+            child.wait(timeout=10)
+            if child.stdout:
+                child.stdout.close()
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(waited, 0.5, "另一个进程拿着锁时应该等它放锁再写")
+        self.assertLess(waited, 8.0, "排队不该排到超时：锁一定要在收尾时放掉")
+        self.assertIn("09:30", self.text())
+
+    @unittest.skipIf(envfile.fcntl is None, "Windows 没有 fcntl")
+    def test_嵌套的写入口不会把自己锁死(self):
+        # update_settings 内部会调 backup()，两者都带 @_serialized —— flock 不可重入，
+        # 这里要钉住「同一线程按深度重入、只真锁一次」。
+        result = envfile.update_settings({"WEBUI_PORT": "8788"})
+        self.assertTrue(result["ok"], result)
+        self.assertIn("WEBUI_PORT=8788", self.text())
 
 
 if __name__ == "__main__":

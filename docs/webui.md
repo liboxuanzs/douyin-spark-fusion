@@ -296,6 +296,9 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 - **换表不空白**：`app.js` 的 `swapSheet()` 走**双缓冲** —— clone 一个新 `<link>` 追加进 `<head>`，
   等它 `load` 之后才删旧表、把 `id="app-stylesheet"` 挪过去；`error` 时把新表撤掉、退回旧表。
   直接改旧表的 `href` 会先摘掉样式、再等 79KB 下载完，中间那一瞬是裸 HTML。
+  连续快速切换时只认**最新一次**的目标：脚本用 `pending` 记住正在下载的那张，新切换先撤掉上一张，
+  旧表的 `load` 回调发现自己已经不是 `pending` 就直接返回 —— 最终 `<head>` 里永远只有一张 `app-*.css`
+  （`SkinWebUITestCase::test_连续切换皮肤不会留下两张样式表` 钉住）。
 - **层叠约定**：`.app-shell` / `.main-area` 是 `position: relative; z-index: 1`，装饰层是 `z-index: 0` + `pointer-events: none`，
   所以极光永远在内容之下、也不吃点击。登录页没有 `.app-shell`，用 `.login-page > *:not(.aurora-scene) { z-index: 1 }` 把内容抬起来 ——
   那个 `:not()` **不能省**，否则会把装饰层的 `position: fixed` 顶掉、整层消失。
@@ -390,7 +393,8 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache、
   浅色主题的对比度（光谱底上的字色、次要文字）、配置表列宽不随卡片塌、嵌套分段控件的内外圆角是同心圆、
   分段控件的滑轨与胶囊有色差、四张折叠卡只留一层圆角、材质令牌与颗粒层、KPI 渐隐色条、实心红真发按钮、
-  登录页浅色覆盖、减少动效时连延迟一起停、背景层视差」；
+  经典皮肤也补了真发按钮与皮肤图标、登录页浅色覆盖、减少动效时连延迟一起停、背景层视差、
+  连续切皮肤不留第二张表（加载失败还要回滚）、浅色首屏不闪深色」；
   上面两条仓规对新皮肤同样生效。
 
 ## 8. "面板说的"和"工具真做的"必须一致

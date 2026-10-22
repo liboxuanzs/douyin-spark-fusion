@@ -153,6 +153,9 @@ def _entry(friend, r, dry_run):
 def _new_context(browser, state):
     """开一个任务上下文；有状态快照就带上去，语言/时区与浏览器启动参数一致。
 
+    返回 (context, state_used)：state_used 为 False 表示快照被放弃了 ——
+    调用方必须照旧 add_cookies，否则「同一份会话不再注入」会把登录态一起丢掉。
+
     真实浏览器（Playwright / cloakbrowser）的 new_context() 收 storage_state 和
     locale/timezone_id；测试里的假浏览器多半只收 self，多给一个关键字就是
     TypeError —— 那就逐级退让（先丢语言/时区、再丢快照）。这一层是「锦上添花」，
@@ -160,18 +163,29 @@ def _new_context(browser, state):
     """
     from core import browser as browser_mod
     extra = browser_mod.context_options()
+
+    def _plain():
+        try:
+            return browser.new_context(**extra), False
+        except TypeError:
+            return browser.new_context(), False
+
     if state:
         try:
-            return browser.new_context(storage_state=state, **extra)
+            return browser.new_context(storage_state=state, **extra), True
         except TypeError:
             try:
-                return browser.new_context(storage_state=state)
+                return browser.new_context(storage_state=state), True
             except TypeError:
                 logger.debug("⚠️ 这个浏览器实现不支持 new_context(storage_state=...)，本轮不带快照")
-    try:
-        return browser.new_context(**extra)
-    except TypeError:
-        return browser.new_context()
+        except Exception as exc:
+            # 快照内容坏了时 Playwright 抛的是 Error（不是 TypeError），以前会一路冒到
+            # 任务 try 之外，账号当场记 error 且下一轮照样炸。丢快照重开一个就行 ——
+            # 本轮收尾会写一份新的把坏文件覆盖掉（自愈）。
+            logger.warning(
+                f"⚠️ 浏览器状态快照用不了（{type(exc).__name__}: {exc}），本轮按全新上下文跑"
+            )
+    return _plain()
 
 
 def do_user_task(browser, username, cookies, targets, unique_id=None,
@@ -196,6 +210,7 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
     sent_ok = sent_fail = 0     # 必须在 try 之外初始化：门禁阶段抛异常也要能走到收尾
     login_lost = False          # 运行期掉登录（发送时复检出来的）—— 决定账号级结论
     kicked = ""                 # 非空 = 服务端把会话踢下线（回执 decision=KICK）
+    session_dead = False        # 门禁就判死了登录态 —— 收尾只存设备状态，不回写 .env
     out = {
         "username": username, "unique_id": unique_id,
         "status": "ok", "gate": None, "sent_ok": 0, "sent_fail": 0,
@@ -209,42 +224,53 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
     # 恢复这台「设备」上一次的浏览器状态（cookie + localStorage，见 core/browser_state.py）。
     # 没有快照就是全新上下文 —— 换票不换设备，设备身份才能连续。
     state = browser_state.read(unique_id)
-    context = _new_context(browser, state)  # 每个任务使用独立的上下文
-    context.set_default_navigation_timeout(
-        config["browserActionTimeout"]
-    )  # 导航超时（毫秒，config 已换算好）
-    context.set_default_timeout(
-        config["browserActionTimeout"]
-    )  # 单次操作默认超时（毫秒）
+    context = None
+    # 这一段还没进主 try（下面那个 try 只管 IM 流程）。任何一步抛出去都必须先关掉
+    # 上下文 —— 否则每失败一次就在浏览器里漏一个上下文（cookie 全不可用那条尤其常见）。
+    try:
+        context, state_used = _new_context(browser, state)  # 每个任务使用独立的上下文
+        context.set_default_navigation_timeout(
+            config["browserActionTimeout"]
+        )  # 导航超时（毫秒，config 已换算好）
+        context.set_default_timeout(
+            config["browserActionTimeout"]
+        )  # 单次操作默认超时（毫秒）
 
-    page = context.new_page()
+        page = context.new_page()
 
-    # 注入 Cookie。★ 必须先清洗：Playwright 的 add_cookies 是**整批**语义，
-    # 一条 name/domain 为空的条目就会让整批被拒，这个账号随后会被判成"掉登录"
-    # （面板提示重新扫码）。抖音自己就会产出这种空名 cookie（value="douyin.com"，
-    # 见 core/cookie_utils.py:51-77），而 .env 里的 COOKIES_* 是历史快照，
-    # 完全可能带着它。filter_cookies 只丢不可用条目，不动其它字段。
-    safe_cookies, cookie_stats = cookie_utils.filter_cookies(cookies, domains_only=False)
-    if cookie_stats.get("invalid"):
-        logger.warning(
-            f"⚠️ 注入前丢弃不可用 cookie {cookie_stats['invalid']} 条"
-            f"（空 name/空 domain）—— 留着会让整批注入失败"
-        )
-    if not safe_cookies:
-        raise RuntimeError("cookie 全部不可用（空 name/domain），无法注入登录态")
-    if state is not None and browser_state.same_session(state, safe_cookies):
-        # 快照里的登录会话与 .env 是同一份：以快照为准，别拿 .env 的旧值把服务端
-        # 刚签发的 ttwid / x-web-secsdk-uid / web_sign_token 又盖回去（见 P2）。
-        logger.info(
-            f"账号 {username} 沿用上次的浏览器状态（与 .env 是同一份登录会话，不再注入旧 cookie）"
-        )
-    else:
-        context.add_cookies(safe_cookies)
-        if state is not None:
-            logger.info(
-                f"账号 {username} 的 .env 登录会话与浏览器状态快照不同"
-                f"（重新扫码或换过 Cookie），本轮以 .env 为准"
+        # 注入 Cookie。★ 必须先清洗：Playwright 的 add_cookies 是**整批**语义，
+        # 一条 name/domain 为空的条目就会让整批被拒，这个账号随后会被判成"掉登录"
+        # （面板提示重新扫码）。抖音自己就会产出这种空名 cookie（value="douyin.com"，
+        # 见 core/cookie_utils.py:51-77），而 .env 里的 COOKIES_* 是历史快照，
+        # 完全可能带着它。filter_cookies 只丢不可用条目，不动其它字段。
+        safe_cookies, cookie_stats = cookie_utils.filter_cookies(cookies, domains_only=False)
+        if cookie_stats.get("invalid"):
+            logger.warning(
+                f"⚠️ 注入前丢弃不可用 cookie {cookie_stats['invalid']} 条"
+                f"（空 name/空 domain）—— 留着会让整批注入失败"
             )
+        if not safe_cookies:
+            raise RuntimeError("cookie 全部不可用（空 name/domain），无法注入登录态")
+        if state_used and state is not None and browser_state.same_session(state, safe_cookies):
+            # 快照里的登录会话与 .env 是同一份：以快照为准，别拿 .env 的旧值把服务端
+            # 刚签发的 ttwid / x-web-secsdk-uid / web_sign_token 又盖回去（见 P2）。
+            logger.info(
+                f"账号 {username} 沿用上次的浏览器状态（与 .env 是同一份登录会话，不再注入旧 cookie）"
+            )
+        else:
+            context.add_cookies(safe_cookies)
+            if state is not None:
+                logger.info(
+                    f"账号 {username} 的 .env 登录会话与浏览器状态快照不同"
+                    f"（重新扫码或换过 Cookie），本轮以 .env 为准"
+                )
+    except BaseException:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001 —— 收尾失败不能盖住真正的异常
+                pass
+        raise
 
     im = None
     try:
@@ -264,6 +290,10 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
             if res.get("status") in GATE_DEAD_STATUSES and _gate_death_confirmed(im, res, username):
                 # 登录态已死：一条都发不出去，而且**人不动手就不会好**。
                 # 按 error 记账 = 占掉当天名额、当天不再重试（见 GATE_DEAD_STATUSES 注释）。
+                # 收尾也不许把这一轮的 cookie 写回 .env：死会话在页面上可能已经被换成
+                # 一份**匿名** sessionid（未来过期、has_login_cookie 也认），写回去就把
+                # 真实凭据盖掉了 —— 用户重新扫码前 .env 先坏一份（见 finally）。
+                session_dead = True
                 out["status"] = "error"
                 out["error"] = (
                     f"login_dead: 登录已失效（{_gate_reason(res.get('status'))}），"
@@ -590,7 +620,7 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 cookie_sync.sync(
                     unique_id,
                     snapshot.get("cookies") or [],
-                    allow=not (kicked or login_lost),
+                    allow=not (kicked or login_lost or session_dead),
                 )
             except Exception as exc:                              # noqa: BLE001
                 # 这两个函数自己已经吃掉了 OSError / 坏 JSON；这里兜的是它们没想

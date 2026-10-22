@@ -1490,6 +1490,33 @@ class WholeRunErrorTests(unittest.TestCase):
         self.assertNotIn("本轮异常结束", texts)
         self.assertEqual(card["state"], "blocked", "一条都没发出去，当天要人处理")
 
+    def test_被踢之前已经发出去的条数要如实说(self):
+        """KICK 可能落在第 2、3 条上：文案写死「一条都没发出去」会跟账本打架。
+
+        core/tasks.py 的 error 写的是「本轮发送成功 N 条」，面板也必须按同一个
+        口径说清楚 —— 用户要据此判断已经发给了谁、还要不要补。
+        """
+        account = _account(
+            status="error",
+            sent_ok=2,
+            sent_fail=1,
+            targets=["好友甲", "好友乙", "好友丙"],
+            error="session_kicked: 服务端把会话踢下线（decision=KICK），本轮发送成功 2 条、失败 1 条",
+            entries=[
+                _entry(target="好友甲", ok=True, level="strong"),
+                _entry(target="好友乙", ok=True, level="strong"),
+                _entry(target="好友丙", ok=False, level="none", reason="session_kicked"),
+            ],
+        )
+        card = viewmodel.build_account(
+            _snapshot(status="error", status_text="出错", targets=["好友甲", "好友乙", "好友丙"]),
+            _record(status="error", status_text="出错", accounts=[account]),
+        )
+        texts = " ".join(issue["text"] for issue in card["issues"])
+        self.assertIn("已送达 2/3 条", texts)
+        self.assertNotIn("一条都没发出去", texts)
+        self.assertEqual(card["state"], "blocked")
+
 
 class MaintenanceViewTests(unittest.TestCase):
     """「磁盘与资料目录」区块的数据层：字段名、安全线、以及"跳过了谁"。

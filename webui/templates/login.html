@@ -7,6 +7,19 @@
     <meta name="robots" content="noindex, nofollow">
     <title>登录 | 续火花控制台</title>
     <link rel="icon" href="data:,">
+    {# 主题：<html data-theme="dark"> 是静态默认，而恢复存过的浅色要等 app.js 的 defer ——
+       浅色用户每次打开都会先闪一帧深色。和下面皮肤那段同一套做法：同步执行，只改属性。 #}
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("sparkflow-theme") === "light") {
+            document.documentElement.dataset.theme = "light";
+          }
+        } catch (error) {
+          // localStorage 被禁用：保持默认深色。
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version() }}" id="app-stylesheet">
     {# 皮肤：aurora（极光棱镜，默认）用 app-aurora.css，classic（扁平控制台）用 app.css，两者互斥加载。
        这段必须同步执行（放在样式表之后、<body> 之前），否则会先画一帧默认皮肤再换 = 闪一下。 #}

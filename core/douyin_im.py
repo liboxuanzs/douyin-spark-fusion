@@ -1409,6 +1409,8 @@ class ImMonitor:
         self.sends = []
         self.hits = {}
         self.errors = []
+        self._login_dead = False
+        self._login_dead_reason = ""
         page.on("response", self._on_response)
 
     # ---- 内部 ----
@@ -1491,6 +1493,18 @@ class ImMonitor:
                 raw = repr(body)
             _msg += f"  raw={raw[:240]!r}"
         (logger.info if r["ok"] else logger.warning)(_msg)
+
+    def _emit_login_lost(self, code, reason="", head=""):
+        """默认只记一行日志。
+
+        `DouyinIM` 会用自己的实现覆盖它（带掉登录回调、并置位 `_login_dead`）；
+        单独用 `ImMonitor`（只读旁路）时这里也必须存在 —— 以前 `_handle_send`
+        直接调 `self._emit_login_lost`，而它只在 `DouyinIM` 上有，于是 KICK 时
+        AttributeError 被 `_on_response` 的 except 吞掉，连后面那条 `[SEND]`
+        记账日志都不打了（2026-10 复核发现）。
+        """
+        logger.error(head or ("[LOGIN] ⛔ 运行期检测到掉登录"
+                              + (f"  {reason}" if reason else "")))
 
     def _handle_init(self, body):
         r = decode_init_resp(body)
@@ -1694,6 +1708,10 @@ class DouyinIM:
 
         # ① 先挂钩子，再导航。顺序反了会漏首屏响应。
         self.mon = ImMonitor(page)
+        # KICK 是 monitor 从发送响应里发现的，默认实现只会打日志。绑上真实实现，
+        # 才能同时走掉登录回调、并让 im 侧的 `_login_dead` 也置位（否则 :2925
+        # 的守卫看不到 monitor 发现的 KICK，本轮剩余目标还会继续点发送）。
+        self.mon._emit_login_lost = self._emit_login_lost
         self._watch_login_lost()
 
         if auto_goto:
@@ -1743,6 +1761,11 @@ class DouyinIM:
         self._on_resp_login_lost = on_resp
 
     def _emit_login_lost(self, code, reason="", head=""):
+        # 走到这里就说明这个会话不能再用：发送循环里的 `_login_dead` 守卫要立刻
+        # 生效，不管结论来自哪条路径（monitor 的 KICK / status_code=8 / 复检）。
+        self._login_dead = True
+        if reason and not self._login_dead_reason:
+            self._login_dead_reason = reason
         # `head` 给"不是掉登录、但同样是这个会话不能再用"的情况（如 decision=KICK）
         # 留一条自己的说明；默认两句仍按原来的两种来源写。
         head = head or (f"[LOGIN] ⛔ 运行期检测到掉登录（status_code={code}）"

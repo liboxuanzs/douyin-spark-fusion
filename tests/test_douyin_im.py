@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 from core import douyin_im
 from core.douyin_im import (
     ROW_HEIGHT,
@@ -2176,6 +2178,29 @@ class KickDecisionTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertIn("KICK", seen[0]["reason"])
         self.assertTrue(any("踢下线" in line for line in cm.output))
+
+    def test_monitor_alone_survives_a_kick(self):
+        """生产里 DouyinIM 把 `_emit_login_lost` 绑到监视器上；但监视器自己单跑
+        （或绑定还没发生）时也必须扛得住 —— 以前这里 AttributeError 被
+        `_on_response` 的 except 吞掉，连紧随其后的 [SEND] 记账日志都不打。"""
+        mon = douyin_im.ImMonitor(self._Page())
+        mon._login_lost = []
+        with self.assertLogs("douyin_im", level="ERROR") as cm:
+            mon._handle_send(b'{"decision": "KICK"}')
+        self.assertTrue(mon._login_dead)
+        self.assertEqual(mon._login_dead_reason, "KICK:KICK")
+        self.assertTrue(any("踢下线" in line for line in cm.output))
+
+    def test_douyin_im_hands_its_emitter_to_the_monitor(self):
+        im = douyin_im.DouyinIM.__new__(douyin_im.DouyinIM)
+        im._login_dead = False
+        im._login_dead_reason = ""
+        im._login_lost = []
+        with self.assertLogs("douyin_im", level="ERROR"):
+            im._emit_login_lost("kicked", "KICK:KICK", "")
+        self.assertTrue(im._login_dead, "DouyinIM 这边也要置死，后续发送才会短路")
+        source = (REPO_ROOT / "core" / "douyin_im.py").read_text(encoding="utf-8")
+        self.assertIn("self.mon._emit_login_lost = self._emit_login_lost", source)
 
     def test_kicked_send_is_reported_as_session_kicked(self):
         """复用 LoginRecheckTests 的替身：回执被换成"被踢"这一种。"""

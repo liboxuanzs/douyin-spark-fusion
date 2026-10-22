@@ -52,8 +52,9 @@ class _Page:
 
 
 class _Context:
-    def __init__(self, storage_state=None, snapshot=None, raise_snapshot=False):
+    def __init__(self, storage_state=None, snapshot=None, raise_snapshot=False, raise_add=False):
         self.storage_state_in = storage_state
+        self.raise_add = raise_add
         self.cookies = None
         self.closed = False
         self._snapshot = snapshot
@@ -70,6 +71,8 @@ class _Context:
         return self.page
 
     def add_cookies(self, cookies):
+        if self.raise_add:
+            raise RuntimeError("注入 cookie 失败")
         self.cookies = list(cookies)
 
     def storage_state(self):
@@ -84,17 +87,24 @@ class _Context:
 class _Browser:
     """支持 `new_context(storage_state=...)` 的假浏览器。"""
 
-    def __init__(self, *, accepts_state=True, snapshot=None, raise_snapshot=False):
+    def __init__(self, *, accepts_state=True, snapshot=None, raise_snapshot=False,
+                 broken_state=False, raise_add=False):
         self.contexts = []
         self.accepts_state = accepts_state
         self.snapshot = snapshot
         self.raise_snapshot = raise_snapshot
+        self.broken_state = broken_state
+        self.raise_add = raise_add
 
     def new_context(self, **kwargs):
         if kwargs and not self.accepts_state:
             raise TypeError("new_context() got an unexpected keyword argument")
+        if self.broken_state and kwargs.get("storage_state") is not None:
+            # Playwright 对坏 state 抛的是 Error，不是 TypeError
+            raise RuntimeError("storage_state 里 origins 结构不对")
         ctx = _Context(storage_state=kwargs.get("storage_state"),
-                       snapshot=self.snapshot, raise_snapshot=self.raise_snapshot)
+                       snapshot=self.snapshot, raise_snapshot=self.raise_snapshot,
+                       raise_add=self.raise_add)
         self.contexts.append(ctx)
         return ctx
 
@@ -231,6 +241,25 @@ class TaskStateTests(unittest.TestCase):
         self.assertFalse(sync.call_args.kwargs["allow"], "被踢的会话不能回写 .env")
         self.assertIsNotNone(self._stored(), "设备状态本身仍然值得留下")
 
+    def test_门禁就判死登录态的一轮不回写_env(self):
+        """门禁 `LOGGED_OUT` / `EXPIRED` 时一条都没发，收尾也不许回写 .env。
+
+        死会话在页面上可能已经被换成一份**匿名** sessionid（未来过期、名字还叫
+        sessionid），has_login_cookie / has_usable_login_cookie 都会放行 ——
+        真写回去就把 .env 里的凭据盖掉了，用户重新扫码之前先坏一份。
+        设备状态（localStorage）仍然值得留下。
+        """
+        browser = _Browser(snapshot=_state([_cookie(value="死值")]))
+        dead_gate = {"status": "LOGGED_OUT", "user_id": "", "nickname": ""}
+        with mock.patch.object(_FakeIM, "wait_ready", return_value=dead_gate):
+            with mock.patch.object(tasks_mod.cookie_sync, "sync") as sync:
+                out = self._run(browser)
+        self.assertEqual(out["status"], "error")
+        self.assertTrue(out["error"].startswith("login_dead:"), out["error"])
+        self.assertTrue(sync.called)
+        self.assertFalse(sync.call_args.kwargs["allow"], "门禁判死的会话不能回写 .env")
+        self.assertIsNotNone(self._stored(), "设备状态本身仍然值得留下")
+
     # -- 降级路径 --------------------------------------------------------
     def test_假浏览器不吃_storage_state_参数也能跑完(self):
         browser = _Browser(accepts_state=False, snapshot=_state([_cookie()]))
@@ -248,6 +277,25 @@ class TaskStateTests(unittest.TestCase):
         self.assertEqual(out["status"], "ok")
         self.assertIsNone(self._stored())
         self.assertTrue(browser.contexts[0].closed)
+
+    def test_坏快照不会让账号当天报错(self):
+        """快照文件是上一轮自己写的，坏了也只能丢 —— 不能每轮都炸同一个账号。"""
+        browser_state.write(UID, _state([_cookie(value="v1")]))
+        browser = _Browser(broken_state=True, snapshot=_state([_cookie(value="v2")]))
+        with self.assertLogs("app", level="WARNING") as logs:
+            out = self._run(browser)
+        self.assertEqual(out["status"], "ok")
+        self.assertTrue(any("浏览器状态快照用不了" in line for line in logs.output), logs.output)
+        ctx = browser.contexts[0]
+        self.assertIsNone(ctx.storage_state_in, "坏快照要丢掉重开，而不是原样再喂一次")
+        self.assertIsNotNone(ctx.cookies, "退回全新上下文后仍要注入 .env 的 cookie")
+
+    def test_建上下文中途失败也要关掉上下文(self):
+        """新开的上下文如果没交给 finally，失败路径上会一直挂着一个浏览器上下文。"""
+        browser = _Browser(snapshot=_state([_cookie()]), raise_add=True)
+        with self.assertRaises(RuntimeError):
+            self._run(browser)
+        self.assertTrue(browser.contexts[0].closed, "失败路径上上下文也必须关闭")
 
     def test_存快照出错也不改变本轮结果(self):
         browser = _Browser(snapshot=_state([_cookie()]))

@@ -1363,7 +1363,15 @@ class QrLoginSession(threading.Thread):
             target = str(self.persist.get("adopt_profile") or "")
             if target and os.path.abspath(target) != os.path.abspath(self.profile_dir):
                 self._adopt = target
-        self._save_device_snapshot(state, account)
+        if isinstance(self.persist, dict) and not self.persist.get("ok"):
+            # .env 没写成（保存被拒/异常）时不要写设备快照：否则会留下"一份设备身份
+            # 配着一份没落盘的登录态"，下一轮发送反而更乱。发送本身不等于失败，
+            # 只是这一台设备的身份不记了。
+            logger.warning(
+                f"[QR] 登录态没能落盘（{self.persist.get('error') or '未知原因'}），"
+                "本次不更新浏览器状态快照")
+        else:
+            self._save_device_snapshot(state, account)
         self._set(STATE_DONE, self._done_message(result))
         logger.info(
             f"[QR] 登录成功：账号={account.get('nickname') or '-'}"

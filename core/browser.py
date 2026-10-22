@@ -13,6 +13,7 @@
    指定的二进制，其次 `channel="chrome"` 复用系统 Chrome。两条路都实测可用。
 """
 import os
+import re
 import time
 import traceback
 
@@ -63,11 +64,21 @@ BASE_CHROME_ARGS.append(f"--disk-cache-size={DISK_CACHE_SIZE_MB * 1024 * 1024}")
 #   BROWSER_TIMEZONE  空 = 用系统时区；写错只告警、退回系统时区，绝不拖垮发送
 #   BROWSER_LOCALE    空 = zh-CN
 DEFAULT_LOCALE = "zh-CN"
+#: BCP 47 的宽松形状：`zh` / `zh-CN` / `zh-Hans-CN` 都收，`zh_CN`、带空格/斜杠的不收。
+#: 不校验的话写错一个下划线就会静默落到默认值（Playwright 只认连字符）。
+_LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
 
 
 def browser_locale():
-    """本次启动用的语言（BCP 47）。空值回落到 zh-CN。"""
-    return (os.environ.get("BROWSER_LOCALE") or "").strip() or DEFAULT_LOCALE
+    """本次启动用的语言（BCP 47）。空值回落到 zh-CN，写错也回落到 zh-CN（只告警）。"""
+    raw = (os.environ.get("BROWSER_LOCALE") or "").strip()
+    if not raw:
+        return DEFAULT_LOCALE
+    if not _LOCALE_RE.match(raw):
+        logger.warning(f"[BROWSER] BROWSER_LOCALE={raw!r} 不是合法的 BCP 47 语言标记，"
+                       f"本轮按 {DEFAULT_LOCALE} 走")
+        return DEFAULT_LOCALE
+    return raw
 
 
 def browser_timezone():

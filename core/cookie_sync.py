@@ -68,6 +68,13 @@ def _current_cookies(unique_id):
     return data if isinstance(data, list) else []
 
 
+def _target_only(cookies) -> list:
+    """只留抖音相关域的条目（与 `filter_cookies(domains_only=True)` 同一判定，但
+    不带"目标域太少就整体回退"的策略 —— 比较时不需要那个回退）。"""
+    return [c for c in cookies or []
+            if isinstance(c, dict) and cookie_utils.matches_target(str(c.get("domain") or ""))]
+
+
 def _canonical(cookies) -> tuple:
     """与顺序无关的比较键：每条 cookie 只留决定"是不是同一份"的字段。"""
     items = []
@@ -125,7 +132,10 @@ def sync(unique_id, cookies, *, allow=True) -> dict:
     if current is None:
         result.update(ok=False, reason="no-writer")
         return result
-    if _canonical(current) == _canonical(fresh):
+    # 比较口径必须和写回口径一致：写回去的只有抖音域的 cookie，比较时也不能把
+    # .env 里用户自己粘进来的其它域算进去，否则首轮就会"因为多了几条别的域"而判定
+    # 变了、把那些条目静默抹掉。
+    if _canonical(_target_only(current)) == _canonical(fresh):
         result.update(reason="unchanged")
         return result
 

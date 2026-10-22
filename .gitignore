@@ -51,3 +51,5 @@ configTool/local.json
 pw_api.log
 pw_*.log
 .env.bak-*
+# webui/envfile.py 的跨进程写锁（`<env>.lock`）：空文件，运行时生成，别入库。
+.env.lock

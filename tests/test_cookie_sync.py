@@ -82,6 +82,18 @@ class CookieSyncTests(unittest.TestCase):
         self.assertIn("OTHER=1", self._text())
         self.assertEqual(len(self._backups()), backups + 1)   # 写之前先备份
 
+    def test_env_里别的域的_cookie_不会引出假变更(self):
+        """比较口径必须和写回口径一致：.env 里若有非抖音域 cookie，不能因此判"变了"
+        然后写一次把它们悄悄抹掉。"""
+        extra = _cookie("ga", "1", domain=".google.com")
+        self._seed(_session() + [extra])
+        before = self._text()
+        result = cookie_sync.sync(UID, _session())
+        self.assertEqual(result["reason"], "unchanged")
+        self.assertFalse(result["changed"])
+        self.assertEqual(self._text(), before)
+        self.assertIn(".google.com", self._text(), "没变化时一个字节都不该动")
+
     def test_回写之后读回来还是同一份(self):
         self._seed(_session())
         fresh = _session(secsdk="新设备号", ttwid="ttwid-2")

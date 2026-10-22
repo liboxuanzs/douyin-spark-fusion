@@ -658,9 +658,13 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         # 与"门禁没过"分开说：门禁是**操作前**就看出来的，这条是**发送时**才暴露的
         # ——页面还长着 IM 的样子（列表、输入框、发送按钮都在），点击也"成功"，
         # 但服务端不认这个登录态，于是每条都拿不到回执，一条也没发出去。
+        # 发送中途才失效时，前面几条是真的发出去了：文案不能一律说"一条都没发出去"
+        # （core/tasks.py 记的是「本轮发送成功 N 条」，面板得跟账本对得上）。
+        sent_note = (f"本轮已送达 {sent}/{total} 条，剩下的没发出去" if sent
+                     else "一条都没发出去")
         issues.append({
             "level": "danger",
-            "text": "上一轮登录已失效（服务端不认这个 sessionid），一条都没发出去 —— "
+            "text": f"上一轮登录已失效（服务端不认这个 sessionid），{sent_note} —— "
                     "到下面「扫码登录」用这个账号重新扫一次即可；"
                     "重新登录成功后会自动补发一次（不用手点「立即运行」，但只补"
                     "今天还没成功发出去的账号）",
@@ -670,9 +674,11 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         # `{"decision": "KICK"}`），页面还长着 IM 的样子、点发送也"成功"，但回执
         # 永远不来。当成普通失败重试只会白等 20 秒再烧掉一条名额
         # （2026-10-20 两个账号整天没发出去就是这个形状）。
+        sent_note = (f"本轮被踢之前已送达 {sent}/{total} 条，剩下的没发出去" if sent
+                     else "一条都没发出去")
         issues.append({
             "level": "danger",
-            "text": "上一轮被服务端踢下线（回执 decision=KICK），一条都没发出去 —— "
+            "text": f"上一轮被服务端踢下线（回执 decision=KICK），{sent_note} —— "
                     "这个账号的登录态已经作废，到下面「扫码登录」重新扫一次即可" + _REQUEUE_NOTE,
         })
     elif nothing_sent:

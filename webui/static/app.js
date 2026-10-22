@@ -87,6 +87,11 @@
   };
 
   // 双缓冲换样式表：新表先挂上去，等它 load 完再摘掉旧表，切换过程中不会出现没样式的空档。
+  // 正在等 load 的那张候选样式表。连续快速切换（双击皮肤按钮）时，上一张候选
+  // 必须作废：否则它晚一步 load 完会把 id 抢回去，页面最终生效的表与
+  // dataset / localStorage 记下的选择不一致，而且要多点一次才恢复。
+  let pending = null;
+
   const swapSheet = (href) => {
     const current = link;
     if (!current) {
@@ -98,17 +103,38 @@
       link = fresh;
       return;
     }
+    if (pending) {
+      // 新的切换取代了还没落地的那张：先摘掉，它的 load 回调看到 pending 变了就收手。
+      pending.remove();
+      pending = null;
+    }
     if (current.getAttribute("href") === href) return;
     const next = current.cloneNode(false);
     next.removeAttribute("id");
     next.setAttribute("href", href);
+    pending = next;
     next.addEventListener("load", () => {
+      if (pending !== next) return;      // 已被后来的切换取代，别抢 id
+      pending = null;
       current.remove();
       next.id = "app-stylesheet";
       link = next;
     });
     next.addEventListener("error", () => {
+      if (pending === next) pending = null;
       next.remove();
+      // 换表失败：dataset 与 localStorage 在 applySkin 里已经写成新皮肤了，必须回滚，
+      // 否则页面继续用旧表、开关却记着新皮肤（再点一次才"恢复"）。从还挂着的旧表
+      // 反推上一个皮肤，比另外存一份状态更不容易漂。
+      const previous = (current.getAttribute("href") || "").indexOf("app-aurora.css") >= 0
+        ? "aurora" : "classic";
+      root.dataset.skin = previous;
+      setScene(previous);
+      try {
+        localStorage.setItem(storageKey, previous);
+      } catch {
+        // 回滚记不住也不影响页面已经用回旧表。
+      }
     });
     document.head.appendChild(next);
   };

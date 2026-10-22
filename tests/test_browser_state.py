@@ -56,6 +56,15 @@ class BrowserStateTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.root).st_mode), 0o700)
 
+    def test_已有目录不会被强行改成_0700(self):
+        """`BROWSER_STATE_DIR` 可能指向共享目录：只有本次新建的目录才该收权。"""
+        os.makedirs(self.root, exist_ok=True)
+        os.chmod(self.root, 0o755)
+        path = browser_state.write("11223344556", _state([_cookie()]))
+        self.assertIsNotNone(path)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
     def test_没有快照就是全新上下文(self):
         self.assertIsNone(browser_state.read("11223344556"))
         self.assertIsNone(browser_state.storage_state_for("11223344556"))
@@ -75,6 +84,42 @@ class BrowserStateTests(unittest.TestCase):
                 json.dump(payload, handle)
             with self.assertLogs("core.browser_state", level="WARNING"):
                 self.assertIsNone(browser_state.read("11223344556"), payload)
+
+    def test_origins_形状不对就按下没有处理(self):
+        """Playwright 对 origins 的形状是挑剔的；坏快照必须在 read 这一层拦住，
+        不能等 new_context(storage_state=...) 在任务 try 之外抛 Error。"""
+        os.makedirs(self.root, exist_ok=True)
+        path = os.path.join(self.root, "11223344556.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"cookies": [_cookie()], "origins": {"origin": "x"}}, handle)
+        with self.assertLogs("core.browser_state", level="WARNING"):
+            self.assertIsNone(browser_state.read("11223344556"))
+
+    def test_origins_里坏条目被丢掉而不是整份作废(self):
+        os.makedirs(self.root, exist_ok=True)
+        path = os.path.join(self.root, "11223344556.json")
+        payload = {
+            "cookies": [_cookie()],
+            "origins": [
+                {"origin": "https://www.douyin.com", "localStorage": []},
+                {"origin": "", "localStorage": []},
+                {"origin": "https://www.douyin.com", "localStorage": "nope"},
+                "垃圾",
+            ],
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        with self.assertLogs("core.browser_state", level="WARNING") as logs:
+            data = browser_state.read("11223344556")
+        self.assertEqual(data["origins"], [{"origin": "https://www.douyin.com", "localStorage": []}])
+        self.assertIn("3 条", "\n".join(logs.output))
+
+    def test_死会话的空_localStorage_不会抹掉设备身份(self):
+        """被踢/未登录的上下文里 localStorage 可能是空的，但那正是设备身份所在。"""
+        browser_state.write("11223344556", _state([_cookie()]))
+        browser_state.write("11223344556", _state([_cookie()], origins=[]))
+        data = browser_state.read("11223344556")
+        self.assertEqual(data["origins"][0]["localStorage"][0]["value"], "abc")
 
     def test_一条目标域_cookie_都没有就不落盘(self):
         path = browser_state.write("11223344556", _state([_cookie(domain=".google.com")]))

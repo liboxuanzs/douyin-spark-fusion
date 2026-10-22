@@ -28,6 +28,11 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key, unset_key
 
+try:                                                     # pragma: no cover - 平台分支
+    import fcntl
+except ImportError:                                      # Windows 没有 fcntl
+    fcntl = None
+
 from core import cookie_utils
 from core import schedule as schedule_mod
 from webui.password import hash_password, validate_new_password
@@ -41,14 +46,104 @@ BACKUP_KEEP = 5
 # 覆盖整个「读-改-写」，不是只锁最后那次写盘。
 _WRITE_LOCK = threading.RLock()
 
+#: 跨**进程**的锁文件后缀：`<env>.lock`。为什么锁一个单独的文件而不是 `.env` 自己 ——
+#: dotenv 的 `set_key` 最后一步是 `os.replace(tmp, <env>)`，inode 换了；锁旧文件
+#: 等于没锁（下一个人打开的是新 inode）。锁文件不会被动过，才是一根稳定的桩。
+#:
+#: 生产上真的会同时写同一份 .env 的进程有两个：web 面板（扫码/改配置/改口令）和
+#: 定时任务（P2 的 cookie 回写，见 core/cookie_sync.py）。只在进程内加锁挡不住它俩，
+#: 交错的后果是**一方整份写回时把另一方刚改的那一行盖掉**（丢的是 TASKS / COOKIES，
+#: 都是命根子）。configTool 是第三个写者，但它通常跑在操作者自己的机器上，不共享
+#: 这个锁文件；真跑在同一台机器上时仍只剩很小的窗口，见 docs/deploy.md。
+ENV_LOCK_SUFFIX = ".lock"
+
+#: 已经拿到的文件锁按线程记深度：`_serialized` 之间会互相调用（update_settings →
+#: backup），而 `flock` 不是可重入的 —— 同一进程再开一个 fd 去锁同一个文件会**死锁**。
+_tls = threading.local()
+
+
+def _env_lock_target(func, args, kwargs) -> Path:
+    """这个调用要改哪份 .env（用来选锁文件）。"""
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        explicit = bound.arguments.get("path")
+    except (TypeError, ValueError):                       # pragma: no cover - 签名读不到
+        explicit = kwargs.get("path")
+    return env_path(explicit)
+
+
+def _acquire_env_lock(target: Path):
+    """拿 `<env>.lock` 的排它锁（同线程可重入）。拿不到返回 None —— 不挡写盘。
+
+    锁文件建不出来（只读目录、权限不对）时**退化回旧行为**：宁可保留一个极小的
+    覆盖窗口，也不能让"设置了口令却保存不了"这种事发生。
+    """
+    if fcntl is None:
+        return None
+    real = Path(os.path.realpath(str(target)))
+    location = real.with_name(real.name + ENV_LOCK_SUFFIX)
+    key = str(location)
+    held = getattr(_tls, "held", None)
+    if held is None:
+        held = _tls.held = {}
+    entry = held.get(key)
+    if entry is not None:
+        entry[1] += 1
+        return key
+    try:
+        fd = os.open(str(location), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        _warn(f"建不出 .env 的文件锁 {location}（{type(exc).__name__}: {exc}），本次写入只做进程内串行")
+        return None
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)          # 锁文件里没有秘密，但没理由让它更宽
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:                # pragma: no cover - 文件系统不支持 flock
+        _warn(f"拿不到 .env 的文件锁 {location}（{type(exc).__name__}: {exc}），本次只做进程内串行")
+        os.close(fd)
+        return None
+    held[key] = [fd, 1]
+    return key
+
+
+def _release_env_lock(key) -> None:
+    if not key:
+        return
+    held = getattr(_tls, "held", {})
+    entry = held.get(key)
+    if entry is None:                                     # pragma: no cover - 不该发生
+        return
+    entry[1] -= 1
+    if entry[1] > 0:
+        return
+    held.pop(key, None)
+    try:
+        fcntl.flock(entry[0], fcntl.LOCK_UN)
+    except OSError:                                       # pragma: no cover
+        pass
+    try:
+        os.close(entry[0])
+    except OSError:                                       # pragma: no cover
+        pass
+
 
 def _serialized(func):
-    """把整个「读-改-写」放进同一把锁里（可重入，允许函数之间互相调用）。"""
+    """把整个「读-改-写」放进同一把锁里。
+
+    两层：进程内是 `_WRITE_LOCK`（可重入，允许函数之间互相调用），跨进程是
+    `<env>.lock` 上的 `flock`。**先拿进程内锁再拿文件锁**，顺序只有这一种，
+    不会互等。
+    """
 
     @wraps(func)
     def wrapper(*args, **kwargs):
         with _WRITE_LOCK:
-            return func(*args, **kwargs)
+            key = _acquire_env_lock(_env_lock_target(func, args, kwargs))
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _release_env_lock(key)
 
     return wrapper
 
