@@ -94,6 +94,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 | `WEBUI_SESSION_SECRET` / `WEBUI_SESSION_MAX_AGE` | 会话签名密钥与登录保持时长（默认 30 天） |
 | `LOGIN_PROFILE_DIR` | 登录资料目录根（等价于凭据，注意权限） |
 | `BROWSER_STATE_DIR` | 每账号浏览器状态快照（等价于凭据；删掉不炸，下次以新设备重新登录） |
+| `BROWSER_TIMEZONE` / `BROWSER_LOCALE` | 浏览器自报的时区与语言；时区留空 = 跟系统时区（例：出口在香港填 `Asia/Hong_Kong`） |
 | `MAINTENANCE_AUTO_PRUNE_HOURS` | 定时器自动清理间隔，默认 168 小时，`0` 关闭 |
 | `PROXY_ADDRESS` | 出口代理，留空即直连（多账号共用出口 IP 是已知的风控面） |
 

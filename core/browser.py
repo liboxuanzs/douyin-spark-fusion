@@ -56,6 +56,52 @@ BASE_CHROME_ARGS = [
 DISK_CACHE_SIZE_MB = 256
 BASE_CHROME_ARGS.append(f"--disk-cache-size={DISK_CACHE_SIZE_MB * 1024 * 1024}")
 
+# 语言与时区必须和"出口 IP 所在的城市"对得上。
+# 这台服务器的系统时区是 Asia/Shanghai，而实测出口是香港 HGC 住宅宽带
+# （223.19.25.170）—— UA 自称 Windows、时区却和 IP 不在同一地，是风控里
+# 最便宜的一条对照。默认值放在 .env（见 .env.example），代码只负责传下去：
+#   BROWSER_TIMEZONE  空 = 用系统时区；写错只告警、退回系统时区，绝不拖垮发送
+#   BROWSER_LOCALE    空 = zh-CN
+DEFAULT_LOCALE = "zh-CN"
+
+
+def browser_locale():
+    """本次启动用的语言（BCP 47）。空值回落到 zh-CN。"""
+    return (os.environ.get("BROWSER_LOCALE") or "").strip() or DEFAULT_LOCALE
+
+
+def browser_timezone():
+    """本次启动用的 IANA 时区；没配或写错名字时返回 None（= 系统时区）。"""
+    raw = (os.environ.get("BROWSER_TIMEZONE") or "").strip()
+    if not raw:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(raw)
+    except Exception as exc:                    # noqa: BLE001 —— 配置错不许拖垮整轮发送
+        logger.warning(f"[BROWSER] BROWSER_TIMEZONE={raw!r} 不是合法时区"
+                       f"（{type(exc).__name__}: {exc}），本轮按系统时区走")
+        return None
+    return raw
+
+
+def launch_options():
+    """cloakbrowser 启动参数里的语言/时区（它俩叫 locale/timezone）。"""
+    opts = {"locale": browser_locale()}
+    tz = browser_timezone()
+    if tz:
+        opts["timezone"] = tz
+    return opts
+
+
+def context_options():
+    """browser.new_context() 的同义参数：Playwright 把它叫 timezone_id。"""
+    opts = {"locale": browser_locale()}
+    tz = browser_timezone()
+    if tz:
+        opts["timezone_id"] = tz
+    return opts
+
 # playwright 回落时的 `sync_playwright()` 句柄必须活到浏览器关闭，
 # 否则一旦被 GC 回收，浏览器进程会连着一起被杀。
 #
@@ -94,6 +140,7 @@ def chrome_args(fingerprint=None):
 def _launch_cloakbrowser(headless, args, proxy):
     from cloakbrowser import launch          # 惰性：没装也要能 import 本模块
     kw = {"headless": headless, "humanize": True, "args": args}
+    kw.update(launch_options())
     if proxy:
         kw["proxy"] = proxy
     return launch(**kw)
@@ -148,6 +195,7 @@ def launch_persistent_context(profile_dir, *, fingerprint=None, proxy=None,
             if name == "cloakbrowser":
                 from cloakbrowser import launch_persistent_context as _launch
                 kw = {"headless": headless, "humanize": True, "args": args}
+                kw.update(launch_options())
                 if proxy:
                     kw["proxy"] = proxy
                 return _launch(profile_dir, **kw)
@@ -155,6 +203,8 @@ def launch_persistent_context(profile_dir, *, fingerprint=None, proxy=None,
                 from playwright.sync_api import sync_playwright
                 pw = sync_playwright().start()
                 kw = {"headless": headless, "args": args}
+                # Playwright 的 launch_persistent_context 收 locale/timezone_id
+                kw.update(context_options())
                 exe = (os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
                        or os.environ.get("CLOAKBROWSER_BINARY_PATH"))
                 if exe and os.path.exists(exe):

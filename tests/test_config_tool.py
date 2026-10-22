@@ -505,6 +505,57 @@ class BrowserStateDirKeyTests(unittest.TestCase):
                     {"BROWSER_STATE_DIR": raw}).to_env_map()
                 self.assertEqual(env["BROWSER_STATE_DIR"], "logs/browser-state")
 
+class BrowserGeoKeyTests(unittest.TestCase):
+    """`BROWSER_TIMEZONE` / `BROWSER_LOCALE`（2026-10-22，P5）的登记一致性。
+
+    和 `BROWSER_STATE_DIR` 同一类：界面里没有输入框，但 `core/browser.py` 直读
+    `.env`。漏登记就会"GUI 保存一次，时区就没了" —— 程序回落到系统时区
+    （Asia/Shanghai），而出口在香港，风控看到的是自相矛盾的一台机器。
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_defaults_match_runtime(self):
+        from core import browser
+
+        self.assertEqual(models.DEFAULT_BROWSER_LOCALE, browser.DEFAULT_LOCALE)
+        self.assertEqual(models.DEFAULT_BROWSER_TIMEZONE, "",
+                         "默认必须留空 = 跟系统时区走，不能替用户猜一个城市")
+
+    def test_keys_are_registered_and_emitted(self):
+        for key in ("BROWSER_TIMEZONE", "BROWSER_LOCALE"):
+            self.assertIn(key, models.BASE_ENV_KEYS)
+        env = models.Config.from_env_map({}).to_env_map()
+        self.assertEqual(env["BROWSER_TIMEZONE"], "")
+        self.assertEqual(env["BROWSER_LOCALE"], "zh-CN")
+
+    def test_manual_values_survive_a_save(self):
+        env = models.Config.from_env_map({
+            "BROWSER_TIMEZONE": "Asia/Hong_Kong",
+            "BROWSER_LOCALE": "zh-HK",
+        }).to_env_map()
+        self.assertEqual(env["BROWSER_TIMEZONE"], "Asia/Hong_Kong")
+        self.assertEqual(env["BROWSER_LOCALE"], "zh-HK")
+
+    def test_blank_locale_falls_back_but_blank_timezone_is_legal(self):
+        """时区清空 = 跟系统时区（合法动作）；语言清空 = 回落到 zh-CN。"""
+        env = models.Config.from_env_map({
+            "BROWSER_TIMEZONE": "   ",
+            "BROWSER_LOCALE": "  ",
+        }).to_env_map()
+        self.assertEqual(env["BROWSER_TIMEZONE"], "")
+        self.assertEqual(env["BROWSER_LOCALE"], "zh-CN")
+
+    def test_example_file_registers_them(self):
+        sample = (self.ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("BROWSER_TIMEZONE=", sample)
+        self.assertIn("BROWSER_LOCALE=zh-CN", sample)
+
+    def test_docs_mention_them(self):
+        text = (self.ROOT / "docs/deploy.md").read_text(encoding="utf-8")
+        self.assertIn("BROWSER_TIMEZONE", text)
+
+
 class ScheduleTimesSurviveSaveTests(unittest.TestCase):
     """面板/手改的发送时间与抖动窗口，GUI 保存时不能被静默改写。
 

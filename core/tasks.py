@@ -151,18 +151,27 @@ def _entry(friend, r, dry_run):
 
 
 def _new_context(browser, state):
-    """开一个任务上下文；有状态快照就带上去。
+    """开一个任务上下文；有状态快照就带上去，语言/时区与浏览器启动参数一致。
 
-    真实浏览器（Playwright / cloakbrowser）的 new_context() 收 storage_state；
-    测试里的假浏览器只收 self，多给一个关键字就是 TypeError —— 那就退回到不带
-    快照的调用。这一层是「锦上添花」，不能让它把整轮发送变成失败。
+    真实浏览器（Playwright / cloakbrowser）的 new_context() 收 storage_state 和
+    locale/timezone_id；测试里的假浏览器多半只收 self，多给一个关键字就是
+    TypeError —— 那就逐级退让（先丢语言/时区、再丢快照）。这一层是「锦上添花」，
+    不能让它把整轮发送变成失败。
     """
+    from core import browser as browser_mod
+    extra = browser_mod.context_options()
     if state:
         try:
-            return browser.new_context(storage_state=state)
+            return browser.new_context(storage_state=state, **extra)
         except TypeError:
-            logger.debug("⚠️ 这个浏览器实现不支持 new_context(storage_state=...)，本轮不带快照")
-    return browser.new_context()
+            try:
+                return browser.new_context(storage_state=state)
+            except TypeError:
+                logger.debug("⚠️ 这个浏览器实现不支持 new_context(storage_state=...)，本轮不带快照")
+    try:
+        return browser.new_context(**extra)
+    except TypeError:
+        return browser.new_context()
 
 
 def do_user_task(browser, username, cookies, targets, unique_id=None,

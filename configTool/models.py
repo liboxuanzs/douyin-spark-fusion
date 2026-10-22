@@ -39,6 +39,10 @@ DEFAULT_PROXY_ADDRESS = ""
 # 保存一次就把 .env 里这一行删掉 —— 程序回落到同一个默认值，所以不报错，
 # 只是"我明明设过"变成静默失效。
 DEFAULT_BROWSER_STATE_DIR = "logs/browser-state"
+# 浏览器语言/时区（core/browser.py 直读，界面没有输入框）。时区留空 = 跟系统时区
+# 走；语言留空 = zh-CN。两者都必须登记，否则 GUI 保存一次就从 .env 里消失。
+DEFAULT_BROWSER_TIMEZONE = ""
+DEFAULT_BROWSER_LOCALE = "zh-CN"
 DEFAULT_RUN_TIME = "09:00:00"
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_MESSAGE_TEMPLATE = "[盖瑞]今日火花[加一]\n—— [右边] 每日一言 [左边] ——\n[API]"
@@ -103,6 +107,10 @@ BASE_ENV_KEYS = [
     # 浏览器状态快照目录：core/browser_state.py 直读，界面没有输入框；
     # 读回来再写回去，GUI 保存不会把它从 .env 里抹掉。
     "BROWSER_STATE_DIR",
+    # 浏览器语言/时区：同样是「界面没有输入框、但必须原样写回去」的键，
+    # 漏了它们，用户手改的 BROWSER_TIMEZONE 会被一次保存抹成空。
+    "BROWSER_TIMEZONE",
+    "BROWSER_LOCALE",
     # CRON_* 只有 Docker 定时器（docker/entrypoint-cron.sh）读，
     # 但它就是"到点了叫醒程序"的那个闹钟，删了 Docker 部署就不发消息了 → 保留。
     # ⚠️ 光有 CRON_* 不够：程序内的发送闸门只认 TASK_SCHEDULE_TIMES（见下），
@@ -332,6 +340,9 @@ class Config:
     # 浏览器状态快照目录（见 DEFAULT_BROWSER_STATE_DIR）。**空串回落默认值**：
     # 不能像 PROXY_ADDRESS 那样"空就写空"，否则等于把快照写到仓库根。
     browser_state_dir: str = DEFAULT_BROWSER_STATE_DIR
+    # 浏览器时区（空 = 系统时区）与语言（空 = zh-CN）。
+    browser_timezone: str = DEFAULT_BROWSER_TIMEZONE
+    browser_locale: str = DEFAULT_BROWSER_LOCALE
     run_time: str = DEFAULT_RUN_TIME
     tz: str = DEFAULT_TZ
     # 内存里保存真实换行，写盘时才转成字面 \n
@@ -391,6 +402,11 @@ class Config:
             # （空串回落默认值，理由见 DEFAULT_BROWSER_STATE_DIR 的注释）。
             "BROWSER_STATE_DIR": (self.browser_state_dir or "").strip()
             or DEFAULT_BROWSER_STATE_DIR,
+            # 时区留空是**合法值**（= 跟系统时区走），这里不能像上面那样回落默认
+            # 值，否则用户特意清空的动作会被改写。
+            "BROWSER_TIMEZONE": (self.browser_timezone or "").strip(),
+            "BROWSER_LOCALE": (self.browser_locale or "").strip()
+            or DEFAULT_BROWSER_LOCALE,
             # ① Docker 闹钟：docker/entrypoint-cron.sh 生成 cron 表达式时读这三个。
             #    ⚠️ systemd 部署下**完全无效**（没有任何 systemd 单元读它们）。
             "CRON_HOUR": hour,
@@ -560,6 +576,10 @@ class Config:
             # BROWSER_STATE_DIR= 会把快照写到仓库根）。
             browser_state_dir=text("BROWSER_STATE_DIR", DEFAULT_BROWSER_STATE_DIR).strip()
             or DEFAULT_BROWSER_STATE_DIR,
+            # 时区允许为空（= 系统时区）；语言为空时回落到 zh-CN。
+            browser_timezone=text("BROWSER_TIMEZONE", DEFAULT_BROWSER_TIMEZONE).strip(),
+            browser_locale=text("BROWSER_LOCALE", DEFAULT_BROWSER_LOCALE).strip()
+            or DEFAULT_BROWSER_LOCALE,
             run_time=run_time,
             tz=text("TZ", DEFAULT_TZ) or DEFAULT_TZ,
             # 磁盘上是字面 \n，换回真实换行方便在文本框里编辑。

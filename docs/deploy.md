@@ -112,6 +112,8 @@ cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh '我的新口
 | `WEBUI_DEFAULT_DRY_RUN` | `off` | 面板"立即运行"默认选中的档位（`off`/`select`/`full`）；只是默认值，点按钮前仍能改 |
 | `LOGIN_PROFILE_DIR` | `logs/login-profile` | 面板扫码登录用的浏览器资料目录；**等价于凭据**，别进备份/别共享 |
 | `BROWSER_STATE_DIR` | `logs/browser-state` | 每个账号的浏览器状态快照（`<抖音号>.json`，发送时挂上去，让每轮都还是同一台设备）；**等价于凭据**。删掉不炸，只是下一个账号首次运行会以新设备身份重新登录一次 |
+| `BROWSER_TIMEZONE` | 空 | 浏览器自报的时区（IANA 名）。**留空 = 跟服务器系统时区走**；要和出口 IP 对得上 —— 这台系统时区 `Asia/Shanghai`、出口在香港，所以生产写 `Asia/Hong_Kong`。写错只告警、退回系统时区，不影响发送 |
+| `BROWSER_LOCALE` | `zh-CN` | 浏览器自报的语言（BCP 47），落到 `--lang` 与每个上下文的 `locale` |
 | `QR_LOGIN_TTL_SECONDS` | `300` | 面板扫码登录的二维码有效期（秒） |
 | `FRIEND_SCAN_TIMEOUT_SECONDS` | `300` | 面板"读取好友列表"单次扫描的超时（秒）；超时标成读取失败，已读到的部分仍可用 |
 
@@ -289,6 +291,57 @@ cd /opt/douyin-spark-fusion
   回填只写快照、不动 `.env`：同一份会话（`same_session` 为真）下一轮直接沿用；不同则仍注入 `.env` 的票、
   设备号取快照里的。2026-10-22 线上按这个办法回填了两个账号，并用真实浏览器各跑一遍门禁：都是
   `READY`，`web_runtime_security_uid` 与登录资料目录一致。
+
+### 浏览器时区与语言
+
+浏览器会自报时区（`Intl.DateTimeFormat().resolvedOptions().timeZone`、`Date` 偏移）和语言
+（`navigator.language`、请求头 `Accept-Language`）。这台服务器的系统时区是 `Asia/Shanghai`，
+但实测出口 IP 在香港（HGC 住宅宽带，`223.19.25.170`），UA 又自称 Windows —— **时区和 IP 不在同一地**，
+是风控里最便宜的一条对照。所以生产 `.env` 里显式写：
+
+```dotenv
+BROWSER_TIMEZONE=Asia/Hong_Kong
+BROWSER_LOCALE=zh-CN
+```
+
+- `BROWSER_TIMEZONE` 留空 = 跟服务器系统时区走；写错名字只记一条 warning、退回系统时区，
+  不会让发送失败（`core/browser.py::browser_timezone`）。
+- `BROWSER_LOCALE` 留空 = `zh-CN`。语言不必跟着 IP 归属地改：香港 IP 上简体中文完全正常，
+  抖音的主要语言就是简体。
+- 换代理、搬家、出口 IP 变了以后**要一起改时区**，否则又会自相矛盾。
+- 这两个键**界面里没有输入框**，只能编辑 `.env`；configTool 已登记它们，GUI 保存不会抹掉。
+- 验收：真机页面里 `Intl.DateTimeFormat().resolvedOptions().timeZone` 等于配置值、
+  `navigator.language` 等于 `BROWSER_LOCALE`；连续两轮不变。
+
+### 字体（可选，但推荐）
+
+Windows UA 的浏览器如果拿不到 `Segoe UI` / `Calibri` / `Cambria`，fontconfig 会回落到 Noto / DejaVu，
+同一段文字量出来的宽度就和真 Windows 不同（canvas / 文字测量都能探到）。2026-10-22 在 192.168.15.172
+上做了三件事，都是**操作系统级**的，不在本仓库里：
+
+```bash
+sudo apt-get install -y fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2
+
+# Selawik：微软官方的 Segoe UI 度量兼容替代（OFL）
+curl -sSLo /tmp/selawik.zip https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip
+sudo mkdir -p /tmp/selawik /usr/share/fonts/truetype/selawik
+sudo unzip -oq /tmp/selawik.zip -d /tmp/selawik
+sudo find /tmp/selawik -iname "*.ttf" -exec cp -f {} /usr/share/fonts/truetype/selawik/ \;
+sudo tee /etc/fonts/conf.d/60-selawik.conf >/dev/null <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <alias binding="same"><family>Segoe UI</family><prefer><family>Selawik</family></prefer></alias>
+</fontconfig>
+EOF
+sudo fc-cache -f
+fc-match "Segoe UI"      # → selawk.ttf: "Selawik" "Regular"
+```
+
+验收：真机页面里用 72px 量 `mmmmmmmmmmWWWWWWWWWWiiiiiiiiii`，Calibri 1380.94、Cambria 1423.09、
+Segoe UI 1467.08 —— 三者不再等于同一个"通用兜底"宽度（1436.77）。
+CJK 仍有一条已知差异：`SimSun` 等于 `Noto Serif CJK SC`（1690.92）、`SimHei` 等于
+`Noto Sans CJK SC`（1496.89），没有可自由分发的宋体/黑体度量兼容字体。
 
 ---
 

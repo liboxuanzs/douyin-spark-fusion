@@ -183,6 +183,44 @@ A 的做法（`core/automation.py:27-40`）是 12 个中文关键词 + `bounding
 验收口径：真机上 `logs/browser-state/<uid>.json` 生成且只有抖音域的 cookie；两轮之间
 `x-web-secsdk-uid` 不变；跑完 `.env` 的 `COOKIES_<uid>` 有刷新（设备号那几个值会变）。
 这两份状态文件**等价于凭据**（`0600` / 目录 `0700`），别进备份、别提交。
+
+### 6.3 时区、语言与出口 IP 对齐（2026-10-22）
+
+浏览器会自报时区（`Intl.DateTimeFormat().resolvedOptions().timeZone`、`Date` 偏移）和语言
+（`navigator.language`、`Accept-Language`）。此前 `core/browser.py` 只传指纹种子，这两项跟着
+服务器走：系统时区 `Asia/Shanghai`，而实测出口 IP 是香港 HGC 住宅宽带（`223.19.25.170`），
+UA 又自称 Windows —— **时区和 IP 不在同一地**，是风控里最便宜的一条对照。
+
+改法：cloakbrowser 的 `launch()` / `launch_persistent_context()` 本来就收 `timezone` 与 `locale`
+（分别落到 `--fingerprint-timezone` 与 `--lang`），`core/browser.py` 现在把这两个参数透传下去：
+
+- `browser_locale()`：读 `BROWSER_LOCALE`，空 = `zh-CN`；
+- `browser_timezone()`：读 `BROWSER_TIMEZONE`（IANA 名），空 = 不传、让浏览器用系统时区；
+  写错名字用 `zoneinfo.ZoneInfo` 校验失败只记一条 warning、退回系统时区，**不许拖垮发送**；
+- `launch_options()` / `context_options()`：前者给 cloakbrowser（参数名 `timezone`），后者给
+  Playwright 的 `new_context()` / `launch_persistent_context()`（参数名 `timezone_id`）；
+- `core/tasks._new_context()` 开每个任务的上下文时也带上，否则页面里的时区/语言又回到默认值。
+
+为什么不自动按出口 IP 推（cloakbrowser 有 `geoip=True`）：它要额外装 `geoip2`、首次下载 ~70MB
+GeoLite2 库，解析失败还会抛异常/加延迟；我们的出口是固定的，显式配置更稳、可审计。
+
+实测（同一指纹种子、Windows 平台）：不传时 `Intl` 是 `Asia/Shanghai`；传
+`timezone=Asia/Hong_Kong, locale=zh-HK` 后 `Intl` 变成 `Asia/Hong_Kong`、`navigator.language`
+变成 `zh-HK`、偏移 −480，UA 仍是 Windows Chrome/146 —— 参数确实生效。生产只改时区、语言保持
+`zh-CN`：香港 IP 上简体中文完全正常，抖音的主要语言就是简体。
+
+**字体**：浏览器把 Windows 字体名都报告为"可用"，但真实字宽会漏出来（72px、同一串测试文本）。
+2026-10-22 在服务器上补了度量兼容字体：`fonts-crosextra-carlito`（Calibri）、
+`fonts-crosextra-caladea`（Cambria）、`fonts-liberation2`（Arial/Times），以及从微软官方
+[Selawik 发布页](https://github.com/microsoft/Selawik) 装的 Selawik + fontconfig 别名
+（`Segoe UI` → `Selawik`）—— 它是微软自己的 Segoe UI 度量兼容替代。装完实测：Calibri
+1436.77 → 1380.94、Cambria 1436.77 → 1423.09、Segoe UI 1436.77 → 1467.08（不再落在同一个
+"通用兜底"宽度上）。**只剩 CJK 一条没修完**：`SimSun` 仍等于 `Noto Serif CJK SC`（1690.92）、
+`SimHei` 仍等于 `Noto Sans CJK SC`（1496.89）—— 没有可自由分发的宋体/黑体度量兼容字体，
+这属于服务器固定资产、不是本项目代码能改的，留在"已知差异"里。
+
+验收口径：真机页面里 `Intl.DateTimeFormat().resolvedOptions().timeZone` 与 `navigator.language`
+等于 `.env` 里配置的两个值；请求头 `Accept-Language` 跟着变；连续两轮不变。
 ## 7. 仪表盘（借鉴 B 的形态）
 
 B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入强耦合。融合版**重写一层薄 webui**，

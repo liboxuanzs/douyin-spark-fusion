@@ -265,6 +265,39 @@ class TaskStateTests(unittest.TestCase):
         self.assertEqual(out["status"], "ok")
         self.assertFalse(os.path.exists(os.path.join(self.state_dir, "None.json")))
 
+    def test_新上下文带上语言与时区(self):
+        """发送上下文必须和登录那一台说同一个语言、同一个时区（P5）。
+
+        `new_context` 是**每个任务现开**的，光把参数传给浏览器启动还不够：
+        这里漏了，页面里的 Intl/navigator.language 就回到服务器默认值。
+        """
+        got = {}
+
+        class _CapturingBrowser:
+            def new_context(self, **kwargs):
+                got.update(kwargs)
+                return object()
+
+        with mock.patch.dict(os.environ, {"BROWSER_TIMEZONE": "Asia/Hong_Kong"}):
+            tasks_mod._new_context(_CapturingBrowser(), None)
+        self.assertEqual(got.get("locale"), "zh-CN")
+        self.assertEqual(got.get("timezone_id"), "Asia/Hong_Kong")
+        self.assertNotIn("storage_state", got)
+
+    def test_新上下文同时带快照与语言时区(self):
+        got = {}
+
+        class _CapturingBrowser:
+            def new_context(self, **kwargs):
+                got.update(kwargs)
+                return object()
+
+        state = _state([_cookie()])
+        with mock.patch.dict(os.environ, {"BROWSER_TIMEZONE": "Asia/Hong_Kong"}):
+            tasks_mod._new_context(_CapturingBrowser(), state)
+        self.assertEqual(got.get("storage_state"), state)
+        self.assertEqual(got.get("timezone_id"), "Asia/Hong_Kong")
+
 
 if __name__ == "__main__":
     unittest.main()

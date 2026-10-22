@@ -159,5 +159,82 @@ class DiskCacheLimitTests(unittest.TestCase):
         )
 
 
+class BrowserGeoOptionTests(unittest.TestCase):
+    """语言/时区必须跟出口 IP 所在的地方对得上（2026-10-22，P5）。
+
+    实测这台机器的出口在香港 HGC 住宅宽带（223.19.25.170），而系统时区是
+    Asia/Shanghai；UA 又自称 Windows —— 时区和 IP 对不上，是风控里最便宜的一条
+    对照。这里钉住三件事：环境变量怎么读（空/写错都不许抛）、cloakbrowser 启动
+    真的带上参数、Playwright 回落时上下文也带上（两边的参数名不一样：
+    timezone vs timezone_id）。
+    """
+
+    def test_defaults_are_system_timezone_and_zh_cn(self):
+        with mock.patch.dict("os.environ", {"BROWSER_TIMEZONE": "", "BROWSER_LOCALE": ""}):
+            self.assertEqual(browser_mod.browser_locale(), "zh-CN")
+            self.assertIsNone(browser_mod.browser_timezone(),
+                              "留空 = 跟系统时区，不能瞎猜一个")
+            self.assertEqual(browser_mod.launch_options(), {"locale": "zh-CN"},
+                             "没配时区就别往浏览器传 timezone，让它自己用系统的")
+
+    def test_values_come_from_env(self):
+        env = {"BROWSER_TIMEZONE": "Asia/Hong_Kong", "BROWSER_LOCALE": "zh-HK"}
+        with mock.patch.dict("os.environ", env):
+            self.assertEqual(browser_mod.launch_options(),
+                             {"locale": "zh-HK", "timezone": "Asia/Hong_Kong"})
+            self.assertEqual(browser_mod.context_options(),
+                             {"locale": "zh-HK", "timezone_id": "Asia/Hong_Kong"},
+                             "Playwright 的 new_context 管这个参数叫 timezone_id")
+
+    def test_invalid_timezone_only_warns(self):
+        """写错一个时区名，不该把整轮发送变成失败。"""
+        with mock.patch.dict("os.environ", {"BROWSER_TIMEZONE": "Mars/Olympus"}):
+            with self.assertLogs("browser", level="WARNING") as logs:
+                self.assertIsNone(browser_mod.browser_timezone())
+            self.assertIn("不是合法时区", "\n".join(logs.output))
+
+    def test_cloakbrowser_launch_carries_them(self):
+        captured = {}
+        fake = types.ModuleType("cloakbrowser")
+        fake.launch = lambda **kw: captured.update(kw) or object()
+        env = {"BROWSER_TIMEZONE": "Asia/Hong_Kong", "BROWSER_LOCALE": "zh-CN"}
+        with mock.patch.dict(sys.modules, {"cloakbrowser": fake}):
+            with mock.patch.dict("os.environ", env):
+                browser_mod._launch_cloakbrowser(headless=True, args=["--x"], proxy=None)
+        self.assertEqual(captured["timezone"], "Asia/Hong_Kong")
+        self.assertEqual(captured["locale"], "zh-CN")
+        self.assertTrue(captured["humanize"], "别为了传时区把拟人化弄丢")
+
+    def test_persistent_cloakbrowser_context_carries_them(self):
+        captured = {}
+        fake = types.ModuleType("cloakbrowser")
+        fake.launch_persistent_context = lambda *a, **kw: captured.update(kw) or object()
+        env = {"BROWSER_TIMEZONE": "Asia/Hong_Kong", "BROWSER_BACKEND": "cloakbrowser"}
+        with mock.patch.dict(sys.modules, {"cloakbrowser": fake}):
+            with mock.patch.dict("os.environ", env):
+                browser_mod.launch_persistent_context("/tmp/whatever")
+        self.assertEqual(captured["timezone"], "Asia/Hong_Kong")
+        self.assertEqual(captured["locale"], "zh-CN")
+
+    def test_persistent_playwright_fallback_carries_them(self):
+        captured = {}
+        pw = types.SimpleNamespace()
+        pw.stop = lambda: None
+        chromium = types.SimpleNamespace()
+        chromium.launch_persistent_context = lambda _dir, **kw: captured.update(kw) or object()
+        pw.chromium = chromium
+        sync_mod = types.ModuleType("playwright.sync_api")
+        sync_mod.sync_playwright = lambda: types.SimpleNamespace(start=lambda: pw)
+        pkg = types.ModuleType("playwright")
+        pkg.__path__ = []
+        env = {"BROWSER_BACKEND": "playwright", "BROWSER_TIMEZONE": "Asia/Hong_Kong"}
+        with mock.patch.dict(sys.modules, {"playwright": pkg, "playwright.sync_api": sync_mod}):
+            with mock.patch.dict("os.environ", env):
+                with mock.patch.object(browser_mod, "_KEEPALIVE", []):
+                    browser_mod.launch_persistent_context("/tmp/whatever")
+        self.assertEqual(captured.get("timezone_id"), "Asia/Hong_Kong")
+        self.assertEqual(captured.get("locale"), "zh-CN")
+
+
 if __name__ == "__main__":
     unittest.main()
