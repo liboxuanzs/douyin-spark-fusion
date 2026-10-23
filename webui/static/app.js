@@ -242,6 +242,83 @@
 })();
 
 (() => {
+  // 跨页转场兜底：Chrome / Safari 18.2+ 由 CSS 的 @view-transition 接管；
+  // Firefox 等只认 view-transition-name、却会把 @view-transition 整条丢掉，
+  // 结果就是硬切。这里用 CSSStyleSheet 真解析一次那条 at-rule 来判断，
+  // 不支持时只给新页播入场（dsf-enter-in）：旧页先淡出会空出一截背景。
+  const root = document.documentElement;
+  const KEY = "sparkflow-nav";
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  const supportsCrossDocumentVT = () => {
+    try {
+      if (!("CSSStyleSheet" in window)) return false;
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync("@view-transition { navigation: auto; }");
+      return sheet.cssRules.length > 0;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  // 入场类由 base.html 的同步脚本挂上，这里只负责在动画结束后摘掉。
+  const finishEnter = () => root.classList.remove("dsf-page-enter");
+  if (root.classList.contains("dsf-page-enter")) {
+    const shell = document.querySelector(".app-shell");
+    if (shell) {
+      shell.addEventListener("animationend", (event) => {
+        if (event.animationName === "dsf-enter-in") finishEnter();
+      });
+    }
+    window.setTimeout(finishEnter, 900);
+  }
+
+  // 从 bfcache 回来时清掉入场类，避免它一直挂着。
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) root.classList.remove("dsf-page-enter");
+  });
+
+  if (reduce.matches || supportsCrossDocumentVT()) return;
+
+  let leaving = false;
+  const shouldSkip = (link, event) => {
+    if (event.defaultPrevented || event.button !== 0) return true;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return true;
+    if (!link || (link.target && link.target !== "_self")) return true;
+    if (link.hasAttribute("download")) return true;
+    if (link.closest("[data-confirm]")) return true;
+    const href = link.getAttribute("href");
+    if (!href || href.startsWith("#") || href.startsWith("javascript:") || href.startsWith("mailto:")) return true;
+    let url;
+    try {
+      url = new URL(href, location.href);
+    } catch (error) {
+      return true;
+    }
+    if (url.origin !== location.origin) return true;
+    // 同一页面只换 hash 是页内跳转，不该整页淡出。
+    if (url.pathname === location.pathname && url.search === location.search && url.hash) return true;
+    if (url.href === location.href) return true;
+    return false;
+  };
+
+  document.addEventListener("click", (event) => {
+    if (leaving) return;
+    const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (!link || shouldSkip(link, event)) return;
+    const url = new URL(link.href, location.href);
+    event.preventDefault();
+    try {
+      sessionStorage.setItem(KEY, JSON.stringify({ href: url.href, at: Date.now() }));
+    } catch (error) {
+      // 存储不可用：仍然直接导航，只是新页没法接入场。
+    }
+    leaving = true;
+    location.assign(url.href);
+  });
+})();
+
+(() => {
   const dialog = document.getElementById("confirm-dialog");
   if (!dialog) return;
   const title = document.getElementById("confirm-title");

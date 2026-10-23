@@ -392,18 +392,27 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   `html[data-theme="light"] .login-brand-panel { background: none; }`（`::test_登录页品牌区在浅色下也不画矩形`）。
 - **跨页导航是淡出上浮，不是硬切**：首页 / 运行记录 / 运行日志是三份独立文档，点导航会真的换文档。
   两套样式表都加了跨文档 View Transition（`@view-transition { navigation: auto; }`）：`.sidebar` 与
-  `.mobile-topbar` 用 `view-transition-name` 命名后在转场中原样留在原地；只有 `root` 快照换，旧页 140ms 快退
-  （上移 8px）、新页 300ms 慢入（从下 12px 浮上来），两段同时开始、交叉约 140ms。没有 JS 拦截链接，中键 / 新标签 / 浏览器后退都还是原生行为；
-  不支持这组 CSS 的浏览器直接硬切，不挡路。**极光那层全屏 `.aurora-scene` 不能单独命名** ——
+  `.mobile-topbar` 用 `view-transition-name` 命名后在转场中原样留在原地；只有 `root` 快照换，旧页 160ms 快退
+  （上移 10px）、新页 360ms 慢入（从下 14px 浮上来），两段同时开始、交叉约 160ms。支持时没有 JS 拦截链接，
+  中键 / 新标签 / 浏览器后退都还是原生行为。**极光那层全屏 `.aurora-scene` 不能单独命名** ——
   它会画在 root 快照上面，把页头与页体整块盖住（实测只剩顶栏和背景）。减少动效时还要单独停
-  `::view-transition-*` 的动画：通配 `*` 管不到这些伪元素（`::test_跨页导航有淡出淡入转场` 钉住）。
+  `::view-transition-*` 与 JS 兜底类的动画：通配 `*` 管不到这些伪元素（`::test_跨页导航有淡出淡入转场` 钉住）。
+  但 **`CSS.supports("view-transition-name: none")` 不能用来判断能不能跨文档转场**：Firefox 157 这条是 true、
+  `document.startViewTransition` 也是 function，却把 `@view-transition` 整条丢掉（`CSSStyleSheet.replaceSync` 后
+  `cssRules.length === 0`、`onpagereveal` 也不存在），用户看到的仍是硬切。所以 `app.js` 用 `CSSStyleSheet`
+  真解析一次那条 at-rule，只有解析出规则才交给 CSS；解析不到就切到 JS 兜底 —— 点击内部链接时把目标 URL 写进
+  `sessionStorage`，随即 `location.assign`；新页在 `<head>` 里同步读这个标记、在第一次绘制前挂 `dsf-page-enter`
+  播 280ms 入场（从 82% 不透明、上移 10px 浮上来，避免整页一闪成白），再在 `animationend` 后摘掉。**兜底不做旧页离场**：
+  旧页先淡到全透明再换文档，屏幕会空出一截背景（实测约 3 帧），只剩新页入场反而更连续。兜底只接管
+  无修饰键的左键、同源、非 `target=_blank`、非 `download`、非 `[data-confirm]`、非纯 hash 的链接；
+  支持 `@view-transition` 的浏览器完全不走这段（`::test_不支持跨文档转场的浏览器也有转场` 钉住）。
 - **版本串**：`asset_version()` 的 mtime 取自 `app.css` + `app-aurora.css` + `app.js`，改哪一套都会换 `?v=`。
 - **测试**：`SkinWebUITestCase` 钉住「两套都完整（>30KB，不是薄薄一层覆盖）、模板里用到的类两套都有样式、
   每张页面都自己同步挑皮肤、皮肤开关桌面与手机各一个、`/static/app-aurora.css` 走静态路由且带 no-cache、
   浅色主题的对比度（光谱底上的字色、次要文字）、配置表列宽不随卡片塌、嵌套分段控件的内外圆角是同心圆、
   分段控件的滑轨与胶囊有色差、四张折叠卡只留一层圆角、材质令牌与颗粒层、KPI 渐隐色条、实心红真发按钮、
   经典皮肤也补了真发按钮与皮肤图标、登录页浅色覆盖、减少动效时连延迟一起停、背景层视差、
-  跨页导航的淡出上浮转场、连续切皮肤不留第二张表（加载失败还要回滚）、浅色首屏不闪深色」；
+  跨页导航的淡出上浮转场（含 `@view-transition` 被丢弃时的 JS 兜底）、连续切皮肤不留第二张表（加载失败还要回滚）、浅色首屏不闪深色」；
   上面两条仓规对新皮肤同样生效。
 
 ## 8. "面板说的"和"工具真做的"必须一致

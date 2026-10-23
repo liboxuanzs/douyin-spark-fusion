@@ -43,6 +43,28 @@
         if (skin === "aurora") link.setAttribute("href", aurora);
       })();
     </script>
+    {# 跨页转场：不支持 @view-transition 的浏览器（Firefox 等）由 app.js 走 JS 兜底。
+       新页必须在第一次绘制前就把入场类挂到 <html> 上，否则会先闪一帧完整页面再开始动画。 #}
+    <script>
+      (function () {
+        try {
+          if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+            // 顺手清掉可能残留的标记，免得之后关掉减少动效时误播一次。
+            try { sessionStorage.removeItem("sparkflow-nav"); } catch (error) {}
+            return;
+          }
+          var raw = sessionStorage.getItem("sparkflow-nav");
+          if (!raw) return;
+          sessionStorage.removeItem("sparkflow-nav");
+          var mark = JSON.parse(raw);
+          if (!mark || typeof mark.at !== "number" || Date.now() - mark.at > 4000) return;
+          if (mark.href !== location.href) return;
+          document.documentElement.classList.add("dsf-page-enter");
+        } catch (error) {
+          // sessionStorage 被禁用：不播入场，保持硬切。
+        }
+      })();
+    </script>
   </head>
   <body data-page="{% block page_key %}dashboard{% endblock %}">
     <header class="mobile-topbar">

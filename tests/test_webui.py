@@ -4392,10 +4392,15 @@ class SkinWebUITestCase(unittest.TestCase):
             for token in (
                 "::view-transition-old(root)",
                 "dsf-page-out",
-                "translateY(-8px)",
+                "translateY(-10px)",
+                "animation: 160ms",
                 "::view-transition-new(root)",
                 "dsf-page-in",
-                "translateY(12px)",
+                "translateY(14px)",
+                "animation: 360ms",
+                "html.dsf-page-enter .app-shell",
+                "dsf-enter-in",
+                "animation: 280ms",
             ):
                 self.assertIn(token, css, f"{path.name} 缺 {token}")
             tail = css.rsplit("@media (prefers-reduced-motion: reduce) {", 1)[1]
@@ -4412,6 +4417,39 @@ class SkinWebUITestCase(unittest.TestCase):
             self.AURORA.read_text(encoding="utf-8"),
             "全屏背景被单独命名了，转场会把正文盖住",
         )
+
+    def test_不支持跨文档转场的浏览器也有转场(self) -> None:
+        """Firefox 157 的 `CSS.supports("view-transition-name: none")` 是 true，
+        但 `CSSStyleSheet` 解析 `@view-transition` 得到 0 条规则，`onpagereveal` 也没有 ——
+        只看 supports 会误判成"支持"，于是用户看到的仍是硬切。检测必须真解析 at-rule；
+        不支持时走 JS 兜底：只给新页播入场（旧页先淡出会在换文档时空出一截背景），
+        入场类在新页第一次绘制前由 base.html 同步挂。"""
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        for token in (
+            'sheet.replaceSync("@view-transition { navigation: auto; }")',
+            "sheet.cssRules.length > 0",
+            "sessionStorage.setItem",
+            "dsf-page-enter",
+            "dsf-enter-in",
+            "location.assign",
+            "prefers-reduced-motion: reduce",
+        ):
+            self.assertIn(token, script)
+        base = (REPO_ROOT / "webui" / "templates" / "base.html").read_text(encoding="utf-8")
+        for token in (
+            'sessionStorage.getItem("sparkflow-nav")',
+            'document.documentElement.classList.add("dsf-page-enter")',
+            "mark.href !== location.href",
+        ):
+            self.assertIn(token, base)
+        for path in (self.CLASSIC, self.AURORA):
+            css = path.read_text(encoding="utf-8")
+            self.assertIn("html.dsf-page-enter .app-shell", css)
+            self.assertNotIn(
+                "html.dsf-page-leave .app-shell", css,
+                "兜底不该播旧页离场：换文档时会先空出一截背景",
+            )
+        self.assertNotIn("dsf-page-leave", script, "JS 兜底还挂着离场类")
 
     def test_背景层跟着指针做轻微视差(self) -> None:
         """三层光斑按深浅各给一个系数，位移由 JS 直接算成 px 写进 --tx/--ty。"""
