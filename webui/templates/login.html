@@ -6,6 +6,8 @@
     <meta name="color-scheme" content="dark light">
     <meta name="robots" content="noindex, nofollow">
     <title>登录 | 续火花控制台</title>
+    {# 同 base.html：opt-in 内联，别等外链 CSS。 #}
+    <style>@view-transition { navigation: auto; }</style>
     <link rel="icon" href="data:,">
     {# 主题：<html data-theme="dark"> 是静态默认，而恢复存过的浅色要等 app.js 的 defer ——
        浅色用户每次打开都会先闪一帧深色。和下面皮肤那段同一套做法：同步执行，只改属性。 #}

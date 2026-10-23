@@ -260,13 +260,16 @@ B 的 `webui/` 不能直接搬：它和 noVNC / 账号库 / 主机 cron 注入�
 浅色卡面从 66% 白提到 80% 白就是这一步的直接结果：原来粉紫极光整块透上来，白卡染成淡紫、字灰到 4:1 边缘。
 另有一类坑与"主题 × 皮肤"正交无关：版式层用 `background: none` 抹装饰时**特异性必须够**，否则浅色主题那条 (0, 2, 0) 的渐变会压过
 版式层的 (0, 1, 0)，小图上肉眼看不出、浅色下就是一块没有圆角的硬边白矩形（登录页品牌区）。
-页面之间也不再硬切：两套样式表都用跨文档 View Transition（`@view-transition { navigation: auto; }`）把顶栏留在原地，
+页面之间也不再硬切：两套样式表与 `base.html` / `login.html` 的 `<head>` 都用跨文档 View Transition（`@view-transition { navigation: auto; }`）把顶栏留在原地，
 只让页头与页体淡出、上浮；全屏极光背景**不能**单独命名，否则它会画在 root 快照上面把正文盖住 —— 这条是实测出来的
 （转场中只剩顶栏和背景）。减少动效时要单独停 `::view-transition-*` 的动画，通配 `*` 管不到这些伪元素。
-**能力检测不能只看 `CSS.supports("view-transition-name")`**：Firefox 157 这条为 true，却会把 `@view-transition`
-整条丢掉，跨文档转场根本不发生。现在用 `CSSStyleSheet.replaceSync` 真解析那条 at-rule，解析不到就由 JS 走
-「sessionStorage 标记 + 新页首绘前入场类」的兜底；**不做旧页离场** —— 旧页先淡到全透明再换文档，中间会空出
-一截背景，只剩新页从半透明浮上来更连续。支持时仍完全交给原生，不拦链接。
+这条 opt-in 必须内联在 `<head>`：外链 CSS 在新文档里可能还没解析完，Chrome 会报
+`ViewTransition opt-in disabled` 并硬切；外链那份只负责 `::view-transition-*` 与命名。
+**“支持”不能只看 `CSS.supports("view-transition-name")`，也不能只看 `CSSStyleSheet` 解析**：Firefox 157 的
+supports 为 true、`startViewTransition` 也是 function，却会把 `@view-transition` 整条丢掉；部分 Chromium 分支还会
+「解析得出、实际不播」。现在按结果判断：同源左键导航统一写 `sessionStorage` 标记后 `location.assign`，新页首绘前
+先挂入场类，`pagereveal` 带 `viewTransition` 就把类摘掉（只留原生），没带就留下类播 280ms 入场；**不做旧页离场** ——
+旧页先淡到全透明再换文档，中间会空出一截背景，只剩新页从半透明浮上来更连续。中键、新标签、后退仍走原生。
 切换机制、层叠约定与两条仓规（不许字符串拼 DOM、不许任何外链）见 [docs/webui.md](docs/webui.md) 第 7 节。
 
 ## 8. 部署形态（`本机`）

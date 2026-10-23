@@ -242,24 +242,14 @@
 })();
 
 (() => {
-  // 跨页转场兜底：Chrome / Safari 18.2+ 由 CSS 的 @view-transition 接管；
-  // Firefox 等只认 view-transition-name、却会把 @view-transition 整条丢掉，
-  // 结果就是硬切。这里用 CSSStyleSheet 真解析一次那条 at-rule 来判断，
-  // 不支持时只给新页播入场（dsf-enter-in）：旧页先淡出会空出一截背景。
+  // 跨页转场兜底：不再用 CSS.supports / CSSStyleSheet 猜浏览器支不支持——
+  // Firefox 157 和部分 Chromium 分支会"解析得出 @view-transition、实际不播"。
+  // 做法是每次同源导航都写标记，新页 base.html 先挂上入场类；真原生转场发生时
+  // pagereveal 带 viewTransition 在首帧前把类摘掉，没发生就留下类播 280ms 入场。
+  // 只做新页入场、不做旧页离场：旧页先淡出会空出一截背景。
   const root = document.documentElement;
   const KEY = "sparkflow-nav";
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-  const supportsCrossDocumentVT = () => {
-    try {
-      if (!("CSSStyleSheet" in window)) return false;
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync("@view-transition { navigation: auto; }");
-      return sheet.cssRules.length > 0;
-    } catch (error) {
-      return false;
-    }
-  };
 
   // 入场类由 base.html 的同步脚本挂上，这里只负责在动画结束后摘掉。
   const finishEnter = () => root.classList.remove("dsf-page-enter");
@@ -278,7 +268,7 @@
     if (event.persisted) root.classList.remove("dsf-page-enter");
   });
 
-  if (reduce.matches || supportsCrossDocumentVT()) return;
+  if (reduce.matches) return;
 
   let leaving = false;
   const shouldSkip = (link, event) => {

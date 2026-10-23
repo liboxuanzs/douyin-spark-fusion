@@ -7,6 +7,10 @@
     <meta name="color-scheme" content="dark light">
     <meta name="robots" content="noindex, nofollow">
     <title>{% block title %}续火花{% endblock %}</title>
+    {# 跨文档转场的 opt-in 必须内联、且越早越好：外链样式表在换文档的瞬间可能还没解析完，
+       Chrome 会以 "ViewTransition opt-in disabled" 中止转场，表现就是硬切。
+       外链 CSS 里的同一条规则保留，负责 ::view-transition-* 的动画与命名。 #}
+    <style>@view-transition { navigation: auto; }</style>
     {# 空图标：浏览器默认会去要 /favicon.ico，本服务没有这个路由，日志里每次
        访问都会多一条 404。用空的 data URI 就地满足它，不发任何请求。 #}
     <link rel="icon" href="data:,">
@@ -43,8 +47,12 @@
         if (skin === "aurora") link.setAttribute("href", aurora);
       })();
     </script>
-    {# 跨页转场：不支持 @view-transition 的浏览器（Firefox 等）由 app.js 走 JS 兜底。
-       新页必须在第一次绘制前就把入场类挂到 <html> 上，否则会先闪一帧完整页面再开始动画。 #}
+    {# 跨页转场：新页先无条件挂上入场类，再由 pagereveal 决定要不要撤掉。
+       原生跨文档转场真正发生时，pagereveal 会带着 viewTransition 在首帧前触发，
+       这时撤掉入场类，只留原生转场；浏览器只是"看起来支持"（如 Firefox 157，
+       或只解析 @view-transition 却不真正播放的 Chromium 分支）时不会带
+       viewTransition，入场类留下来，由 CSS 播 280ms 兜底入场。
+       这样就不依赖 CSS.supports 或 CSSOM 解析这种会误判的能力检测。 #}
     <script>
       (function () {
         try {
@@ -59,7 +67,12 @@
           var mark = JSON.parse(raw);
           if (!mark || typeof mark.at !== "number" || Date.now() - mark.at > 4000) return;
           if (mark.href !== location.href) return;
-          document.documentElement.classList.add("dsf-page-enter");
+          var root = document.documentElement;
+          root.classList.add("dsf-page-enter");
+          // 真原生转场：首帧前把兜底入场类摘掉，避免和原生转场叠在一起。
+          window.addEventListener("pagereveal", function (event) {
+            if (event.viewTransition) root.classList.remove("dsf-page-enter");
+          }, { once: true });
         } catch (error) {
           // sessionStorage 被禁用：不播入场，保持硬切。
         }

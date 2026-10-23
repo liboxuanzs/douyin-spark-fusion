@@ -4419,15 +4419,16 @@ class SkinWebUITestCase(unittest.TestCase):
         )
 
     def test_不支持跨文档转场的浏览器也有转场(self) -> None:
-        """Firefox 157 的 `CSS.supports("view-transition-name: none")` 是 true，
-        但 `CSSStyleSheet` 解析 `@view-transition` 得到 0 条规则，`onpagereveal` 也没有 ——
-        只看 supports 会误判成"支持"，于是用户看到的仍是硬切。检测必须真解析 at-rule；
-        不支持时走 JS 兜底：只给新页播入场（旧页先淡出会在换文档时空出一截背景），
-        入场类在新页第一次绘制前由 base.html 同步挂。"""
+        """Firefox 157 和部分 Chromium 分支会"解析得出 `@view-transition`、实际不播"，
+        用 `CSS.supports` / `CSSStyleSheet` 猜能力会误判成"支持"，于是仍是硬切。
+        现在改成看结果：新页先挂入场类，真原生转场时 `pagereveal` 带
+        `viewTransition` 在首帧前把类摘掉；没带就留下类，由 CSS 播 280ms 入场。
+        只给新页播入场（旧页先淡出会在换文档时空出一截背景）。
+        另外 `@view-transition` 必须在模板 `<head>` 里内联一份：外链 CSS 在新文档
+        里可能还没解析完，Chrome 会以 "ViewTransition opt-in disabled" 中止转场
+        （实测 simple -> /ops/runs 5/5 失败，内联后 8/8 成功）。"""
         script = self.SCRIPT.read_text(encoding="utf-8")
         for token in (
-            'sheet.replaceSync("@view-transition { navigation: auto; }")',
-            "sheet.cssRules.length > 0",
             "sessionStorage.setItem",
             "dsf-page-enter",
             "dsf-enter-in",
@@ -4435,11 +4436,33 @@ class SkinWebUITestCase(unittest.TestCase):
             "prefers-reduced-motion: reduce",
         ):
             self.assertIn(token, script)
+        self.assertNotIn(
+            "supportsCrossDocumentVT", script,
+            "又用能力检测猜原生转场了：Firefox 157 会误判",
+        )
+        for token in ("new CSSStyleSheet", "replaceSync", "CSS.supports("):
+            self.assertNotIn(
+                token, script,
+                f"又在用 {token} 猜原生转场了：部分 Chromium 分支解析得出却不播",
+            )
         base = (REPO_ROOT / "webui" / "templates" / "base.html").read_text(encoding="utf-8")
+        login = (REPO_ROOT / "webui" / "templates" / "login.html").read_text(encoding="utf-8")
+        # opt-in 必须在 <head> 里内联、且排在外链样式表之前；只靠 app-aurora.css 会输给
+        # 新文档的样式表解析竞态（Chrome: ViewTransition opt-in disabled）。
+        inline_rule = "<style>@view-transition { navigation: auto; }</style>"
+        for name, html in (("base.html", base), ("login.html", login)):
+            self.assertIn(inline_rule, html, f"{name} 没内联转场 opt-in")
+            self.assertLess(
+                html.index(inline_rule), html.index('id="app-stylesheet"'),
+                f"{name} 的 opt-in 排在外链样式表后面了",
+            )
         for token in (
             'sessionStorage.getItem("sparkflow-nav")',
-            'document.documentElement.classList.add("dsf-page-enter")',
+            'root.classList.add("dsf-page-enter")',
             "mark.href !== location.href",
+            'window.addEventListener("pagereveal"',
+            "event.viewTransition",
+            'root.classList.remove("dsf-page-enter")',
         ):
             self.assertIn(token, base)
         for path in (self.CLASSIC, self.AURORA):
