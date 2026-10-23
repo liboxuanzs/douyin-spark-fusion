@@ -3409,3 +3409,34 @@ input[type="time"]:hover::-webkit-calendar-picker-indicator {
     line-height: 1.6;
   }
 }
+
+/* == 22 跨页转场 ========================================================= */
+/* 首页 / 运行记录 / 运行日志是三份独立文档，点导航默认是硬切。
+   这里用跨文档 View Transition：顶栏从整页快照里拿出来原地保留，
+   只有页头与页体淡出、再上浮淡入。不支持这组 CSS 的浏览器直接硬切，不挡路。 */
+@view-transition { navigation: auto; }
+
+/* 名字在两份文档里必须一致；桌面是 .sidebar，窄屏是 .mobile-topbar。 */
+.sidebar { view-transition-name: app-nav; }
+.mobile-topbar { view-transition-name: app-topbar; }
+
+/* 旧页 140ms 先退、新页 300ms 慢落定；两段同时开始，交叉约 140ms，不会先空一帧再出新页。 */
+::view-transition-old(root) {
+  animation: 140ms cubic-bezier(0.4, 0, 1, 1) both dsf-page-out;
+}
+::view-transition-new(root) {
+  animation: 300ms cubic-bezier(0.22, 0.61, 0.36, 1) both dsf-page-in;
+}
+@keyframes dsf-page-out {
+  to { opacity: 0; transform: translateY(-8px); }
+}
+@keyframes dsf-page-in {
+  from { opacity: 0; transform: translateY(12px); }
+}
+
+/* 减少动效：`*` 管不到 view-transition 的伪元素，得单独停一次。 */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+}

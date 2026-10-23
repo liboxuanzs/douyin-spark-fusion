@@ -4377,6 +4377,42 @@ class SkinWebUITestCase(unittest.TestCase):
         self.assertIn("animation-delay: 0.001ms !important;", block)
         self.assertIn(".aurora-blob { animation: none !important; translate: none !important; }", block)
 
+    def test_跨页导航有淡出淡入转场(self) -> None:
+        """首页 / 运行记录 / 运行日志是三份独立文档，默认点导航是硬切。
+        跨文档 View Transition 用 `@view-transition` 接管：顶栏命名后原地保留，
+        只有页头与页体淡出、再上浮。两套皮肤都要有，不支持时浏览器直接硬切。"""
+        for path in (self.CLASSIC, self.AURORA):
+            css = path.read_text(encoding="utf-8")
+            self.assertIn("@view-transition { navigation: auto; }", css, f"{path.name} 没打开跨文档转场")
+            self.assertIn(".sidebar { view-transition-name: app-nav; }", css, f"{path.name} 的顶栏没命名")
+            self.assertIn(
+                ".mobile-topbar { view-transition-name: app-topbar; }", css,
+                f"{path.name} 的窄屏顶栏没命名",
+            )
+            for token in (
+                "::view-transition-old(root)",
+                "dsf-page-out",
+                "translateY(-8px)",
+                "::view-transition-new(root)",
+                "dsf-page-in",
+                "translateY(12px)",
+            ):
+                self.assertIn(token, css, f"{path.name} 缺 {token}")
+            tail = css.rsplit("@media (prefers-reduced-motion: reduce) {", 1)[1]
+            for pseudo in (
+                "::view-transition-group(*)",
+                "::view-transition-old(*)",
+                "::view-transition-new(*)",
+            ):
+                self.assertIn(pseudo, tail, f"{path.name} 没在减少动效时停掉 {pseudo.strip()}")
+        # 极光那层全屏背景不能单独命名：它会画在 root 快照上面，把页头与页体整块盖住
+        # （实测转场期间只剩顶栏和背景，内容全空白）。
+        self.assertNotIn(
+            ".aurora-scene { view-transition-name",
+            self.AURORA.read_text(encoding="utf-8"),
+            "全屏背景被单独命名了，转场会把正文盖住",
+        )
+
     def test_背景层跟着指针做轻微视差(self) -> None:
         """三层光斑按深浅各给一个系数，位移由 JS 直接算成 px 写进 --tx/--ty。"""
         script = self.SCRIPT.read_text(encoding="utf-8")
