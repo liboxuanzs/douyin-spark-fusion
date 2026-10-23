@@ -282,6 +282,22 @@ supports 为 true、`startViewTransition` 也是 function，却会把 `@view-tra
   删掉它不影响发送，只是下一个账号首次运行会以全新设备身份重新登录一次。
 - 与既有 `douyin-spark.service`（A 的部署，8000 端口）**并存**，端口不冲突。
 
+**2026-10-24 修订（以这段为准；上面保留为上线当天的记录）**
+
+- 机器换了：现在是 `192.168.15.172`（文中 `.224` / `192.168.1.100` 是上线当天的开发机，已退役）。
+- 单元名字与节奏都变了：`douyin-spark-fusion-web.service`（面板，`0.0.0.0:8787`）+
+  `douyin-spark-fusion-daily.timer` → 同名 `.service`，`OnCalendar=*:0/5` —— **每 5 分钟敲一次门**，
+  这一轮到底发不发由 `core/schedule.py` 决策（到点 / 今天已发 / jitter），不再是"一天跑一次"。
+  oneshot 每次都是新进程，所以任务侧改代码不需要重启任何东西。
+- 两份 unit 都**故意不写 `EnvironmentFile=`**：systemd 会按转义序列解析值，把消息模板里字面的
+  `\n` 吃成裸 `n`（消息挤成一行）。`.env` 只由程序用 python-dotenv 读。这是持久约束，不是临时绕过。
+- `/opt/douyin-spark-fusion` 自 2026-10-24 起是 **git 工作树**（HEAD 跟 github
+  `liboxuanzs/douyin-spark-fusion`）。日常升级 `deploy/update.sh`（fast-forward + 按改动决定
+  pip / 单元 / 重启），首次安装才用 `deploy/install.sh`；详见 [docs/deploy.md](docs/deploy.md) 第 7 节。
+- 文中引用的 `netinv/` 脚本（审查报告、各类探针、清理脚本）**从未进过版本库**，只存在于当年那台开发机上。
+  想复现它们描述的动作，走仓库里真实存在的入口：`logs/runs.jsonl`、`python -m webui --check`、
+  `main.py dry-run select|full`、`main.py prune`。
+
 ## 9. 验收记录（2026-10-01，实测）
 
 | # | 需求 | 状态 | 证据 |
@@ -293,7 +309,7 @@ supports 为 true、`startViewTransition` 也是 function，却会把 `@view-tra
 | 5 | 融入 B 的仪表盘 | ✅ | `webui/`（FastAPI + 手写 CSS/JS，零外网资源）；48 条单测；`.224` 实测 `http://192.168.1.100:8787` 可登录、可手动触发、可看冷却与日志 |
 | 6 | 部署 `本机` + 局域网监听 | ✅ | `douyin-spark-fusion-web.service` enabled+active 监听 `0.0.0.0:8787`，与 8000 上的既有 `douyin-spark.service` 并存互不影响 |
 
-自检方式：`netinv/review-report-fusion.md` 里的对抗式审查（F1–F13）。高危/中危已全部修完
+自检方式：`netinv/review-report-fusion.md` 里的对抗式审查（F1–F13）。（`netinv/` 里的脚本与报告从未入库，见第 8 节 2026-10-24 修订。）高危/中危已全部修完
 （空跑落冷却、冷却时长死配置、活进程被夺锁、Windows 判活、20:30–20:50 撞车、面板误报成功），
 低危里 F8（日志轮转）与 F9（删除 `webui/store.py::write_lock` 死代码）也已处理。
 
@@ -518,7 +534,7 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
    Cookie）；想存哈希就在表单的下拉里选。校验（8–128 字符、无换行、无英文单引号 `'`）不过
    就一个字节都不写；页面与 JSON 里**从不回显口令或哈希**，只说"存的是哪种形式、来自 `.env`
    还是进程环境、会话能撑多久"。
-4. 忘了口令进不去：服务器上 `bash netinv/reset_webui_password.sh`（走同一个写入口再重启服务）。
+4. 忘了口令进不去：服务器上 `.venv/bin/python -m webui.reset_password`（走同一个写入口再重启服务）。
 
 | 症状 | 真因 | 现在 |
 |---|---|---|

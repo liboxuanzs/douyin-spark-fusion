@@ -87,9 +87,14 @@ cd /opt/douyin-spark-fusion && .venv/bin/python -m webui.hash_password
 明文/哈希两种存法随选，改完所有旧会话立刻失效。忘了口令时在服务器上：
 
 ```bash
-cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh        # 随机生成并打印
-cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh '我的新口令'
+cd /opt/douyin-spark-fusion
+.venv/bin/python -m webui.reset_password               # 生成一个随机口令，打印一次，写进 .env 并重启面板
+.venv/bin/python -m webui.reset_password '我的新口令'    # 直接用你给的这串
 ```
+
+它走的是和面板同一个写入口（`webui/envfile.py::set_webui_password`：先备份、拿跨进程文件锁、
+明文与哈希两个键一起写），写完重启 `douyin-spark-fusion-web.service` 并轮询 `/healthz`。
+`--hash` 存哈希，`--no-restart` 只写文件，`--dry-run` 只说会写哪个文件。
 
 其它可选键（默认值见 `.env.example`）：
 
@@ -184,7 +189,7 @@ systemctl enable --now douyin-spark-fusion-web.service
 systemctl status douyin-spark-fusion-web.service
 ```
 
-- 面板：`http://<本机IP>:8787/`（`本机` → http://192.168.1.100:8787/ ）
+- 面板：`http://<本机IP>:8787/`（当前这台 → http://192.168.15.172:8787/；换机器就换 IP 或挂域名/反代）
 - **绑非回环且没配口令时服务会拒绝启动**（退出码 2，`journalctl -u douyin-spark-fusion-web -n 20` 有中文原因）。
 - 日志：`logs/douyin-spark-fusion.log`，同时 `journalctl -u douyin-spark-fusion-web -f`。
 - 只校验配置不启动：`.venv/bin/python -m webui --check`。
@@ -357,10 +362,33 @@ CJK 仍有一条已知差异：`SimSun` 等于 `Noto Serif CJK SC`（1690.92）�
 
 ## 7. 升级
 
+线上 `/opt/douyin-spark-fusion` 自 2026-10-24 起是 **git 工作树**（HEAD 跟着 github
+`liboxuanzs/douyin-spark-fusion` 走）。日常升级用 `deploy/update.sh`，它只做四件事：
+查有没有一轮正在跑 → `git` 只做 fast-forward → 按改动的文件决定要不要 `pip install` /
+重装单元 / `daemon-reload` → 只有代码变了才重启面板并轮询 `/healthz`。
+`.env` 与 `logs/` 不在 git 里，脚本一个字节都不碰。
+
 ```bash
-cd <新代码目录> && sudo bash deploy/install.sh     # 会保留 .env 与 logs/
-sudo systemctl restart douyin-spark-fusion-web.service
+cd /opt/douyin-spark-fusion
+sudo bash deploy/update.sh             # ff 到当前分支的上游（线上是 origin/master）
+sudo bash deploy/update.sh --check     # 只看有没有新提交，不动任何文件
 ```
+
+在服务器上自己开发时，把提交从开发目录送过来（**别指望服务器 push github**，它没有凭据）：
+
+```bash
+cd /root/dsf && git add -A && git commit -m '...'                  # 开发目录里改完提交
+sudo bash /opt/douyin-spark-fusion/deploy/update.sh /root/dsf master  # 线上 ff 到这个本地仓库
+```
+
+- 有一轮正在跑（`RUN_LOCK_FILE`，默认 `logs/run.lock`，里面的 pid 还活着）时脚本会**拒绝**：
+  模块已经 import 进内存，换文件不会立刻生效，却会让这一轮和下一轮跑在两份不同的代码上。
+  确认可以打断才加 `--force`。
+- 历史分叉（本地有提交不在来源里）也会拒绝：只做 fast-forward，绝不 `reset --hard` 或强合。
+- 回滚：`sudo git -C /opt/douyin-spark-fusion reset --hard <旧提交>` 后重启 web 单元；
+  如果那段提交动过 `requirements.txt`，把 `.venv` 的依赖也退回去。
+- 任务那一侧不用重启（oneshot，每次运行都是新进程）。纯文档/测试的提交不会重启面板。
+- `deploy/install.sh` 是"从零装一台"的入口（rsync 同步、必要时重建 venv、装单元），日常更新别用它。
 
 **旧部署升级时必须换掉单元文件**：2026-10-03 之前的 `deploy/*.service` 里写着
 `EnvironmentFile=-/opt/douyin-spark-fusion/.env`，它会把消息模板里的字面 `\n` 吃成裸 `n`

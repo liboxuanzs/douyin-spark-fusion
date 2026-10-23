@@ -145,8 +145,9 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
     所以提交后会跳到登录页让你用新口令登一次 —— 其它设备上开着的页面也一样下线。
   - 页面上**从不回显口令或哈希**（连 cookie 都只显示"56 项"这种计数），只说明"现在存的是
     哪种形式 / 来自 `.env` 还是进程环境 / 会话能撑多久"。
-  - 口令忘了、面板进不去：在服务器上跑 `bash netinv/reset_webui_password.sh`（不带参数就
-    生成一个随机口令并打印），它会走同一个写入口 + 重启 `douyin-spark-fusion-web.service`。
+  - 口令忘了、面板进不去：在服务器上跑 `.venv/bin/python -m webui.reset_password`（不带参数就
+    生成一个随机口令并打印一次），它走同一个写入口（先备份、两键同写）+ 重启
+    `douyin-spark-fusion-web.service` 并轮询 `/healthz`；`--hash` 存哈希，`--no-restart` 只写文件。
 - **扫码登录**（折叠）：面板里唯一会写配置的地方（只写 `TASKS` 与 `COOKIES_<抖音号>`，
   见下面第 5.1 节）。
 - **好友选择器**（每张账号卡里）：**不再手打目标好友**，改成"读取好友列表 → 勾选 → 保存"，
@@ -437,7 +438,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | 账号卡的数字莫名变成"今天" | 运行记录页的账号行用过首页的 `data-account-overview` 挂点 | 运行记录页改用 `data-run-account`，`data-account-overview` 只留给首页 |
 | 同一个浏览器资料目录被两个功能抢 | 扫码登录的"资料搬迁"发生在浏览器关掉之后，中间窗口只比 `profile_dir` 会判成空闲；好友读取取消时又立刻放行 | `_profile_in_use()` 同时认 `profile_dir` 与 `adopt_dir`（`QrLoginSession.snapshot()` 新增该字段）；`core/friend_scan.py::cancel()` 不再立刻置终态，等浏览器真的关掉 |
 | 卡住的会话让账号永远用不了 | 会话只回收"非 active"的，卡在"进行中"的没人管 | `SESSION_STUCK_SECONDS = 20 分钟` + `_reap_stuck_sessions()`：先发取消信号再从注册表清掉，发起新会话前也会清一次 |
-| 清掉一个账号之后，历史轮次开始"猜"原因 | 删掉账本里的账号条目后，那些轮次就变成"没有任何账号结果"，页面会用兜底文案猜"账号凭据可能未配置" | 那条猜原因的兜底文案已删；这类轮次改成明确的判决「没有账号结果」（`status="empty"`）；清理脚本还要给**这些**轮次补一句真话 —— `netinv/annotate_cleaned_rows.sh` 以清理前的备份为准，只给当初真的带着该账号、且已经空掉、又没有别的解释的轮次写 `note`；账本里的 `note` 永远优先 |
+| 清掉一个账号之后，历史轮次开始"猜"原因 | 删掉账本里的账号条目后，那些轮次就变成"没有任何账号结果"，页面会用兜底文案猜"账号凭据可能未配置" | 那条猜原因的兜底文案已删；这类轮次改成明确的判决「没有账号结果」（`status="empty"`）；真要补一句真话就手写在那条轮次的 `note` 里（账本的 `note` **永远优先**于页面兜底文案），别回头改 `status`/`totals` |
 | 账号全被门禁拦下（登录失效/掉登录/超时），那一轮却显示绿色「成功」 | 轮次判决只看"有没有失败"，而每个账号都是 `skipped` 时既没成功也没失败 | 新增判决「账号全被跳过」（`status="blocked"`，`totals["entries"] == 0` 时才算）；只要有一个账号真跑了就还是「成功」，别把话说反 |
 | `.env` 里没有的下拉项被"顺手"写死 | 浏览器遇到"当前值不在选项里"会默认选中**第一项**，用户不动它直接点保存，就把一个从来没配过的键写成第一项的值（例如凭空写出 `DRY_RUN=off`） | 缺项时下拉框最前面插一个空值占位项「（.env 里没有，工具用默认值 X）」—— 它与 `.env` 原文一致，`collect()` 据此判定"没动过"，一个字节都不写；认不出的当前值同样插在最前面，不会被第一项顶掉 |
 | 正在编辑的配置被 10 秒轮询改回旧值 | 表单字段若复用 `data-overview-value` 挂点，总览轮询会把输入框里的内容换成 `.env` 里的旧值 | 表单用 `data-config-input`，`app.js` **完全不认识**这个挂点（`FrontendAgreementTests::test_配置表单不会被总览轮询改写` 钉住）；口令表单同理用 `data-password-*` |
@@ -455,7 +456,18 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | 运行详情里冒出一串英文码（`editor_text_mismatch` 之类） | `core` 每新增一个判定原因码，面板的 `REASON_LABELS` 就得跟着加一条；漏了就回退成"原样显示码" | 补上中文标签（输入框相关的四个码都要点名"输入框"，否则用户看不出是哪儿的问题）；`tests/test_viewmodel.py::ReasonLabelCoverageTests` 直接从 `core/douyin_im.py`/`core/strict_verify.py` 源码里抓 `reason=` 码，漏一个就红，顺带钉住"标签不重复、不为空" |
 | 面板把证据说强了：写「仅 HTTP 回执」，像是"另一侧看过、不认" | `_wait_receipt()` 拿到 HTTP 回执后**最多再等 1 秒**就收工（`if http and time.time() - t0 > 1.0: break`），所以 `via="http"` 只是"HTTP 先到了、会话回显没等到"，不是"回显里没有这条" | `VIA_LABELS["http"]` 改成「HTTP 回执（会话回显没等到）」；被拦下没点发送的那两条走 `via="none"`，也要有中文（「没发送（先拦下了）」），不能只显示 `none`；`tests/test_viewmodel.py::ViaLabelCoverageTests` 只从 `type_and_send()` 体内抓 `via` 取值（`_wait_list_ready()` 的 `"dom-stable"` 另有含义，不算），并禁止 `http` 那条再出现「仅」 |
 
-排查手段（都在 `netinv/`，只读）：
+排查手段（都在仓库里，只读）：
+
+- `logs/runs.jsonl`：账本，页面上的原因/证据/结论最终都来自它（`tail -n 1 logs/runs.jsonl | python -m json.tool`）。
+  对不上页面时先看这里，再看 `logs/schedule_state.json`（"今天已发"只认它）。
+- 面板首页横幅与账号卡 = `/api/ops/overview` 的同一份 viewmodel；`/ops/runs` 是运行记录，
+  `/ops/log-tail` 是日志尾。三处与账本逐项对账，就能分清是"core 记错了"还是"面板画错了"。
+- `.venv/bin/python -m webui --check`：只校验配置不启动（`.env` 能否解析、口令配没配、绑定地址）。
+- `.venv/bin/python main.py dry-run select`：不真发，把"这一轮到不到点、该找谁、门禁什么状态"打出来。
+- `.venv/bin/python main.py dry-run full`：真输入 + 读回校验 + 清空编辑器；日志里
+  `[SEND] 待发送文本 '…' → N 行` 是"这一轮到底按几行发的"的实锤。
+- `.venv/bin/python main.py prune`：只报告登录资料目录/缓存占用（加 `--apply` 才删）。
+
 
 - `consistency_audit.py`：把同一条事实的多条解析路径并排打出来（`TASKS` 的四条读法、cookie、
   配置、定时器状态、门禁标签与判定原因、core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的出现次数）。
@@ -494,7 +506,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 |---|---|
 | 起不来，退出码 2 | 绑了 `0.0.0.0` 却没配 `WEBUI_PASSWORD`/`WEBUI_PASSWORD_HASH`（故意的）；设口令或改回 `127.0.0.1` |
 | 登录后立刻又跳回登录页 | `WEBUI_SESSION_SECRET` 每次重启都变 ⇒ 在 `.env` 里固定一个值；**改过口令也会这样**（旧的会话 cookie 一律作废，这是设计） |
-| 忘了面板口令，进不去 | 在服务器上 `cd /opt/douyin-spark-fusion && bash netinv/reset_webui_password.sh`（不带参数就随机生成一个并打印出来；它会重启 web 服务）。手工等价做法：`python -m webui.hash_password '新口令'` 写回 `WEBUI_PASSWORD_HASH`（或直接写 `WEBUI_PASSWORD='新口令'`）后重启 `douyin-spark-fusion-web.service` |
+| 忘了面板口令，进不去 | 在服务器上 `cd /opt/douyin-spark-fusion && .venv/bin/python -m webui.reset_password`（不带参数就随机生成一个并打印一次，写进 `.env` 后重启 web 服务并轮询 `/healthz`）。手工等价做法：`python -m webui.hash_password '新口令'` 写回 `WEBUI_PASSWORD_HASH`（或直接写 `WEBUI_PASSWORD='新口令'`）后重启 `douyin-spark-fusion-web.service` |
 | 首页账号/cookie 是旧的 | 配置在进程内缓存，`systemctl restart douyin-spark-fusion-web.service` |
 | 点"立即运行"返回 503 | 这台机器上没装 `cloakbrowser`/`playwright`（面板本身不需要它们，跑任务才需要） |
 | 点"立即运行"返回 409 | 两种原因：①已有一轮在跑（`logs/run.lock` 里的 pid 还活着）；等它结束，或确认进程已死后删掉锁文件。②当前处于禁跑时间窗（`QUIET_WINDOW`，默认 `off`；设了才会拦）；在「运行配置」里改窗口，或临时设 `QUIET_WINDOW_OVERRIDE=1` |

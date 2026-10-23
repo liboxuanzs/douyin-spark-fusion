@@ -404,10 +404,16 @@ class PurityTests(unittest.TestCase):
         self.assertEqual(done.stdout.strip(), "", f"import 期不该拉浏览器依赖：{done.stdout.strip()}")
 
     def test_launch_context_reports_a_readable_error(self):
-        # 后端给个不存在的路径：必须抛 RuntimeError 且带人话，而不是把 traceback 甩给面板
-        with self.assertRaises(RuntimeError) as ctx:
-            qr_login._launch_context("/tmp/definitely-not-a-browser-dir", args=["--nope"], proxy=None)
-        self.assertIn("浏览器启动失败", str(ctx.exception))
+        # 要的是"启动失败"，但**不能依赖这台机器装没装 Chromium**：以前传一个不存在的目录，
+        # 在装了浏览器的机器上会真的起一个空 profile（用例反而红不了）；现在给一个不存在的后端名，
+        # core/browser.py 末尾会 raise ValueError("未知的 BROWSER_BACKEND：…")，被 _launch_context
+        # 收成 RuntimeError 并带上人话（而不是把 traceback 甩给面板）。
+        with mock.patch.dict(os.environ, {"BROWSER_BACKEND": "definitely-not-a-backend"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                qr_login._launch_context("/tmp/dsf-test-profile-never-used", args=[], proxy=None)
+        message = str(ctx.exception)
+        self.assertIn("浏览器启动失败", message)
+        self.assertIn("未知的 BROWSER_BACKEND", message)
 
 
 class CodeVerifyTests(unittest.TestCase):
