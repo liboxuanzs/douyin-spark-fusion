@@ -1496,3 +1496,86 @@ window.addEventListener("DOMContentLoaded", renderIcons);
     button.addEventListener("click", () => run(button));
   });
 })();
+
+// == 23 精修层的运行时（样式见 app-aurora.css 分区 23）=====================
+// 这段只做三件「需要一个时钟或一次事件」的事：指挥条滚动投影、进度条首屏生长、
+// 主题切换的圆形扩散。任何一件失败都不影响功能，因此每段都各自兜底。
+(() => {
+  const root = document.documentElement;
+  const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // -- 23.1 指挥条：滚过一点之后才落下投影，静止时保持「贴在画布上」 --------
+  const bar = document.querySelector(".sidebar");
+  if (bar) {
+    let queued = false;
+    const sync = () => {
+      queued = false;
+      bar.classList.toggle("is-scrolled", window.scrollY > 8);
+    };
+    window.addEventListener("scroll", () => {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(sync);
+    }, { passive: true });
+    sync();
+  }
+
+  // -- 23.2 今日进度条：首屏从 0 长到目标值，只做一次 -----------------------
+  // 之后 10 秒轮询改的是 width，值没变就不会重放；用户能看见的「在动」只有这一次。
+  if (!reduceMotion()) {
+    window.requestAnimationFrame(() => {
+      const barStrong = document.querySelector("[data-overview-bar-strong]");
+      const target = barStrong && barStrong.style.width;
+      if (!barStrong || !target || target === "0%") return;
+      barStrong.style.transition = "none";
+      barStrong.style.width = "0%";
+      // 读一次布局，把 0% 固化成过渡起点，否则同一帧里改回去不会有动画。
+      void barStrong.offsetWidth;
+      barStrong.style.transition = "";
+      barStrong.style.width = target;
+    });
+  }
+
+  // -- 23.3 主题切换：以按钮为圆心扩散（View Transitions 不可用就走原逻辑） -
+  const paintTheme = (theme) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    try {
+      localStorage.setItem("sparkflow-theme", theme);
+    } catch (error) {
+      // 存储不可用时当前页照样切换，和 app.js 顶部那段的约定一致。
+    }
+  };
+
+  const switchTheme = (button) => {
+    const next = root.dataset.theme === "light" ? "dark" : "light";
+    if (reduceMotion() || typeof document.startViewTransition !== "function") {
+      paintTheme(next);
+      return;
+    }
+    const rect = button.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const radius = Math.hypot(
+      Math.max(x, window.innerWidth - x),
+      Math.max(y, window.innerHeight - y)
+    );
+    root.style.setProperty("--vt-x", Math.round(x) + "px");
+    root.style.setProperty("--vt-y", Math.round(y) + "px");
+    root.style.setProperty("--vt-r", Math.ceil(radius) + "px");
+    root.classList.add("dsf-theme-vt");
+    const transition = document.startViewTransition(() => paintTheme(next));
+    transition.finished.finally(() => root.classList.remove("dsf-theme-vt"));
+  };
+
+  // 捕获阶段先于顶部的主题 IIFE 拿到点击：扩散曲面的圆心必须是按钮本身，
+  // 而 View Transition 的回调要等旧画面拍完才跑 —— 交给原本的冒泡处理器就来不及了。
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-theme-toggle]") : null;
+    if (!target) return;
+    if (reduceMotion() || typeof document.startViewTransition !== "function") return;
+    event.preventDefault();
+    event.stopPropagation();
+    switchTheme(target);
+  }, true);
+})();
