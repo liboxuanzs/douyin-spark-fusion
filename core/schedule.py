@@ -17,10 +17,15 @@
 ## 三个关键口径
 
 1. **确定性的抖动**（`SCHEDULE_JITTER_MINUTES`，默认 15 分钟）
-   到点后不是立刻发，而是在 `[设定时间, 设定时间 + 抖动]` 里挑一个时刻。
+   不是准点发，而是在 `[设定时间 − 抖动, 设定时间 + 抖动]` 里挑一个时刻 ——
+   前后**对称**：一半概率比设定时间早，一半比它晚。早期实现只往后退
+   （`[设定时间, 设定时间 + 抖动]`），用户看到的是"设 20:30、实际每次 20:45"，
+   2026-10-24 按用户要求改成对称（见 FUSION-DESIGN §11）。
    挑法是 `sha256(抖音号|日期)` 取模 —— **同一个账号同一天永远算出同一个时刻**，
    所以每 5 分钟敲一次门不会每次都得到不同答案，隔天又会换一个时刻。
    抖动设 0 就是严格按点。
+   真正的发送时刻还受门铃粒度影响：门铃每 `tick_minutes()`（默认 5）分钟响一次，
+   落在 `due_at` 之后、下一个门铃之间最多再晚一个间隔（这段在 `select()`）。
 
 2. **当天补发**
    到点时机器关机/程序没跑，只要**还是当天**就补发（用户 2026-10-06 明确要求
@@ -94,9 +99,9 @@ def tick_minutes(jitter=None):
     比如抖动 2 分钟却把敲门间隔设成 30 分钟，用户会看到消息晚半小时才发，
     而面板上一切正常。
 
-    取 `抖动 / 3`：派发间隔是抖动窗口的三分之一时，落在窗口里的任意时刻
-    最多迟到 `间隔` 分钟，而窗口内至少被敲到 3 次 —— 既不会错过，
-    也不会把 `due_at` 拖过当天。
+    取 `抖动 / 3`：窗口现在是一前一后共 `2 × 抖动`，这个间隔是窗口的六分之一，
+    窗口内至少被敲到 6 次；落在窗口里的任意时刻最多迟到 `间隔` 分钟 ——
+    既不会错过，也不会把 `due_at` 拖过当天。
     """
     if jitter is None:
         jitter = jitter_minutes_env()
@@ -182,18 +187,22 @@ def _as_list(value):
 # ---------------------------------------------------------------------------
 
 def jitter_minutes(unique_id, day, span):
-    """同一个账号、同一天，永远算出同一个抖动分钟数（0..span）。
+    """同一个账号、同一天，永远算出同一个抖动分钟数（`-span..+span`）。
 
     用哈希而不是 `random`：每 5 分钟门铃响一次，如果每次都是新的随机数，
     就会出现"这一分钟判它没到点、下一分钟又判它到点了"的抖动，
     而且 `due_at` 会一直往后飘、永远追不上。
+
+    ★ 区间是**对称**的（2026-10-24 用户反馈"设 20:30、实际每次都 20:45"）。
+    取模窗口是 `2 * span + 1` 再减 `span`：`span=15` 时可能提前 15 分钟，
+    也可能推后 15 分钟。落地时刻还会被门铃粒度往后带一点（≤ 一个 tick）。
     """
     span = max(0, int(span or 0))
     if span <= 0:
         return 0
     seed = f"{unique_id or ''}|{day or ''}|{span}".encode("utf-8")
     digest = hashlib.sha256(seed).hexdigest()
-    return int(digest[:8], 16) % (span + 1)
+    return int(digest[:8], 16) % (span * 2 + 1) - span
 
 
 def day_of(when):
@@ -220,12 +229,19 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
     offset = jitter_minutes(uid, day_of(when), span)
     hour, minute = (int(part) for part in final.split(":"))
     due = when.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(minutes=offset)
-    # 抖动**不能**把到点时刻推到明天。systemd 门铃最后一次是 23:55（`*:0/5`），
-    # 推过零点之后当天每一次门铃看到的都是「还没到点」，而下一次门铃已经是
-    # 第二天、又按新的一天重算 —— 这个账号当天一条都发不出去，日志里还一声不吭。
-    # 挤回当天最后一次门铃：宁可早几分钟，也不能整天不发。
+    # 抖动只允许把到点时刻在**当天**范围里挪，一头一尾都要夹：
+    # 往后：systemd 门铃最后一次是 23:55（`*:0/5`），推过零点之后当天每一次门铃
+    #   看到的都是「还没到点」，而下一次门铃已经是第二天、又按新的一天重算 ——
+    #   这个账号当天一条都发不出去，日志里还一声不吭。挤回当天最后一次门铃：
+    #   宁可早几分钟，也不能整天不发。
+    # 往前：设定 00:05、抖动 -10 会落到昨天 23:55 —— 昨天的门铃早过去了，
+    #   而 `select()` 拿"今天"的日期去比一个昨天的时刻，直接变成"永远没到点"。
+    #   同理挤回当天 00:00，让当天第一个门铃就发。
+    day_start = when.replace(hour=0, minute=0, second=0, microsecond=0)
     last_tick = when.replace(hour=23, minute=60 - TICK_MINUTES, second=0, microsecond=0)
-    if due > last_tick:
+    if due < day_start:
+        due = day_start
+    elif due > last_tick:
         due = last_tick
     return {
         "unique_id": uid,

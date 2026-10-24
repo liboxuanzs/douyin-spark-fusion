@@ -85,7 +85,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 | `TASKS` | 账号与目标名单（JSON）：每个账号的 `unique_id`、`message`、`time`、目标列表 |
 | `COOKIES_<抖音号>` | 该账号的登录 cookie（面板扫码后自动写入） |
 | `TASK_SCHEDULE_TIMES` | 全局发送时间表，第一项是没单独配时间的账号的默认时间 |
-| `SCHEDULE_JITTER_MINUTES` | 每个账号在基准时间上的随机抖动上限 |
+| `SCHEDULE_JITTER_MINUTES` | 每个账号在基准时间前后各随机偏移多少分钟（对称，不是只往后推） |
 | `DRY_RUN` | `off` / `select` / `full` |
 | `QUIET_WINDOW` | 禁跑时段（窗口结束后的第一个门铃才补发） |
 | `LIMIT_GUARD_ENABLED` / `LIMIT_COOLDOWN_MINUTES` | 限流熔断开关与冷却时长 |

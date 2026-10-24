@@ -661,3 +661,29 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
 也会重发整段 —— `core/douyin_im.py` 自己写着"没回执 ≠ 失败（可能走 WS）"，但重发确实可能让
 好友收到两遍。这是**产品取舍**（漏发 vs 叠发），默认保持现状；要改成不重试，在
 `core/tasks.py` 的重试条件里排除 `unknown`/`no_evidence` 即可，别顺手改。
+
+## 11. 抖动改成前后对称（2026-10-24，用户要求）
+
+用户反馈："真实发送时间全部都是比我设置的要往后，我更希望在设置时间左右偏移。"
+
+原因不是 bug，是设计：`jitter_minutes()` 只返回 `0..span`，`due_at = 设定时间 + offset`，
+再叠上门铃粒度（抖动 15 → 每 5 分钟敲一次），实际落地永远在 `[设定, 设定+20]`。
+而 `window_text()` 一直写着"抖动 ±15 分钟"——文案和实现本来就不一致。
+
+**改动**：
+
+- `core/schedule.py: jitter_minutes()`：取模窗口 `span + 1` → `2 * span + 1`，再减 `span`，
+  返回 `-span..+span`。仍是 `sha256(账号|日期|span)` 纯函数，同一天同一账号恒定。
+- `core/schedule.py: plan_for()`：`due` 夹进当天 `[00:00, 23:55]`。以前只夹上界
+  （防推过零点导致整天不发），现在下界也必须夹：设定 00:05 + 负偏移会落到昨天，
+  `select()` 拿今天的日期比昨天的时刻，当天就永远"没到点"。
+- 文案对齐：`webui/settings.py`（原写"到点后再随机推迟 0~N 分钟"）、`docs/deploy.md`、
+  `README.md`、`dashboard.html`、`configTool/models.py` 注释。
+
+**效果**：设定 17:20、抖动 15 → 落地窗口 `[17:05, 17:40]`（门铃粒度最多再晚 5 分钟），
+期望值约 17:22；设定 20:30 → `[20:15, 20:50]`。门铃间隔 `tick_minutes() = 抖动/3`
+（15 → 5 分钟）没变。
+
+**回归测试**：`tests/test_schedule.py` 的 `test_offset_is_symmetric_around_the_set_time`、
+`test_due_at_can_land_before_the_configured_time`、
+`test_jitter_never_pulls_the_send_into_the_previous_day`。

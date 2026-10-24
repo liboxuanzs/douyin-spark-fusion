@@ -112,7 +112,7 @@ cd /opt/douyin-spark-fusion
 | `OPS_LOG_FILE` | `logs/app.log` | 面板"日志"页读的文件（默认读 Python 日志 `logs/app.log`）。`deploy/` 里的两个 systemd 单元把标准输出追加到 `logs/douyin-spark-fusion.log`，`.env.example` 给的也是后者 —— 想让面板同时看到单元输出，就显式把它设成 `logs/douyin-spark-fusion.log` |
 | `BROWSER_BACKEND` | `auto` | `auto` / `cloakbrowser` / `playwright` |
 | `TASK_SCHEDULE_TIMES` | `20:30` | **每个账号的发送时间**：当天的门铃第一次到点之后才发。面板上单独给某个账号设了时间就以账号的为准，这里是没单独设的账号的默认值 |
-| `SCHEDULE_JITTER_MINUTES` | `15` | 发送时间上的随机抖动（分钟）。按「账号 + 日期」**确定性**取值 —— 同一天同一账号每次算出来一样，不会每 5 分钟漂一次；`0` = 准点发 |
+| `SCHEDULE_JITTER_MINUTES` | `15` | 发送时间上的随机抖动（分钟），**前后对称**：设定 20:30、抖动 15 就是在 20:15–20:45 里挑一个时刻。按「账号 + 日期」**确定性**取值 —— 同一天同一账号每次算出来一样，不会每 5 分钟漂一次；`0` = 准点发 |
 | `SCHEDULE_STATE_FILE` | `logs/schedule_state.json` | 发送时间表：哪个账号哪天发过了。删掉它等于「今天全都没发过」，当天还会补发 |
 | `WEBUI_DEFAULT_DRY_RUN` | `off` | 面板"立即运行"默认选中的档位（`off`/`select`/`full`）；只是默认值，点按钮前仍能改 |
 | `LOGIN_PROFILE_DIR` | `logs/login-profile` | 面板扫码登录用的浏览器资料目录；**等价于凭据**，别进备份/别共享 |

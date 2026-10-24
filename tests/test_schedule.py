@@ -90,12 +90,43 @@ class JitterDeterminismTests(unittest.TestCase):
             plan = schedule.plan_for(user, when=when, fallback="20:30", jitter=15)
             self.assertEqual(plan["due_at"], base, f"第 {step} 分钟重算后 due_at 变了")
 
-    def test_offset_is_within_span(self):
+    def test_offset_is_symmetric_around_the_set_time(self):
+        """抖动是**前后**晃，不是只往后推（用户 2026-10-24 的反馈）。
+
+        ★ 只验区间不够 —— 真正的契约是 `plan_for` 的 `due_at` 可能**早于**设定
+        时间。所以区间之外还要验两种符号在同一批样本里都真的出现过。
+        """
+        offsets = []
         for uid in ("11223344556", "12345678905", "28619454585"):
             for day in ("2026-10-07", "2026-10-08", "2026-11-01"):
                 offset = schedule.jitter_minutes(uid, day, 15)
-                self.assertGreaterEqual(offset, 0)
+                self.assertGreaterEqual(offset, -15)
                 self.assertLessEqual(offset, 15)
+                offsets.append(offset)
+        self.assertTrue(any(o < 0 for o in offsets), f"没有一个是提前的：{offsets}")
+        self.assertTrue(any(o > 0 for o in offsets), f"没有一个是推后的：{offsets}")
+
+    def test_due_at_can_land_before_the_configured_time(self):
+        """设定 08:00、偏移为负时，`due_at` 必须落在 07:xx —— 这才是"左右偏移"。"""
+        when = _at("2026-10-07 00:00:00")
+        early = next((f"u{i}" for i in range(60)
+                      if schedule.jitter_minutes(f"u{i}", "2026-10-07", 15) < 0), None)
+        self.assertIsNotNone(early, "60 个账号里没一个负偏移，哈希分布可疑")
+        plan = schedule.plan_for({"unique_id": early, "time": "08:00"},
+                                 when=when, fallback="20:30", jitter=15)
+        self.assertLess(plan["due_at"], when.replace(hour=8, minute=0))
+        self.assertEqual(plan["due_text"], plan["due_at"].strftime("%H:%M"))
+
+    def test_jitter_never_pulls_the_send_into_the_previous_day(self):
+        """设定 00:05 + 负偏移会落到"昨天"，必须夹回当天 00:00，否则当天永远不发。"""
+        when = _at("2026-10-07 00:00:00")
+        late = next((f"u{i}" for i in range(60)
+                     if schedule.jitter_minutes(f"u{i}", "2026-10-07", 15) <= -6), None)
+        self.assertIsNotNone(late, "60 个账号里没有 ≤ -6 的偏移，哈希分布可疑")
+        plan = schedule.plan_for({"unique_id": late, "time": "00:05"},
+                                 when=when, fallback="20:30", jitter=15)
+        self.assertEqual(plan["due_at"].date(), when.date())
+        self.assertEqual(plan["due_at"].strftime("%H:%M"), "00:00")
 
     def test_zero_span_disables_jitter(self):
         self.assertEqual(schedule.jitter_minutes("11223344556", "2026-10-07", 0), 0)
@@ -138,11 +169,16 @@ class PlanForTests(unittest.TestCase):
                 self.assertFalse(plan["custom"])
 
     def test_due_at_is_the_time_plus_the_offset(self):
+        """`due_at = 设定时间 + offset`，offset 可以是负的（前后对称，2026-10-24）。
+
+        以前这里断言 `hour == 8` —— 那是"只往后推"时代的写法；现在 08:00 + 负偏移
+        会落在 07:xx，所以定义式才是唯一正确的断言。
+        """
         when = _at("2026-10-07 00:00:00")
         plan = schedule.plan_for({"unique_id": "11223344556", "time": "08:00"},
                                  when=when, fallback="20:30", jitter=15)
-        self.assertEqual(plan["due_at"].hour, 8)
-        self.assertEqual(plan["due_at"].minute, plan["offset_minutes"])
+        expected = when.replace(hour=8, minute=0) + timedelta(minutes=plan["offset_minutes"])
+        self.assertEqual(plan["due_at"], expected)
         self.assertEqual(plan["due_text"], plan["due_at"].strftime("%H:%M"))
         self.assertEqual(plan["due_at"].date(), when.date())
 

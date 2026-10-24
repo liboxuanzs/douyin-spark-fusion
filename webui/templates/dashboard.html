@@ -445,7 +445,7 @@
           <small class="muted">
             <span class="time-state time-state-{{ account.send_state }}" data-time-state="{{ account.send_state }}">{{ account.send_state_text }}</span>
             {%- if not account.send_time_custom %} · 现在跟全局默认 <code>TASK_SCHEDULE_TIMES</code>{% endif %}
-            · 一天只发一次，到点的那一刻由 <code>SCHEDULE_JITTER_MINUTES</code> 决定；
+            · 一天只发一次，实际时刻在设定时间前后 <code>SCHEDULE_JITTER_MINUTES</code> 分钟内浮动；
             留空 = 跟全局默认。过了点没发是正常的：下一个门铃（每 5 分钟）会补发。
           </small>
         </form>

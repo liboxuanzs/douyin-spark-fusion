@@ -359,7 +359,7 @@ class Config:
     # 这个键**要读回来**：0 是有意义的值（= 不限制），保存一次就被写回 6 会让人
     # 莫名其妙地"改不动"。
     schedule_skip_retry_max: int = DEFAULT_SCHEDULE_SKIP_RETRY_MAX
-    # 发送抖动窗口（分钟，见 DEFAULT_SCHEDULE_JITTER_MINUTES，0 = 严格按点）。
+    # 发送抖动窗口（设定时间前后各 N 分钟，见 DEFAULT_SCHEDULE_JITTER_MINUTES，0 = 严格按点）。
     # 同 SCHEDULE_SKIP_RETRY_MAX：界面里没有输入框、但面板（webui）有，而且
     # **0 是有意义的值** —— 必须从 .env 读回来再原样写回去，否则保存一次就把
     # 用户在面板里设的 40 分钟抹回默认的 15（本次修的缺陷）。

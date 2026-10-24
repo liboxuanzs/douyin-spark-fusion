@@ -1329,11 +1329,11 @@ class ScheduleJitterTests(unittest.TestCase):
     `core/schedule.py::plan_for` 把 jitter span 计进 `jitter_minutes(uid, day, span)`
     的哈希，派发器（`core/tasks.py`）一直传 `SCHEDULE_JITTER_MINUTES`，而面板这两处
     （`schedule_fields` / `next_due`）没传 —— 吃默认 15 分钟。默认值下两者恰好相等，
-    所以这个 bug 平时隐身；用户把抖动调成 0 或 40 之后，面板写"今天 08:11 发"、
+    所以这个 bug 平时隐身；用户把抖动调成 0 或 40 之后，面板写"今天 08:05 发"、
     实际却在别的分钟发，而且调过之后连"改回默认"都救不了（哈希本来就该跟着变）。
     """
 
-    UID = "10001"  # 2026-10-11：span=15 → +11 分钟，span=40 → +38 分钟，span=0 → +0
+    UID = "10001"  # 2026-10-11：span=0 → 08:00，span=15 → 08:05，span=40 → 07:39（负偏移）
 
     def setUp(self) -> None:
         self._old = os.environ.get("SCHEDULE_JITTER_MINUTES")
@@ -1370,6 +1370,15 @@ class ScheduleJitterTests(unittest.TestCase):
         )
         return picked["plans"][self.UID]
 
+    def _expected(self, span):
+        """按 `core.schedule` 的定义式算出面板**应该**显示的时刻。
+
+        故意不写死数字：2026-10-24 抖动改成前后对称之后，这个账号的偏移从
+        +11 / +38 变成了 +5 / -21 —— 写死的断言只会替实现打掩护。
+        """
+        offset = schedule.jitter_minutes(self.UID, "2026-10-11", span)
+        return (datetime(2026, 10, 11, 8, 0) + timedelta(minutes=offset)).strftime("%H:%M")
+
     def test_抖动为_0_时面板跟派发器一致(self):
         os.environ["SCHEDULE_JITTER_MINUTES"] = "0"
         fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
@@ -1381,7 +1390,9 @@ class ScheduleJitterTests(unittest.TestCase):
         os.environ["SCHEDULE_JITTER_MINUTES"] = "40"
         fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
         self.assertEqual(fields["send_due"], self._dispatcher()["due_text"])
-        self.assertEqual(fields["send_due"], "08:38")
+        self.assertEqual(fields["send_due"], self._expected(40))
+        # span 参与哈希：40 分钟的落点必须和默认 15 分钟不同，否则这条测试白测。
+        self.assertNotEqual(self._expected(40), self._expected(15))
 
     def test_下一个该发的也是同一口径(self):
         os.environ["SCHEDULE_JITTER_MINUTES"] = "40"
@@ -1391,12 +1402,12 @@ class ScheduleJitterTests(unittest.TestCase):
         )
         self.assertIsNotNone(got)
         self.assertEqual(got["due_text"], self._dispatcher()["due_text"])
-        self.assertEqual(got["due_text"], "08:38")
+        self.assertEqual(got["due_text"], self._expected(40))
 
     def test_没设_env_时仍然按默认_15_分钟(self):
         os.environ.pop("SCHEDULE_JITTER_MINUTES", None)
         fields = viewmodel.schedule_fields(self.UID, "08:00", when=self._when())
-        self.assertEqual(fields["send_due"], "08:11")
+        self.assertEqual(fields["send_due"], self._expected(15))
         self.assertEqual(fields["send_due"], self._dispatcher()["due_text"])
 
 
