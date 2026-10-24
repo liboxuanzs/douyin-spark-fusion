@@ -155,6 +155,18 @@ report_unpushed() {
   gh_head="$(git symbolic-ref --quiet --short "refs/remotes/$gh_remote/HEAD" 2>/dev/null \
     || printf '%s/master' "$gh_remote")"
   git rev-parse --verify --quiet "$gh_head" >/dev/null 2>&1 || return 0
+  # refs/remotes/<remote>/<branch> 只在**上次 fetch** 时更新过：/opt 从来不 fetch，
+  # 于是"本地领先 8 个提交"把早就推上去的也数了进去（2026-10-24 实测）。
+  # 这里先只更新这一个远端分支引用（不碰工作树、不碰任何本地分支），拿不到新数据
+  # 就照旧用旧数据 —— 这条只是提醒，不该因为它失败或等太久。
+  _branch="${gh_head##*/}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 git fetch --quiet --no-tags "$gh_remote" \
+      "+refs/heads/$_branch:refs/remotes/$gh_remote/$_branch" >/dev/null 2>&1 || true
+  else
+    git fetch --quiet --no-tags "$gh_remote" \
+      "+refs/heads/$_branch:refs/remotes/$gh_remote/$_branch" >/dev/null 2>&1 || true
+  fi
   pending="$(git rev-list --count "$gh_head..HEAD" 2>/dev/null || echo 0)"
   if [ "${pending:-0}" -gt 0 ]; then
     say ""

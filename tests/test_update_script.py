@@ -58,6 +58,17 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertIn("needs_restart=0", text)
         self.assertIn("webui|core|utils|main", text)
 
+    def test_unpushed_report_refreshes_the_remote_ref(self):
+        """"本地领先 N 个提交"必须先 fetch 一次远端引用。
+
+        2026-10-24 实测：/opt 从不 fetch，refs/remotes/origin/master 停在几天前，
+        脚本报"领先 8 个提交"，而 github 上其实只差 3 个。这条提示是运维判断
+        "要不要找台能推的机器"的唯一依据，数错了比不报更糟。
+        """
+        code = "\n".join(_code_lines(_read()))
+        self.assertIn("git fetch --quiet", code)
+        self.assertIn("refs/remotes/$gh_remote/$_branch", code)
+
     def test_no_backtick_in_code(self):
         """反引号落在双引号里就是命令替换 —— 一行提示会把 `.env.example` 当命令跑。
 
