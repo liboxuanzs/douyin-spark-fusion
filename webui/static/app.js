@@ -1579,3 +1579,203 @@ window.addEventListener("DOMContentLoaded", renderIcons);
     switchTheme(target);
   }, true);
 })();
+
+// == 动效精修（2026-10-24）＝ app-aurora.css 第 24 分区 =====================
+// 这一层只动「怎么动」。折叠区块的高度过渡已经在 CSS 里，这里补三件 CSS 做不到
+// 的事：分段控件的滑块、数字增长、首屏以外区块的滚动揭示。
+// 整段先判 reduced-motion —— 系统要求减少动效时一件事都不做，页面回到服务端
+// 直出的样子（滑块退化成原来的背景高亮，数字直接是终值，区块全部可见）。
+(() => {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  // -- 24.3 分段控件的滑块 ------------------------------------------------
+  // 只负责「量」和「摆」：谁该亮仍然由原来的两段脚本决定（切 .active）。
+  // JS 没跑起来时 .has-thumb 不会出现，样式退回原来那套，不会两边都没高亮。
+  const initSegmentedThumb = () => {
+    const groups = [...document.querySelectorAll(".segmented-control")];
+    if (!groups.length) return;
+
+    const place = (group, animate) => {
+      const active = group.querySelector(".segment-button.active");
+      if (!active) return;
+      let thumb = group.querySelector(".segment-thumb");
+      if (!thumb) {
+        thumb = document.createElement("span");
+        thumb.className = "segment-thumb";
+        thumb.setAttribute("aria-hidden", "true");
+        // 关键三条写成内联：经典皮肤没有 .segment-thumb 的样式，宠物要是留在
+        // flex 流里就会多出一个 3px 的 gap，把按钮挤歪。绝对定位＋透明＝无副作用。
+        thumb.style.position = "absolute";
+        thumb.style.left = "0";
+        thumb.style.top = "0";
+        thumb.style.pointerEvents = "none";
+        group.prepend(thumb);
+      }
+      const box = group.getBoundingClientRect();
+      const rect = active.getBoundingClientRect();
+      // 还没显示的挂点（hidden 面板里）量出来是 0×0；等它出现时 ResizeObserver 会补一次
+      if (!rect.width || !rect.height) return;
+      if (!animate) group.classList.add("no-thumb-anim");
+      group.classList.add("has-thumb");
+      thumb.style.width = Math.round(rect.width) + "px";
+      thumb.style.height = Math.round(rect.height) + "px";
+      // 绝对定位的原点是父级的 padding box，rect 差里还含着父级 1px 边框
+      const x = Math.round(rect.left - box.left - group.clientLeft);
+      const y = Math.round(rect.top - box.top - group.clientTop);
+      thumb.style.transform = "translate3d(" + x + "px, " + y + "px, 0)";
+      if (!animate) {
+        // 读一次 offsetWidth 把「无过渡落位」这一帧定死，再恢复过渡；
+        // 否则同一帧里恢复的 transition 会把这次落位也当成一次位移播出来。
+        void thumb.offsetWidth;
+        window.requestAnimationFrame(() => group.classList.remove("no-thumb-anim"));
+      }
+    };
+
+    const placeAll = (animate) => groups.forEach((group) => place(group, animate));
+
+    placeAll(false);
+    window.addEventListener("resize", () => placeAll(false), { passive: true });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => placeAll(false)).catch(() => {});
+    }
+    // 切 .active 的是另外两段脚本（分段控件、空跑档位同步），一个在冒泡里直接切、
+    // 一个用 setTimeout(…, 0)；这里一律等一拍再量，才量得到新的当前项。
+    document.addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest(".segment-button") : null;
+      if (!button) return;
+      const group = button.closest(".segmented-control");
+      if (group) window.setTimeout(() => place(group, true), 0);
+    });
+    // 面板从隐藏变显示、窄屏换行、字体替换都会让按钮第一次有尺寸或换位置
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver((entries) => {
+        entries.forEach((entry) => {
+          const group = entry.target;
+          const width = Math.round(group.getBoundingClientRect().width);
+          if (width === Number(group.dataset.thumbWidth || 0)) return;
+          group.dataset.thumbWidth = String(width);
+          place(group, false);
+        });
+      });
+      groups.forEach((group) => observer.observe(group));
+    }
+  };
+  initSegmentedThumb();
+
+  // -- 24.4 数字增长 ------------------------------------------------------
+  // 只处理「纯整数」和「百分数」：今日进度那一格是 5/5，没数据时后端还可能给
+  // 破折号 —— 一律原样显示。把破折号数成 0 再数回破折号，比不动更糟。
+  const initCounters = () => {
+    const nodes = [...document.querySelectorAll("[data-overview-value]")];
+    if (!nodes.length) return;
+    const state = new WeakMap();
+
+    const parse = (text) => {
+      const match = /^(\d{1,7})(%?)$/.exec(String(text == null ? "" : text).trim());
+      return match ? { value: Number(match[1]), suffix: match[2] } : null;
+    };
+    // 尽量只改那个文本节点：整节点 textContent 重写会把子元素（比如单位）一起删掉
+    const write = (node, text) => {
+      const only = node.childNodes.length === 1 ? node.firstChild : null;
+      if (only && only.nodeType === 3) only.nodeValue = text;
+      else node.textContent = text;
+    };
+    const animate = (node, from, to, suffix, duration) => {
+      const record = state.get(node) || {};
+      record.busy = true;
+      state.set(node, record);
+      const started = performance.now();
+      const step = (now) => {
+        const t = Math.min(1, (now - started) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        write(node, Math.round(from + (to - from) * eased) + suffix);
+        if (t < 1) {
+          window.requestAnimationFrame(step);
+          return;
+        }
+        // 末帧写回目标值本身，避免四舍五入停在 99% 这种尴尬处
+        write(node, to + suffix);
+        record.value = to;
+        record.busy = false;
+      };
+      window.requestAnimationFrame(step);
+    };
+    const handle = (node) => {
+      const record = state.get(node) || {};
+      // 自己写进去的每一帧都会再触发一次观察器，靠 busy 挡掉，否则递归到天荒地老
+      if (record.busy) return;
+      const current = parse(node.textContent);
+      if (!current) {
+        state.set(node, { value: null });
+        return;
+      }
+      const previous = record.value;
+      record.value = current.value;
+      state.set(node, record);
+      if (document.hidden) return;
+      if (current.value === previous) return;
+      // 首屏没有「上一个值」：从 0 长上来，让这一屏一进来就在动
+      const from = previous == null ? 0 : previous;
+      if (from === current.value) return;
+      animate(node, from, current.value, current.suffix, previous == null ? 720 : 520);
+    };
+
+    nodes.forEach(handle);
+    // 总览每 10 秒把这一格用 textContent 重写一次，只有观察器接得住
+    const observer = new MutationObserver((records) => {
+      const seen = new Set();
+      records.forEach((record) => {
+        const target = record.target.nodeType === 3 ? record.target.parentElement : record.target;
+        if (!target || typeof target.closest !== "function") return;
+        const node = target.closest("[data-overview-value]");
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        handle(node);
+      });
+    });
+    document.querySelectorAll("[data-overview-root]").forEach((root) => {
+      observer.observe(root, { subtree: true, childList: true, characterData: true });
+    });
+  };
+  initCounters();
+
+  // -- 24.5 滚动揭示 ------------------------------------------------------
+  // 首屏那几块在 640ms 内就演完了，折叠线以下的还要滚很久才看得到，等到那时
+  // 动画早已结束 —— 等于白给。这里只挑视口外的，滚到了再演一次。
+  const initScrollReveal = () => {
+    if (!("IntersectionObserver" in window)) return;
+    const sections = [...document.querySelectorAll(".dashboard-stack > .dashboard-section")];
+    if (!sections.length) return;
+    // 首屏已经看得见的不要碰，它们由 CSS 的 dsf-rise 直接演
+    const waiting = sections.filter((section) => {
+      const rect = section.getBoundingClientRect();
+      return rect.top > window.innerHeight * 0.92;
+    });
+    if (!waiting.length) return;
+    const show = (section) => {
+      section.classList.remove("dsf-await");
+      section.classList.add("dsf-reveal");
+    };
+    try {
+      waiting.forEach((section) => section.classList.add("dsf-await"));
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            observer.unobserve(entry.target);
+            show(entry.target);
+          });
+        },
+        { rootMargin: "0px 0px -6% 0px", threshold: 0.01 },
+      );
+      waiting.forEach((section) => observer.observe(section));
+      // 兜底：观察器不触发（长页面一次渲染、打印、别的脚本改了布局）时 2.5 秒后
+      // 一律显示 —— 宁可少一次动画，不能少一块内容。
+      window.setTimeout(() => waiting.forEach((section) => show(section)), 2500);
+      window.addEventListener("pagehide", () => observer.disconnect(), { once: true });
+    } catch (error) {
+      waiting.forEach((section) => show(section));
+    }
+  };
+  initScrollReveal();
+})();

@@ -4418,6 +4418,69 @@ class SkinWebUITestCase(unittest.TestCase):
             "全屏背景被单独命名了，转场会把正文盖住",
         )
 
+    def test_折叠块的高度过渡必须和展开态同处一个支持块(self) -> None:
+        """details-content 的 block-size: 0 是「关着」的样子，浏览器不认这个伪元素时
+        整条规则被丢弃、折叠块照旧瞬开；但展开态的 block-size: auto 一旦和它分开
+        （或漏掉），认得的浏览器会把内容永久按 0 高裁掉 —— 账号、扫码、配置、口令
+        几块全是空的。所以两条规则必须锁在同一个 @supports 里。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split("@supports (interpolate-size: allow-keywords) {", 1)[1]
+        for token in (
+            "details.collapsible-section::details-content",
+            "block-size: 0;",
+            "details.collapsible-section[open]::details-content",
+            "block-size: auto;",
+        ):
+            self.assertIn(token, block)
+        self.assertLess(block.index("block-size: 0;"), block.index("block-size: auto;"))
+
+    def test_对话框退场有起点也不会把打开态留成透明(self) -> None:
+        """allow-discrete 让 display / overlay 也参与过渡，关掉时先把 opacity 收完再撤走；
+        进场首帧必须由 @starting-style 给，否则一加 [open] 就已经是终态。反过来，
+        animation: none 与本组规则必须锁在 @supports 里 —— 老浏览器要靠原来的
+        rise-in 打开，不能被一句全局 animation: none 弄成永远不出现。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split("@supports (transition-behavior: allow-discrete) {", 1)[1]
+        for token in (
+            "dialog.confirm-dialog[open] { opacity: 1; transform: none; }",
+            "@starting-style {",
+            "display 300ms allow-discrete",
+            "overlay 300ms allow-discrete",
+            "dialog.confirm-dialog[open]::backdrop { opacity: 1; }",
+        ):
+            self.assertIn(token, block)
+        outside = css.split("@supports (transition-behavior: allow-discrete) {", 1)[0]
+        self.assertNotIn("dialog.confirm-dialog { animation: none", outside)
+
+    def test_屏幕外揭示有三层兜底否则内容会一直空着(self) -> None:
+        """dsf-await 是「先不画」，一旦观察器没触发（老浏览器、异常、打印）整块内容
+        就再也出不来。兜底三件：2.5s 定时器、打印强制显示、异常时全放行。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split("/* == 24", 1)[1]
+        self.assertIn(".dashboard-stack > .dashboard-section.dsf-await {", block)
+        print_block = block.split("@media print {", 1)[1].split("}", 1)[0]
+        self.assertIn("opacity: 1;", print_block)
+        script = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("window.setTimeout(() => waiting.forEach((section) => show(section)), 2500)", script)
+        self.assertIn('section.classList.remove("dsf-await");', script)
+
+    def test_分段控件的滑块不留第二层底(self) -> None:
+        """当前项的背景交给滑块；按钮自己还留着渐变与内阴影时，滑块上面会再叠一层
+        半透明底，比旁边的档位深一块（鼠标悬停时更明显）。"""
+        css = self.AURORA.read_text(encoding="utf-8")
+        block = css.split(".segmented-control.has-thumb .segment-button.active,", 1)[1].split("}", 1)[0]
+        self.assertIn("background: transparent;", block)
+        self.assertIn("box-shadow: none;", block)
+
+    def test_新增动效脚本跟着减少动效一起停(self) -> None:
+        """20 分区的 !important 只压 CSS；滑块、数字滚动、滚动揭示都在 app.js 里自己动，
+        必须在同一个判据上一件都不跑。"""
+        script = (REPO_ROOT / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn(
+            'if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;',
+            script,
+        )
+
     def test_不支持跨文档转场的浏览器也有转场(self) -> None:
         """Firefox 157 和部分 Chromium 分支会"解析得出 `@view-transition`、实际不播"，
         用 `CSS.supports` / `CSSStyleSheet` 猜能力会误判成"支持"，于是仍是硬切。

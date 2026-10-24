@@ -687,3 +687,40 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
 **回归测试**：`tests/test_schedule.py` 的 `test_offset_is_symmetric_around_the_set_time`、
 `test_due_at_can_land_before_the_configured_time`、
 `test_jitter_never_pulls_the_send_into_the_previous_day`。
+
+## 12. 界面改版与动效精修（2026-10-24，用户要求「提升高级感 / 继续优化动效」）
+
+两轮都只动前端（模板 + 两套皮肤 CSS + app.js），没有改任何后端行为。所有新增样式
+**追加在 `webui/static/app-aurora.css` 末尾**（§23 视觉、§24 动效），新增脚本追加在
+`webui/static/app.js` 末尾的独立 IIFE 里 —— 原因是 `webui/app.py: asset_version()`
+只对 `app.css`、`app-aurora.css`、`app.js` 三个文件名取 mtime：**新建 static 文件不会
+换版本号，浏览器会一直吃旧缓存**。同理，不要新建 `app-polish.css` 之类的文件。
+
+**视觉（§23）**：极光背景压到接近黑（`.aurora-blob` opacity 0.16 / blur 120px）、
+语义色只做细线和小点、数字去掉辉光、版式重排成顶部指挥条 + 胶囊导航。深色令牌之外
+必须同步给 `html[data-theme="light"]`（测试会逐条核对两套主题都有 `--accent-ink`、
+`.brand-title`、`.page-heading h1` 的覆盖）。
+
+**动效（§24）**：
+
+| 处 | 做法 | 兜底 |
+| --- | --- | --- |
+| 确认对话框进出 | `@supports (transition-behavior: allow-discrete)` + `display`/`overlay` 参与过渡 + `@starting-style` 给进场首帧 | 不支持时 `animation: none` 那句也在 @supports 里，浏览器仍用原来的 `rise-in` |
+| `<details>` 折叠块 | `@supports (interpolate-size: allow-keywords)` + `::details-content { block-size: 0 → auto }` | 不支持时整块 @supports 被丢弃，退回瞬开 |
+| 分段控件 | app.js 插入 `.segment-thumb` 滑块，只改 `transform`/`width` | JS 没跑起来时 `.has-thumb` 不出现，等于原样式 |
+| 屏幕外区块 | `.dsf-await` 不画 → 进视口换 `.dsf-reveal` 播一次 | 2.5s 定时器 + 打印强制显示 + try/catch 全放行 |
+| 数字 | `initCounters()` 只处理纯整数/百分比节点，`MutationObserver` 跟着轮询走 | 非整数（`5/5`、破折号）一律跳过 |
+
+整套动效的总闸是 `app.js` 里那段 IIFE 的第一行 `prefers-reduced-motion: reduce` 早退，
+CSS 侧再由 §20 的 `transition-duration: .001ms !important` 压一遍。
+
+**测试契约**（改这两处前先读）：`tests/test_webui.py` 用 `split(..., 1)` 取**第一处**
+`@media (prefers-reduced-motion: reduce) {`、用 `rsplit(..., 1)` 取**最后一处**并要求其中
+含 `::view-transition-group(*)` 等 —— 所以新分区里既不能加新的 reduced-motion 媒体块，
+也不能在文件末尾再加跨页转场规则。
+
+**验证手法（踩过的坑）**：headless Chrome 在只有 `setTimeout` 等待时不产生渲染帧，
+CSS 过渡会停在 `startTime: null` 的 pending 状态 —— 看起来像「对话框停在 opacity 0」
+「折叠块打不开」。抓 `requestAnimationFrame` 或截图才会出帧。判断动画是否真的跑起来，
+看 `document.getAnimations()` 里 `startTime` 是否非空，别只看采样值。
+

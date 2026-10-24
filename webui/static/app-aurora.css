@@ -3566,3 +3566,174 @@ html[data-theme="light"] .metric-card:is(.success, .warning, .danger, .info) { -
    accent-color 改由主题令牌给，顺带把光标颜色也对齐。 */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 input, textarea, select { caret-color: var(--accent); }
+
+/* == 24 动效精修：开合有交代、数字会长、屏幕外先等着 ======================
+   2026-10-24 第三轮。这一层只改「怎么动」，不改任何静态外观；回滚方式 = 删掉
+   本分区 + webui/static/app.js 末尾同名小节。
+   三条原则：
+     1. 能过渡就不用动画 —— 过渡可以被反向打断（连点两下不会跳帧、不会残留
+        在动画的中间态），动画只能从头播一遍；
+     2. 变化只发生在看得见的地方 —— 首屏以外的区块先等着，滚到了再演，
+        而不是在用户还没滚到时就演完；
+     3. 系统要求减少动效时一件都不许发生 —— §20 那组 !important 会连同这里的
+        新动效一起压掉，app.js 侧另有一道同判据（见 24.2/24.3）。
+*/
+
+/* -- 24.1 确认对话框：进有来处，退有去路 -------------------------------- */
+/* 原来只有 rise-in：打开是「冒出来」，关掉是「凭空消失」—— 关闭时浏览器先把
+   display 切成 none，动画根本走不到最后一帧。改用离散过渡（allow-discrete）：
+   display / overlay 也参与过渡，于是关闭时会先留在屏幕上把 opacity 收完再撤走。
+   注意 animation: none 必须写在[@supports]里：不支持离散过渡的浏览器仍然靠
+   原来那条 rise-in 打开，不能把它一起关掉。 */
+@supports (transition-behavior: allow-discrete) {
+  dialog.confirm-dialog {
+    animation: none;
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.982);
+    transition:
+      opacity 180ms var(--ease),
+      transform 300ms var(--spring),
+      display 300ms allow-discrete,
+      overlay 300ms allow-discrete;
+  }
+  dialog.confirm-dialog[open] { opacity: 1; transform: none; }
+  /* 进场第一帧必须由 @starting-style 给：没有它，[open] 一加上就已经是终态，
+     过渡没有起点可插值，等于没有入场。 */
+  @starting-style {
+    dialog.confirm-dialog[open] {
+      opacity: 0;
+      transform: translate3d(0, 10px, 0) scale(0.976);
+    }
+  }
+  /* 背板同步淡入淡出：原来是一整块静态黑，弹出时像有人突然关灯。 */
+  dialog.confirm-dialog::backdrop {
+    opacity: 0;
+    transition:
+      opacity 220ms var(--ease),
+      display 300ms allow-discrete,
+      overlay 300ms allow-discrete;
+  }
+  dialog.confirm-dialog[open]::backdrop { opacity: 1; }
+  @starting-style {
+    dialog.confirm-dialog[open]::backdrop { opacity: 0; }
+  }
+}
+
+/* -- 24.2 折叠区块：高度过渡 + 箭头跟手 -------------------------------- */
+/* <details> 的开合是「瞬间换 display」，内容直接跳出来，箭头却是转 260ms ——
+   两个速度对不上，看着像箭头转完了内容才出现。Chromium 131+ 让 ::details-content
+   拥有自己的盒子，block-size 从 0 到 auto 可以插值（需要 interpolate-size:
+   allow-keywords 允许 auto 参与过渡），content-visibility 是离散属性，必须一起
+   加 allow-discrete，否则收起时内容立刻消失、高度动画在演给一块空气看。
+   不支持这两个特性的浏览器整块 @supports 被丢弃，退回原来的瞬开。 */
+@supports (interpolate-size: allow-keywords) {
+  details.collapsible-section,
+  details.account-console { interpolate-size: allow-keywords; }
+  details.collapsible-section::details-content,
+  details.account-console::details-content {
+    block-size: 0;
+    overflow: hidden;
+    transition:
+      block-size 320ms var(--ease),
+      content-visibility 320ms allow-discrete;
+  }
+  details.collapsible-section[open]::details-content,
+  details.account-console[open]::details-content { block-size: auto; }
+  /* 收起时箭头比内容快半拍，是因为内容在等 content-visibility 切换；这里把
+     箭头也放慢到同一个时长，两者才是「一起」收起来的。 */
+  .collapsible-section > summary .summary-chevron { transition: transform 320ms var(--ease), color var(--speed) var(--ease); }
+}
+
+/* -- 24.3 分段控件：滑块代替背景硬切 ------------------------------------ */
+/* 原来点一下是「这块背景灭、那块背景亮」，两个色块同帧互换，眼睛看到的是闪。
+   现在由 app.js 插一个绝对定位的 .segment-thumb 到轨里，量出当前按钮的
+   offset 后只改 transform —— 位移/宽高都可以过渡，反向点击能中途折返。
+   JS 没跑起来（被拦、脚本报错）时 .has-thumb 不出现，样式仍是原来那套，
+   不会出现「滑块没有了、当前项也没高亮」的空档。 */
+.segmented-control .segment-thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  width: 0;
+  height: 0;
+  border-radius: calc(13px - var(--seg-inset));
+  background: linear-gradient(100deg, rgba(34, 211, 238, 0.26), rgba(99, 102, 241, 0.34) 46%, rgba(168, 85, 247, 0.3));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 10px 22px -14px rgba(99, 102, 241, 0.95);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition:
+    transform 340ms var(--spring),
+    width 240ms var(--ease),
+    height 200ms var(--ease),
+    opacity 160ms var(--ease);
+}
+html[data-theme="light"] .segmented-control .segment-thumb {
+  background: #fff;
+  box-shadow: 0 6px 18px -12px rgba(21, 28, 56, 0.5), inset 0 0 0 1px rgba(21, 28, 56, 0.08);
+}
+.segmented-control.has-thumb .segment-thumb { opacity: 1; }
+/* 按钮浮到滑块上面：文字与焦点环不能被滑块盖住 */
+.segmented-control.has-thumb .segment-button { position: relative; z-index: 1; }
+/* 当前项的背景交给滑块，按钮自己留空（含 :hover —— 否则鼠标停在当前项上会
+   在滑块上再叠一层半透明底，颜色比旁边深一块）。 */
+.segmented-control.has-thumb .segment-button.active,
+.segmented-control.has-thumb .segment-button.active:hover {
+  background: transparent;
+  box-shadow: none;
+}
+html[data-theme="light"] .segmented-control.has-thumb .segment-button.active,
+html[data-theme="light"] .segmented-control.has-thumb .segment-button.active:hover {
+  background: transparent;
+  box-shadow: none;
+}
+/* 首次测量、窗口缩放、字体换行时不做过渡：否则滑块会从上一个位置「飞」过来 */
+.segmented-control.no-thumb-anim .segment-thumb { transition: none; }
+
+/* -- 24.4 屏幕外的区块先等着 -------------------------------------------- */
+/* 首屏那几块在 640ms 内演完，但折叠线以下的区块用户要滚很久才看到，那时动画
+   早就结束了 —— 等于白给。这里由 app.js 给视口外的区块挂 .dsf-await（不画、
+   不播），滚进视口才换成 .dsf-reveal 播一次。
+   兜底有三层：app.js 有 2.5s 的定时器、IntersectionObserver 不触发时由它接管、
+   打印时一律显示（否则打印出来是几张空白）。 */
+.dashboard-stack > .dashboard-section.dsf-await {
+  animation: none;
+  opacity: 0;
+}
+.dashboard-stack > .dashboard-section.dsf-reveal {
+  animation: dsf-reveal-in 560ms var(--ease-out) both;
+  /* nth-of-type 的 40/90/140/180ms 阶梯只属于首屏那一次入场；滚动揭示时每块
+     都是刚进入视口，再叠一个延迟就会「滚到了还空一拍」。 */
+  animation-delay: 0ms;
+}
+@keyframes dsf-reveal-in {
+  from { opacity: 0; translate: 0 18px; }
+  to { opacity: 1; translate: 0 0; }
+}
+@media print {
+  .dashboard-stack > .dashboard-section.dsf-await { opacity: 1; animation: none; }
+}
+
+/* -- 24.5 实时药丸：一颗会呼吸的点 -------------------------------------- */
+/* 「实时」两个字原来只是一块蓝底 —— 有状态，但没有「正在动」的感觉。
+   加一颗 5px 的点：它是 currentColor，跟着药丸的语义色走，不需要额外配色；
+   轮询变陈旧时（.poll-stale）点同步停下并降透明，一眼看出「这个数是旧的」。 */
+.pill[data-overview-live-state]::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 42%, transparent);
+  animation: dsf-live-pulse 2.8s var(--ease) infinite;
+}
+.pill[data-overview-live-state].poll-stale::before {
+  animation: none;
+  opacity: 0.45;
+  box-shadow: none;
+}
+@keyframes dsf-live-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 42%, transparent); }
+  55% { opacity: 0.62; box-shadow: 0 0 0 4px color-mix(in oklab, currentColor 0%, transparent); }
+}
