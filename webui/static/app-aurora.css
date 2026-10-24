@@ -3561,3 +3561,8 @@ html[data-theme="light"] .metric-card:is(.success, .warning, .danger, .info) { -
 @media (min-width: 1400px) {
   .metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+
+/* 原生复选框在浅色下是一块很响的浏览器蓝，和这一版的紫灰基调不搭；
+   accent-color 改由主题令牌给，顺带把光标颜色也对齐。 */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+input, textarea, select { caret-color: var(--accent); }
