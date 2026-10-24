@@ -3367,9 +3367,9 @@ html[data-theme="light"] .overview-primary .overview-value {
   font-weight: 620;
   letter-spacing: -0.04em;
 }
-.metric-card .metric-value { color: color-mix(in oklab, var(--metric-tone) 70%, var(--text)); }
+.metric-card .metric-value { color: color-mix(in oklab, var(--metric-tone) 62%, var(--text)); }
 .metric-card:is(.success, .warning, .danger, .info) .metric-value {
-  color: color-mix(in oklab, var(--metric-tone) 70%, var(--text));
+  color: color-mix(in oklab, var(--metric-tone) 62%, var(--text));
   text-shadow: none;
 }
 html[data-theme="light"] .metric-card:is(.success, .warning, .danger, .info) .metric-value {
@@ -3540,4 +3540,12 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(21, 28, 56
   .login-brand-panel { gap: 22px; }
   .login-features { margin-top: 18px; }
   .login-card { padding: 32px 32px 26px; }
+}
+
+/* 运行记录页把同一种 KPI 卡放大了两号（.metric-grid 在那边是两列），46px 的数字
+   在深色底上仍然压过整页；收到和首页同一档，让「与本轮结论的强弱」由小点和
+   左侧色条说，而不是字号。 */
+.metric-card .metric-value { text-wrap: nowrap; }
+@media (min-width: 1081px) {
+  .metric-grid .metric-value { font-size: clamp(30px, 1.6vw + 14px, 40px); }
 }
