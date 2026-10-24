@@ -361,8 +361,8 @@ class DryRunValueTests(unittest.TestCase):
         self.assertEqual(cooldown_human(0), "已结束")
         self.assertEqual(cooldown_human(45), "45 秒")
         self.assertEqual(cooldown_human(600), "10 分钟")
-        self.assertEqual(cooldown_human(3660), "1 小时1 分")
-        self.assertEqual(human_duration(95), "1 分35 秒")
+        self.assertEqual(cooldown_human(3660), "1 小时 1 分")
+        self.assertEqual(human_duration(95), "1 分 35 秒")
         self.assertEqual(human_duration(7200), "2 小时")
 
 

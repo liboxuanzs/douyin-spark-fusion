@@ -62,9 +62,9 @@ def cooldown_human(seconds):
         return f"{s} 秒"
     m, sec = divmod(s, 60)
     if m < 60:
-        return f"{m} 分{sec} 秒" if sec else f"{m} 分钟"
+        return f"{m} 分 {sec} 秒" if sec else f"{m} 分钟"
     h, m = divmod(m, 60)
-    return f"{h} 小时{m} 分" if m else f"{h} 小时"
+    return f"{h} 小时 {m} 分" if m else f"{h} 小时"
 
 
 def human_duration(seconds):
@@ -74,9 +74,9 @@ def human_duration(seconds):
         return f"{s} 秒"
     m, sec = divmod(s, 60)
     if m < 60:
-        return f"{m} 分{sec} 秒" if sec else f"{m} 分钟"
+        return f"{m} 分 {sec} 秒" if sec else f"{m} 分钟"
     h, m = divmod(m, 60)
-    return f"{h} 小时{m} 分" if m else f"{h} 小时"
+    return f"{h} 小时 {m} 分" if m else f"{h} 小时"
 
 
 def in_seconds(seconds, at=None):

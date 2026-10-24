@@ -46,6 +46,7 @@ from fastapi.templating import Jinja2Templates
 
 from webui import auth, config, envfile, logtail, password, settings, store, viewmodel
 from core import maintenance
+from core import notify as notify_mod
 
 __all__ = ["build_context", "create_app", "run_once", "start_run_thread"]
 
@@ -2841,6 +2842,36 @@ def create_app() -> FastAPI:
                 request, path="/", anchor="config-panel", error=result.get("error") or "保存失败"
             )
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+    @app.post("/ops/notify/test")
+    def ops_notify_test(request: Request) -> Response:
+        """发一条测试通知：确认 webhook 地址写对了。
+
+        不发送任何消息、不碰运行锁；最坏等满 NOTIFY_TIMEOUT_SECONDS（默认 10 秒）。
+        失败时把原因原样带回去 —— 用户正在调地址，HTTP 码与接口报错比"失败"两个字有用。
+        """
+        as_html = wants_html(request)
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(
+                    request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）"
+                )
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        try:
+            ok, detail = notify_mod.send_test()
+        except Exception as exc:  # noqa: BLE001 - 测试入口自身不能 500
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        _log(("测试通知已发出：" if ok else "测试通知失败：") + detail)
+        if as_html:
+            if ok:
+                return redirect_with(request, path="/", anchor="config-panel", saved=detail)
+            return redirect_with(request, path="/", anchor="config-panel", error=detail)
+        return JSONResponse({"ok": ok, "detail": detail}, status_code=200 if ok else 400)
 
     @app.post("/ops/password")
     async def ops_password_save(request: Request) -> Response:

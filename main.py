@@ -16,6 +16,8 @@
     python main.py prune --apply [--caches] [--older-than 7] [--json]
                                 真的清理：--caches 连可再生缓存一起清，
                                 --older-than 只删闲置超过 N 天的孤儿目录。
+    python main.py notify-test  推一条测试通知（确认 webhook 地址通不通），
+                                不发送任何消息、不碰运行锁。
     python main.py fc           云函数模式（上游保留；本融合版仓库没有 fc_server.py，
                                 这条分支不可用）。
 
@@ -321,6 +323,15 @@ def _auto_prune_notice():
         print(f"[维护] ⚠️ 这次只清了一部分：{result.get('error')}", file=sys.stderr)
 
 
+def _notify_test():
+    """推一条测试通知。成功 0、失败 1，说明文字里带原因（HTTP 码/接口报错）。"""
+    from core import notify
+
+    ok, detail = notify.send_test()
+    print(("✅ " if ok else "❌ ") + detail, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def _run(dry_run, source=None, force=None, only=None):
     from core.run_ledger import SOURCE_TIMER, run_source
     from core.tasks import runTasks
@@ -396,6 +407,10 @@ def main():
         # 磁盘维护：盘点资料目录体积、清理孤儿账号目录与可再生缓存。
         # 默认**只预演**，要删必须显式 --apply（见 core/maintenance.py）。
         sys.exit(_prune())
+
+    if MODE in {"notify-test", "notify", "test-notify"}:
+        # 只是"这条地址通不通"：不发送、不占运行锁、不写时间表。
+        sys.exit(_notify_test())
 
     if MODE in {"task", "run", "cli", ""}:
         sys.exit(_run(None))

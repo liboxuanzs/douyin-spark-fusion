@@ -28,6 +28,7 @@ from core import browser_state
 from core import cookie_sync
 from core import cookie_utils
 from core import limit_guard
+from core import notify
 from core import quiet_window
 from core import run_ledger as ledger
 from core import schedule
@@ -839,6 +840,24 @@ def _warmup_seconds(cfg, level):
     return max(0.0, seconds)
 
 
+def _notify_after_run(rec):
+    """把这一轮的结论推给用户（webhook）。整段绝不外抛，也绝不改这一轮的结论。
+
+    调用点在 `runTasks` 收尾、`lock.release()` **之后**：webhook 最坏会卡满
+    `NOTIFY_TIMEOUT_SECONDS`（默认 10 秒），让它占着运行锁毫无道理 —— 锁的用途是
+    "别让第二个浏览器碰同一个账号"，不是"等通知发完"。没配地址 / 空跑 / 只推出错
+    但这轮没出错时，`notify_run` 会返回空说明，这里就不打日志（定时器一天要敲
+    288 次门，每轮一行"没通知"就是噪声）。
+    """
+    try:
+        ok, detail = notify.notify_run(rec, logger=logger)
+    except Exception as exc:  # noqa: BLE001 - 通知失败不许影响发送结论
+        logger.warning(f"通知没发出去（不影响发送）：{exc}")
+        return
+    if ok:
+        logger.info(f"📣 运行通知已推送：{detail}")
+
+
 def runTasks(dry_run=None, source="cli", force=False, only=""):
     """跑一轮。返回结构化汇总，并追加进运行账本。
 
@@ -1181,6 +1200,9 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             ledger.append_run(rec)
         finally:
             lock.release()
+
+    # 通知在锁之外发：最坏卡满超时，但绝不占锁、绝不改结论（见 _notify_after_run）。
+    _notify_after_run(rec)
 
     s = ledger.summarize(rec)
     logger.info(

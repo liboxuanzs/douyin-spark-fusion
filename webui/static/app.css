@@ -939,6 +939,13 @@ label > span {
   flex-wrap: wrap;
 }
 
+/* 配置区末尾那个独立小表单（发送测试通知）：与"保存到 .env"那行拉开 */
+.notify-test-form {
+  margin-top: 2px;
+  padding-top: 13px;
+  border-top: 1px dashed var(--line);
+}
+
 .config-hint {
   margin-top: 6px;
   font-size: 12px;

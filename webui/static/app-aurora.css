@@ -804,6 +804,9 @@ html[data-theme="light"] svg.lucide.theme-dark-icon { display: inline-block; }
 
 .button-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .form-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 4px; }
+/* 配置区末尾那个独立小表单（发送测试通知）：跟"保存到 .env"那行拉开距离，
+   否则两个按钮并排看着像"保存"的两种写法。 */
+.notify-test-form { margin: 2px 0 0; padding-top: 13px; border-top: 1px dashed var(--line); }
 
 /* ---- 表单控件 ---- */
 

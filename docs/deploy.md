@@ -118,6 +118,9 @@ cd /opt/douyin-spark-fusion
 | `TASK_SCHEDULE_TIMES` | `20:30` | **每个账号的发送时间**：当天的门铃第一次到点之后才发。面板上单独给某个账号设了时间就以账号的为准，这里是没单独设的账号的默认值 |
 | `SCHEDULE_JITTER_MINUTES` | `15` | 发送时间上的随机抖动（分钟），**前后对称**：设定 20:30、抖动 15 就是在 20:15–20:45 里挑一个时刻。按「账号 + 日期」**确定性**取值 —— 同一天同一账号每次算出来一样，不会每 5 分钟漂一次；`0` = 准点发 |
 | `SCHEDULE_STATE_FILE` | `logs/schedule_state.json` | 发送时间表：哪个账号哪天发过了。删掉它等于「今天全都没发过」，当天还会补发 |
+| `NOTIFY_WEBHOOK_URL` | 空 | 结果通知地址（Server酱 / 企业微信 / 钉钉 / 飞书 / Telegram，或任意收 JSON 的地址）。留空 = 不通知 |
+| `NOTIFY_LEVEL` | `error` | `off` / `error` / `always`。`error` 只在有账号失败或命中熔断时推；空跑永远不推 |
+| `NOTIFY_TIMEOUT_SECONDS` | `10` | 推送超时（3–60 秒） |
 | `WEBUI_DEFAULT_DRY_RUN` | `off` | 面板"立即运行"默认选中的档位（`off`/`select`/`full`）；只是默认值，点按钮前仍能改 |
 | `LOGIN_PROFILE_DIR` | `logs/login-profile` | 面板扫码登录用的浏览器资料目录；**等价于凭据**，别进备份/别共享 |
 | `BROWSER_STATE_DIR` | `logs/browser-state` | 每个账号的浏览器状态快照（`<抖音号>.json`，发送时挂上去，让每轮都还是同一台设备）；**等价于凭据**。删掉不炸，只是下一个账号首次运行会以新设备身份重新登录一次 |
@@ -125,6 +128,48 @@ cd /opt/douyin-spark-fusion
 | `BROWSER_LOCALE` | `zh-CN` | 浏览器自报的语言（BCP 47），落到 `--lang` 与每个上下文的 `locale` |
 | `QR_LOGIN_TTL_SECONDS` | `300` | 面板扫码登录的二维码有效期（秒） |
 | `FRIEND_SCAN_TIMEOUT_SECONDS` | `300` | 面板"读取好友列表"单次扫描的超时（秒）；超时标成读取失败，已读到的部分仍可用 |
+
+### 结果通知推到哪里
+
+配了 `NOTIFY_WEBHOOK_URL` 就会在出问题时收到推送；不配则这一层完全不工作 ——
+定时器一天敲 288 次门，只有真出事才值得打扰。地址是谁家的靠主机名认，不用手选格式：
+
+```dotenv
+# Server酱（微信）
+NOTIFY_WEBHOOK_URL=https://sctapi.ftqq.com/SCTxxxxxxxx.send
+# 企业微信群机器人
+# NOTIFY_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx
+# 钉钉群机器人
+# NOTIFY_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=xxxxxxxx
+# 飞书群机器人
+# NOTIFY_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx
+# Telegram
+# NOTIFY_WEBHOOK_URL=https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>
+NOTIFY_LEVEL=error
+NOTIFY_TIMEOUT_SECONDS=10
+```
+
+认不出来的主机名按通用 JSON（`title` / `text` / `status` / `run_id` / `accounts`）发，
+接自己的机器人或转发服务都行。
+
+配完先验一次，不用等出事故：
+
+```bash
+cd /opt/douyin-spark-fusion
+.venv/bin/python main.py notify-test        # 成功退出码 0，失败 1 并打印对方原始回应
+```
+
+面板首页「运行配置」最下面也有一个**发送测试通知**按钮，走同一条路。
+
+几点要知道的：
+
+- **HTTP 200 不代表推送成功**：这几家都是 200 + JSON 里的错误码（token 过期、被移出群、
+  频率超限），所以看的是回应体；失败只写一行 `warning`，绝不改这一轮的结论。
+- **推送在放锁之后**：不影响时间表，也不占运行锁；最坏让这一轮多花
+  `NOTIFY_TIMEOUT_SECONDS` 秒。
+- **空跑永远不推**：`DRY_RUN` 不是 `off` 的时候一条都不发，免得预演变成骚扰。
+- **日志只留 host**：地址通常带 token，日志与页面只显示 `scheme://host/***`。
+- **改完立刻生效**：这一层每次运行都重新读 `.env`，不用重启服务。
 
 ### 消息模板里的换行：写两个字符 `\n`
 

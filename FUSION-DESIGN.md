@@ -761,3 +761,47 @@ CSS 过渡会停在 `startTime: null` 的 pending 状态 —— 看起来像「�
 `SEND_INTERVAL_LONG_PAUSE_SECONDS=0`、`TYPING_CHUNK_CHARS=0`、`WARMUP_BROWSE_SECONDS=0`），
 不需要回退代码。
 
+
+## 14. 结果通知（2026-10-24，用户要求「做适当功能补全」）
+
+**为什么加这一层**：定时器一天敲 288 次门，人不会一天看 288 次面板。真正需要知道的
+只有两种情况：某个账号没发成（登录态失效、命中熔断、目标找不到），或者整轮被跳过。
+之前这两种只写进 `logs/runs.jsonl` 和面板横幅 —— 没人打开面板就等于没发生。
+所以补一层"主动推给我"，但默认**只在出问题时推**。
+
+**为什么不是一个平台一个键**：五家的 payload 没有共识（Server酱 `{title,desp}`；
+企业微信/钉钉 `{msgtype,text}`；飞书 `{msg_type,content}`；Telegram `{text}`），
+但**地址本身就暴露了是谁家**。所以只有一个 `NOTIFY_WEBHOOK_URL`，按主机名后缀匹配
+（`core/notify.py::HOST_KINDS`）挑形状，认不出来就发通用 JSON。换平台只改一个 URL。
+
+**HTTP 200 不是成功证据**：这几家都是 200 + JSON 里的错误码（token 过期、被移出群、
+频率超限）。`_verdict` 只在 2xx 之后继续看回应体：`ok == false`、
+`errcode` 不在 `{0, 200}`、`code` 不在 `{0, 200}` 都判失败；通用地址只看状态码
+（不知道对方的 schema）。这是 §3「乐观通过」的同一课：能拿到的证据里，能说"没成"的
+就不要说"成了"。
+
+**门禁顺序**（`notify_run`）：① 没配地址 → 静默；② `dry_run` 不是 `off` → 静默
+（空跑永远不推）；③ `NOTIFY_LEVEL=off` → 静默；④ `error` 档且 `has_problem(rec)` 为假 →
+静默；⑤ 其余情况推一次，失败只写一行 `warning`。返回 `(ok, detail)`，`detail` 为空表示
+"按配置就不该推"，调用方据此决定不记日志 —— 否则一天 288 行"未配置"会把日志淹掉。
+
+**为什么放在放锁之后**：调用点在 `core/tasks.py` 的 `finally` 里，`lock.release()` 之后、
+`ledger.summarize(rec)` 之前。通知最坏慢 `NOTIFY_TIMEOUT_SECONDS` 秒，不能让别人抢不到锁，
+也不能让"通知失败"变成整轮的结论。`_notify_after_run()` 兜住所有异常，只写日志。
+
+**两个入口，同一条路**：`POST /ops/notify/test`（同步，浏览器等结果）与
+`python main.py notify-test`（退出码 0/1）都调 `notify.send_test()`，标题带【测试】前缀，
+不改任何状态、不写账本。命令行的意义是：面板进不去时也能验证地址。
+
+**打码即未改**：地址里通常带 token（`/SCTxxx.send`、`?access_token=xxx`），面板只显示
+`scheme://host/***`。`webui/settings.py::masked_view` 让"没动这一栏"在保存时被跳过，
+手打 `***` 会被 `parse()` 拒掉 —— 否则会把打码值原样写进 `.env`，第二天发现
+所有人都收不到通知。
+
+**验证**：`tests/test_notify.py` 61 条（五家形状、200 + 错误码、门禁四条、打码不回写、
+`_notify_after_run` 不外抛、模板与路由存在、`.env.example` 默认值一致）。线上另用
+`python main.py notify-test` 实测一次。顺手把 `core/util_time.py` 两处时长文案的空格补齐
+（"1 分35 秒" → "1 分 35 秒"，"1 小时1 分" → "1 小时 1 分"），它同时出现在冷却提示与通知正文里。
+
+**回滚**：`NOTIFY_WEBHOOK_URL` 清空即完全关闭，代码不用动；`NOTIFY_LEVEL` 设 `off` 也能
+只关推送而留着地址。

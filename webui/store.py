@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -41,6 +42,8 @@ __all__ = [
     "fmt_stamp",
     "gate_label",
     "is_truthy_skip",
+    "mask_proxy",
+    "mask_webhook_url",
     "read_ledger",
     "read_lock",
     "read_rate_limit",
@@ -241,6 +244,33 @@ def mask_proxy(value: Any) -> str:
     if not text:
         return ""
     return _URL_CRED_RE.sub(r"://\1:***@", text)
+
+
+def mask_webhook_url(value: Any) -> str:
+    """通知地址脱敏：只留 scheme 与主机，路径/查询（那里就是 token）整段遮掉。
+
+    为什么不能套用代理那条规则：webhook 的凭据几乎都在**路径或查询**里
+    （Server酱 /SCT...、Telegram /bot<token>/sendMessage、钉钉 ?access_token=、
+    飞书 /open-apis/bot/v2/hook/<uuid>），只遮 user:password@ 等于把 token
+    明文印在面板上。
+
+    这个函数同时是"用户没动过这一栏"的判据（webui/settings.py 的 collect 拿它比）：
+    显示与比较必须出自同一处，否则点一次保存就会把打码后的假地址写回 .env。
+    """
+    text = _text(value).strip()
+    if not text:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = (parts.hostname or "").strip()
+        # 端口写坏了（https://host:abc/）urlsplit 本身不报，.port 才抛 ValueError。
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "***"
+    if not parts.scheme or not host:
+        return "***"
+    tail = "/***" if (parts.path or parts.query) else ""
+    return f"{parts.scheme}://{host}{port}{tail}"
 
 
 # ---------------------------------------------------------------- 运行锁

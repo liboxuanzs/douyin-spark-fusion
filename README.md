@@ -72,6 +72,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 | `main.py task --only <抖音号或昵称>` | 只处理这一个账号 |
 | `main.py dry-run [select\|full]` | 空跑一轮 |
 | `main.py prune [--apply] [--caches] [--older-than N] [--json]` | 盘点 / 清理磁盘（默认只预演，不动任何文件） |
+| `main.py notify-test` | 按当前通知配置推一条测试消息（地址配错时立刻能看出是哪一步不行） |
 | `python -m webui` | 起网页控制台 |
 
 退出码：`0` 整轮跑完（「没有账号到点」也算跑完）、`1` 整轮被跳过或账号全部出错、`2` 参数错误。
@@ -97,6 +98,9 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 | `BROWSER_TIMEZONE` / `BROWSER_LOCALE` | 浏览器自报的时区与语言；时区留空 = 跟系统时区（例：出口在香港填 `Asia/Hong_Kong`） |
 | `MAINTENANCE_AUTO_PRUNE_HOURS` | 定时器自动清理间隔，默认 168 小时，`0` 关闭 |
 | `PROXY_ADDRESS` | 出口代理，留空即直连（多账号共用出口 IP 是已知的风控面） |
+| `NOTIFY_WEBHOOK_URL` | 结果通知的 webhook 地址，留空即不通知。认 Server酱 / 企业微信 / 钉钉 / 飞书 / Telegram，其它地址按通用 JSON 发 |
+| `NOTIFY_LEVEL` | 什么时候推：`off` 从不 / `error`（默认）只在有账号失败或熔断时 / `always` 每轮都推。空跑永远不推 |
+| `NOTIFY_TIMEOUT_SECONDS` | 推送超时（默认 10 秒）。推送在放锁之后，最坏只让这一轮多花这么久 |
 
 完整清单、默认值与注释见 [`.env.example`](.env.example)；面板「配置」页能改其中的白名单键。
 
@@ -116,6 +120,7 @@ core/                业务核心
   maintenance.py     磁盘盘点与清理（手动 + 定时器自动）
   limit_guard.py     限流熔断与冷却
   run_ledger.py      运行账本与运行锁
+  notify.py          结果通知：按主机名挑 webhook 形状，HTTP 200 也当不成成功的证据
 webui/               网页控制台（FastAPI + 原生前端）
 configTool/          图形配置工具（tkinter）
 deploy/              systemd 单元、安装脚本、logrotate 规则

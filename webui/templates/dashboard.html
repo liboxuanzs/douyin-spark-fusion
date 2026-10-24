@@ -914,6 +914,17 @@
           </div>
         </form>
 
+        <form method="post" action="/ops/notify/test" class="form-actions notify-test-form">
+          <button class="button button-quiet" type="submit">
+            <i data-lucide="send"></i>
+            <span>发送测试通知</span>
+          </button>
+          <span class="muted compact">
+            只推一条测试消息：不发送任何消息、不占运行锁；地址在
+            <code>NOTIFY_WEBHOOK_URL</code>，留空表示不通知
+          </span>
+        </form>
+
         <div class="table-shell">
           <table>
             <tbody>

@@ -202,6 +202,39 @@ SETTINGS: Tuple[Setting, ...] = (
         hint="HH:MM-HH:MM（跨零点也认）；这段绝对不发。默认 off —— 盖住定时器时间会让那一轮整轮跳过，面板会报红",
     ),
     Setting(
+        "NOTIFY_WEBHOOK_URL",
+        "通知地址",
+        KIND_TEXT,
+        default="",
+        allow_empty=True,
+        masked=True,
+        hint=(
+            "填 Server酱 / 企业微信 / 钉钉 / 飞书 / Telegram 机器人的 webhook 地址"
+            "（按主机名自动挑 JSON 形状，认不出来的按通用 JSON 发）；留空 = 不通知。"
+            "地址里的 token 会被打码显示，改的时候要整条写全"
+        ),
+    ),
+    Setting(
+        "NOTIFY_LEVEL",
+        "通知时机",
+        KIND_SELECT,
+        options=("off", "error", "always"),
+        default="error",
+        hint=(
+            "error = 只在有账号没发成、或命中风控熔断时推一条（默认）；"
+            "always = 每轮真发都推；off = 关掉（地址留着也不发）。空跑（dry-run）永远不推"
+        ),
+    ),
+    Setting(
+        "NOTIFY_TIMEOUT_SECONDS",
+        "通知超时",
+        KIND_INT,
+        minimum=3,
+        maximum=60,
+        default="10",
+        hint="秒；推送在放锁之后才做，超时就放弃 —— 不影响这一轮发没发、记没记账",
+    ),
+    Setting(
         "PROXY_ADDRESS",
         "代理",
         KIND_TEXT,
@@ -419,9 +452,33 @@ def parse(item: Setting, raw: Any) -> Tuple[bool, str, str]:
             "代理地址里带着 *** —— 那是面板打码后的样子，不是真口令。"
             "只改主机端口也请把 user:密码@ 一起写全"
         )
+    if item.key == "NOTIFY_WEBHOOK_URL" and text:
+        if "***" in text:
+            return False, "", (
+                "通知地址里带着 *** —— 那是面板打码后的样子，不是真地址。"
+                "改主机或路径也请把整条地址写全"
+            )
+        if not text.lower().startswith(("http://", "https://")):
+            return False, "", "通知地址要以 http:// 或 https:// 开头"
+        if any(char.isspace() for char in text):
+            return False, "", "通知地址里不能有空格（路径里带空格的请先做 URL 编码）"
     if item.key == "WEBUI_TZ" and not _timezone_ok(text):
         return False, "", f"显示时区 {text!r} 不是有效的 IANA 时区名（例：Asia/Shanghai / UTC）"
     return True, text, ""
+
+
+def masked_view(item: Setting, raw: str) -> str:
+    """面板上**显示**的值：打码字段不回显原文。
+
+    显示与"用户有没有动过这一栏"的比较必须出自同一个函数（见 `collect`）——
+    两处规则不一致的话，点一次保存就会把打码后的样子写回 `.env`。
+    """
+    if not item.masked:
+        return raw
+    if item.key == "NOTIFY_WEBHOOK_URL":
+        # 代理那条规则只遮 user:password@；webhook 的 token 在路径/查询里，得整段遮。
+        return store.mask_webhook_url(raw)
+    return store.mask_proxy(raw)
 
 
 def collect(submitted: Dict[str, Any], env_map: Dict[str, Any]) -> Dict[str, str]:
@@ -429,7 +486,7 @@ def collect(submitted: Dict[str, Any], env_map: Dict[str, Any]) -> Dict[str, str
 
     两类"没动过"的项直接跳过，免得点一次保存就把 `.env` 重新排版一遍：
 
-    * 打码字段（代理）提交上来的还是那块打码文本 —— 说明用户没动它。否则会把它当成
+    * 打码字段（代理、通知地址）提交上来的还是那块打码文本 —— 说明用户没动它。否则会把它当成
       新值写进 `.env`，把真口令换成字面的 ``***``。
     * 提交值与 `.env` 原文完全相同（下拉框大小写不同也算同义，比如 ``Debug`` / ``debug``）。
     """
@@ -439,7 +496,7 @@ def collect(submitted: Dict[str, Any], env_map: Dict[str, Any]) -> Dict[str, str
             continue
         text = _text(submitted.get(item.key))
         current = _text(env_map.get(item.key))
-        if item.masked and text == store.mask_proxy(current):
+        if item.masked and text == masked_view(item, current):
             continue
         if text == current:
             continue
@@ -516,7 +573,7 @@ def form_state(env_map: Dict[str, Any]) -> List[Dict[str, Any]]:
     bad_keys = {item["key"] for item in problems(env_map)}
     for item in SETTINGS:
         raw = _text(env_map.get(item.key))
-        value = store.mask_proxy(raw) if item.masked else raw
+        value = masked_view(item, raw)
         options: List[Dict[str, str]] = []
         if item.kind == KIND_SELECT:
             if item.key not in env_map:

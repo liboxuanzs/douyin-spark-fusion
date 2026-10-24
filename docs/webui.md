@@ -23,7 +23,7 @@
 - **不碰浏览器依赖**：`webui/` 任何模块都不 import `playwright` / `cloakbrowser`。
   只有真正点"立即运行"时，才在**请求处理函数内部**惰性 `from core.tasks import runTasks`；
   依赖缺失时返回 **503 + 中文说明**，进程不崩（`webui/app.py:171` `missing_browser_modules()`）。
-- **只改白名单里的键**：面板的配置面板能改 19 个键（发送时间、抖动、超时、
+- **只改白名单里的键**：面板的配置面板能改 28 个键（发送时间、抖动、超时、
   日志级别等），保存时**原子替换** `.env` 并留 5 份备份，改完立即生效。白名单之外
   （`COOKIES_*` / `TASKS` / 口令 / 各种 `*_FILE`）只能手工编辑 `.env`，改完
   `systemctl restart douyin-spark-fusion-web.service`。
@@ -66,6 +66,9 @@ cd /opt/douyin-spark-fusion
 | `RUN_LOCK_FILE` | `logs/run.lock` | 运行锁（判断"正在运行"） |
 | `RATE_LIMIT_FILE` | `logs/rate_limit.json` | 熔断冷却状态 |
 | `OPS_LOG_FILE` | `logs/app.log` | "日志"页读的文件；systemd 部署下指向 `logs/douyin-spark-fusion.log` |
+| `NOTIFY_WEBHOOK_URL` | 空 | 结果通知地址；面板上**打码显示**（只留 `scheme://host/***`），不动这一栏就不会覆写。留空 = 不通知 |
+| `NOTIFY_LEVEL` | `error` | `off` / `error` / `always`；空跑（`DRY_RUN` 不是 `off`）无论哪一档都不推 |
+| `NOTIFY_TIMEOUT_SECONDS` | `10` | 单次推送超时（3–60 秒） |
 
 生成口令哈希：
 
@@ -107,6 +110,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | POST | `/ops/account/remove` | 移除账号（连 `COOKIES_<抖音号>` 一起删） |
 | POST | `/ops/account/requeue` | 表单 `unique_id`：**撤回今天的记账**，让当天剩下的门铃把它补发一次（issue #12 的手动出口）。**今天已经成功发过的账号会被拒绝**（"已经发过就不撤"的判定在 `core/schedule.requeue_after_relogin()`），所以这个按钮造不出"一天发两遍"；`?format=json` 走 JSON |
 | POST | `/ops/config/save` | 保存「运行配置」表单：只认 `webui/settings.py` 白名单里的键，写前备份 `.env`；`?format=json` 走 JSON 报错 |
+| POST | `/ops/notify/test` | 按当前配置推一条**测试**通知（200 成功 / 400 失败并在 `detail` 里说原因）。同步执行，最坏等 `NOTIFY_TIMEOUT_SECONDS` 秒；`?format=json` 走 JSON |
 | POST | `/ops/password` | 改面板自己的访问口令：字段 `current`/`new`/`confirm`/`store`（`plain`\|`hash`）。`WEBUI_PASSWORD` 与 `WEBUI_PASSWORD_HASH` **两个键一起写**（不用的那个写成空行），成功即**所有旧会话立刻失效**（303 回登录页）；`?format=json` 走 JSON |
 | GET | `/healthz` | 免登录健康检查 `{"ok":true}` |
 | — | `/static/*` | 样式与脚本（本地文件） |
@@ -136,6 +140,8 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
   任何一项不合法就**整批不写**，原因显示在那一行；`.env` 里现在就写坏的值会在表单上方用红框
   列出来（否则工具下一轮读配置直接抛异常）。账号与口令不在这个表单里（走扫码登录）。
   下面还有只读的定时时间（以 systemd 单元为准）、账本/锁/冷却/日志路径与消息模板预览。
+  表单外面还有一个独立的**发送测试通知**按钮，走 `POST /ops/notify/test` —— 地址配错时
+  不用等出事故就知道；测试消息带【测试】前缀，不会被当成真发送。
 - **访问口令**（折叠）：**面板自己的登录口令在这里改**，不用去服务器上碰 `.env`。左侧栏
   「管理 → 访问口令」也能直接跳进来。表单要填当前口令 + 新口令（两遍）+ 保存方式：
   - 保存方式 `明文`（默认）＝ 写 `WEBUI_PASSWORD`，`.env` 里能直接读到，忘了可以用眼睛看回来；
