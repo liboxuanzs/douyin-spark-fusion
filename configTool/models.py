@@ -206,6 +206,39 @@ def parse_schedule_times(value) -> tuple:
 # ---------------------------------------------------------------------------
 # 账户
 # ---------------------------------------------------------------------------
+
+#: `TASKS[].enabled` 里算「停用」/「启用」的写法。与 `utils/config.py` 的
+#: `_TASK_DISABLED` / `_TASK_ENABLED` **必须逐字一致**：同一份 .env 会被主程序、
+#: 面板和本工具轮流读写，两边认的值不一样，就会出现「面板显示已停用、本工具
+#: 把它当成启用写回去」这种静默失效。新增同义写法时两处一起加。
+TASK_DISABLED = {"false", "0", "no", "off", "disabled", "stop", "stopped", "停用", "暂停"}
+TASK_ENABLED = {"true", "1", "yes", "on", "enabled", "enable", "启用", "恢复"}
+
+
+def task_enabled(task) -> bool:
+    """`TASKS` 里这一项启用没有（`enabled` 缺键 = 启用，向后兼容）。
+
+    口径与 `utils/config.py::task_enabled` 相同（那边多一句告警日志）：
+    缺键/None/空串/认不出的值都按启用处理 —— 老 .env 里根本没有这一项，
+    按停用处理等于升级当天所有账号静默停发。
+    """
+    if not isinstance(task, dict):
+        return True
+    raw = task.get("enabled")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    text = str(raw).strip().lower()
+    if not text or text in TASK_ENABLED:
+        return True
+    if text in TASK_DISABLED:
+        return False
+    return True
+
+
 @dataclass
 class Account:
     """一个抖音账号。
@@ -226,6 +259,10 @@ class Account:
     time            这个账号专属的发送时间（TASKS[].time，形如 "17:20"）。
                     与 message 同理：本工具不编辑它，但**必须原样写回** ——
                     漏一次就等于把「这个账号 17:20 发」悄悄改成全局时间。
+    enabled         是否还在自动发送（TASKS[].enabled，缺键 = 启用）。本工具界面上
+                    不显示也不编辑它，但**必须原样写回** —— 与 message/time 同一个
+                    道理：to_task() 是整条 TASKS 的重建，漏了就等于把用户在面板上
+                    停用的账号静默重新启用（2026-10-24 发现的缺陷）。
     """
 
     username: str = ""
@@ -240,6 +277,8 @@ class Account:
     fingerprint: str = ""
     message: str = ""
     time: str = ""
+    # 缺键/看不懂 = 启用（见 task_enabled）；写回时只在 False 时落 `"enabled": false`。
+    enabled: bool = True
 
     @property
     def display_name(self) -> str:
@@ -328,6 +367,11 @@ class Account:
         at = str(self.time or "").strip()
         if at:
             task["time"] = at
+        # 停用状态同理，但方向相反：**缺键 = 启用**（主程序 core/schedule.py 与面板
+        # 都这么认），所以只在停用时写 `"enabled": false`，启用的账号不落这个键 ——
+        # 少一个键，手改 .env 时也少一处要看。
+        if not self.enabled:
+            task["enabled"] = False
         return task
 
 
@@ -536,6 +580,9 @@ class Config:
                     message=str(task.get("message", "") or ""),
                     # 同上：面板写的账号专属发送时间
                     time=str(task.get("time", "") or ""),
+                    # 面板上的停用开关（TASKS[].enabled，缺键 = 启用）。同样不显示、
+                    # 不编辑，但重建 TASKS 时必须原样带回去（见 to_task）。
+                    enabled=task_enabled(task),
                 )
             )
 

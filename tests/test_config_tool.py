@@ -283,6 +283,81 @@ class TargetsRoundTripTests(unittest.TestCase):
         self.assertEqual(account.cookie_status, "已获取 1 项")
 
 
+class EnabledRoundTripTests(unittest.TestCase):
+    """面板上的停用开关（TASKS[].enabled）经 configTool 开一次再存，不能丢。
+
+    configTool 保存时是整条 TASKS 重建，模型里没有的字段一律消失。enabled 是
+    2026-10 面板新增的键，当时只给 message/time 写了「必须原样写回」的注释，
+    漏了它 —— 于是用桌面工具保存任何一个账号，就把用户在面板上停用的账号
+    静默重新启用（主程序认缺键 = 启用），第二天照点照发。
+
+    口径与 `utils/config.py::task_enabled` 必须逐字一致：同一份 .env 会被主程序、
+    面板、本工具轮流读写，两边认的值不同就会出现「面板显示已停用、这边当启用」。
+    """
+
+    def _cfg(self, task: dict):
+        return models.Config.from_env_map({
+            "TASKS": models.json.dumps([task], ensure_ascii=False),
+        })
+
+    def _saved_task(self, task: dict) -> dict:
+        cfg = self._cfg(task)
+        return models.json.loads(cfg.to_env_map()["TASKS"])[0]
+
+    def test_disabled_flag_survives(self):
+        cfg = self._cfg({"unique_id": "111", "targets": ["甲"], "enabled": False})
+        self.assertIs(cfg.accounts[0].enabled, False)
+        saved = self._saved_task({"unique_id": "111", "targets": ["甲"], "enabled": False})
+        self.assertIs(saved["enabled"], False, "停用状态必须以布尔 false 写回")
+
+    def test_enabled_account_writes_no_key(self):
+        """缺键就是启用：启用的账号不该在 .env 里多一个 `"enabled": true`。"""
+        cfg = self._cfg({"unique_id": "111", "targets": ["甲"]})
+        self.assertIs(cfg.accounts[0].enabled, True)
+        saved = self._saved_task({"unique_id": "111", "targets": ["甲"]})
+        self.assertNotIn("enabled", saved)
+
+    def test_explicit_true_is_also_dropped(self):
+        saved = self._saved_task({"unique_id": "111", "targets": ["甲"], "enabled": True})
+        self.assertNotIn("enabled", saved)
+
+    def test_synonym_spellings_are_understood(self):
+        """手写 .env 的人会写 "false"/0/停用，不能只认布尔。"""
+        for raw in ("false", "0", "no", "off", "disabled", "stop", "stopped", "停用", "暂停", 0, 0.0):
+            with self.subTest(raw=raw):
+                self.assertIs(self._cfg({"unique_id": "111", "enabled": raw}).accounts[0].enabled, False)
+        for raw in ("true", "1", "yes", "on", "enabled", "enable", "启用", "恢复", 1, 2):
+            with self.subTest(raw=raw):
+                self.assertIs(self._cfg({"unique_id": "111", "enabled": raw}).accounts[0].enabled, True)
+
+    def test_unreadable_value_falls_back_to_enabled(self):
+        """认不出的值按启用处理 —— 与主程序一致（宁可发，不可静默停）。"""
+        self.assertIs(self._cfg({"unique_id": "111", "enabled": "也许"}).accounts[0].enabled, True)
+        self.assertIs(self._cfg({"unique_id": "111", "enabled": None}).accounts[0].enabled, True)
+
+    def test_default_account_is_enabled(self):
+        account = models.Account(unique_id="111")
+        self.assertIs(account.enabled, True)
+        self.assertNotIn("enabled", account.to_task())
+
+    def test_synonym_sets_match_utils_config(self):
+        """两处集合必须逐字相同（改一处忘另一处 = 静默失效）。"""
+        from utils import config as main_config
+
+        self.assertEqual(models.TASK_DISABLED, main_config._TASK_DISABLED)
+        self.assertEqual(models.TASK_ENABLED, main_config._TASK_ENABLED)
+
+    def test_parser_agrees_with_main_program(self):
+        """同一批原始值，两边解析结果逐项相同。"""
+        from utils import config as main_config
+
+        samples = [None, True, False, 0, 1, 2, "", "true", "false", "TRUE", "停用", "启用", "也许"]
+        for raw in samples:
+            with self.subTest(raw=raw):
+                task = {"unique_id": "111", "enabled": raw}
+                self.assertIs(models.task_enabled(task), main_config.task_enabled(task))
+
+
 class ScheduleTimeEmissionTests(unittest.TestCase):
     """★ 2026-10 全盘审查：configTool 以前只写 CRON_*，程序内的发送闸门读不到。
 

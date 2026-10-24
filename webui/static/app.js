@@ -710,6 +710,12 @@
     updateTaskBanner(task);
     updateBanners(data.banners || []);
     setText("[data-overview-value='total']", summary.total || 0);
+    // 页头「· N 个账号」：目标数只算启用的账号，账号数若停在首屏那份旧值，
+    // 停用/启用之后两边就各说各的。文案由服务端 accounts_text 一处给；
+    // 老面板不带这个键时别去清空首屏已经渲染好的那半句。
+    if (summary.accountsText) {
+      setText("[data-overview-value='accounts']", summary.accountsText);
+    }
     setText("[data-overview-value='confirmed']", summary.confirmed || 0);
     setText("[data-overview-value='pageEcho']", summary.pageEcho || 0);
     setText("[data-overview-value='attention']", summary.attention || 0);

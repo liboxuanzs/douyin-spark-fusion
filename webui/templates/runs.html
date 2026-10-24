@@ -154,7 +154,7 @@
           {% if row.skip_reason or row.note %}
           <tr class="muted compact">
             <td colspan="7">
-              {% if row.skip_reason %}整轮跳过：{{ row.skip_reason }}{% if row.skip_until %}（跳过至 {{ row.skip_until }}）{% endif %}{% endif %}
+              {% if row.skip_reason %}整轮跳过：{{ row.skip_reason_text or row.skip_reason }}{% if row.skip_until %}（跳过至 {{ row.skip_until }}）{% endif %}{% endif %}
               {% if row.note %}{{ row.note }}{% endif %}
             </td>
           </tr>

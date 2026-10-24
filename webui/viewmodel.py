@@ -133,6 +133,20 @@ REASON_LABELS: Dict[str, str] = {
     "session_kicked": "会话被服务端踢下线（要重新扫码登录）",
 }
 
+#: 账本里「整轮跳过」的 ``skip_reason``（`core/tasks.py::_skip()` 的那几个码）。
+#: 与 REASON_LABELS 分开：那套是「某条消息为什么没发出去」，这套是「这一轮为什么
+#: 根本没干活」。原来面板直接打印英文码，中文界面里冒出一句
+#: 「整轮跳过：already_sent」—— 用户看不懂，也不知道该不该管。
+#: 不认识的码仍然原样带出去（不编故事），见 ``_skip_text()``。
+SKIP_LABELS: Dict[str, str] = {
+    "cooldown": "风控冷却还没结束",
+    "quiet_window": "落在禁跑时间窗里",
+    "no_such_account": "指定的账号不在配置里",
+    "account_stopped": "账号都已停用",
+    "already_sent": "今天已经发过了",
+    "locked": "另一轮还没跑完（运行锁被占着）",
+}
+
 #: 回执来源（``core.douyin_im`` 的 ``via`` 字段）。
 #: 注意 `http` 这一档的措辞：`_wait_receipt` 拿到 HTTP 回执后**最多再等 1 秒**
 #: 就收工（`core/douyin_im.py` 里 `if http and time.time() - t0 > 1.0: break`），
@@ -282,6 +296,13 @@ def _reason_text(reason: str) -> str:
     if reason in REASON_LABELS:
         return REASON_LABELS[reason]
     return reason
+
+
+def _skip_text(reason: str) -> str:
+    """整轮跳过的人话（同上：不认识的码原样带出去）。"""
+    if not reason:
+        return ""
+    return SKIP_LABELS.get(reason, reason)
 
 
 def _segment_row(target: str, bucket: str, **extra: Any) -> Dict[str, Any]:
@@ -879,6 +900,15 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
     blocked_targets = sum(_int(card.get("total")) for card in active if card.get("state") == "blocked")
     sent = confirmed + weak
     strong_pct, weak_pct = progress_pair(confirmed, sent, total)
+    # 页头那行「· N 个账号，共 M 个目标」里的 N。M（total）只算启用的账号，
+    # N 若还按「活着的账号」写，全停用时就成了「2 个账号，共 0 个目标」——
+    # 数字互相打脸，也看不出是停用造成的。轮询要重画这一格，措辞只在这里定。
+    if stopped and not active:
+        accounts_text = f"{stopped} 个账号全部已停用"
+    else:
+        accounts_text = f"{len(active)} 个账号"
+        if stopped:
+            accounts_text += f"（另有 {stopped} 个已停用）"
 
     return {
         "total": total,
@@ -901,6 +931,9 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
         "blocked_targets": blocked_targets,
         "accounts": len(live),
         "accounts_active": len(active),
+        # 与 total 同一分母口径的账号数（含「另有 N 个已停用」的说明），
+        # 供页头那行与 10 秒轮询共用。
+        "accounts_text": accounts_text,
         # 停用的账号：不进上面的分母，但必须单独报出来 —— 否则"共 N 个目标"会
         # 凭空空掉一块，用户在页面上找不到原因（卡片本身也会写"已停用"）。
         "accounts_stopped": stopped,
@@ -946,6 +979,8 @@ def run_row(record: Any) -> Dict[str, Any]:
         "source_text": _text(_get(record, "source_text"), store.source_text(_text(_get(record, "source")))),
         "rate_limited": bool(_get(record, "rate_limited")),
         "skip_reason": _text(_get(record, "skip_reason")),
+        # 模板优先用这一格；老账本里没有映射的码由它原样兜回英文。
+        "skip_reason_text": _skip_text(_text(_get(record, "skip_reason"))),
         "skip_until": _text(_get(record, "skip_until")),
         "note": _text(_get(record, "note")),
         "accounts": _int(_get(counts, "accounts")),
@@ -1284,7 +1319,7 @@ def _banners(
             }
         )
     if last_skip:
-        detail = f"原因：{last_skip}"
+        detail = f"原因：{_skip_text(last_skip)}"
         if last_skip_until:
             detail += f"（跳过至 {last_skip_until}）"
         banners.append(
@@ -1500,6 +1535,9 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
         "tz": tz,
         "summary": {
             "total": summary.get("total", 0),
+            # 页头「· N 个账号」这一格：模板首屏与 10 秒轮询必须同一个口径，
+            # 否则停用账号一多，页头的账号数与目标数会各说各的。
+            "accountsText": _text(summary.get("accounts_text")),
             "confirmed": summary.get("confirmed", 0),
             "pageEcho": summary.get("pageEcho", 0),
             "receiptOnly": summary.get("receiptOnly", 0),

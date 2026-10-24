@@ -138,7 +138,7 @@
       <div class="overview-help">
         强确认 <b data-overview-value="confirmed">{{ summary.confirmed }}</b>
         · 弱证据 <b data-overview-value="weakSent">{{ summary.weak }}</b>
-        · {{ summary.accounts }} 个账号，共 <b data-overview-value="total">{{ summary.total }}</b> 个目标
+        · <span data-overview-value="accounts">{{ summary.accounts_text }}</span>，共 <b data-overview-value="total">{{ summary.total }}</b> 个目标
       </div>
       {# 这一块必须在轮询里能出现/消失：账号是不是各跑各的、跑了几轮，每一轮都可能变，
          而 app.js 只许切 hidden、不许增删 DOM。所以元素常驻，按服务端发的 mixedRuns

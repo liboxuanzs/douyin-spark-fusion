@@ -549,6 +549,38 @@ class StoppedAccountViewTests(unittest.TestCase):
         self.assertEqual(summary["total"], 2, "停用账号的目标不该算进今天的进度")
         self.assertEqual(summary["pending"], 1)
 
+    def test_header_account_count_explains_the_stopped_ones(self):
+        """页头「N 个账号，共 M 个目标」：M 不数停用账号的目标，N 也要说清楚。
+
+        2026-10-24 面板实测的缺陷：一个账号停用、一个启用时写「2 个账号，共 2 个目标」
+        （启用那个号自己有 2 个目标），全停用时写「2 个账号，共 0 个目标」—— 两个
+        数字互相打脸，也完全没提「有账号被停用了」，用户只能自己去翻卡片。
+        """
+        live = viewmodel.build_account(
+            _snapshot(targets=["甲", "乙"], target_count=2),
+            _record(accounts=[_account(targets=["甲", "乙"], entries=[_entry("甲")])]),
+        )
+        stopped = viewmodel.build_account(
+            self._stopped(targets=["甲", "乙", "丙"], target_count=3), None
+        )
+        summary = viewmodel.summarize([live, stopped])
+        self.assertEqual(summary["accounts_text"], "1 个账号（另有 1 个已停用）")
+        self.assertEqual(
+            viewmodel.summarize([stopped])["accounts_text"],
+            "1 个账号全部已停用",
+        )
+        self.assertEqual(
+            viewmodel.summarize([live])["accounts_text"],
+            "1 个账号",
+            "没有停用账号时，文案与原来一致",
+        )
+
+    def test_poll_payload_carries_that_text(self):
+        """10 秒轮询也要能重画这一格（否则账号数停在首屏，目标数却在变）。"""
+        view = {"summary": {"accounts_text": "1 个账号（另有 1 个已停用）", "total": 2}}
+        payload = viewmodel.overview_payload(view)
+        self.assertEqual(payload["summary"]["accountsText"], "1 个账号（另有 1 个已停用）")
+
     def test_all_stopped_is_said_out_loud(self):
         schedule_view = viewmodel._schedule_state(
             [], 0, None, [],
@@ -1011,6 +1043,51 @@ class RunRowTests(unittest.TestCase):
         for key in ("run_id", "started_text", "status", "status_text", "dry_run_text", "source_text", "entries"):
             self.assertIn(key, row)
         self.assertEqual(row["source_text"], "面板触发")
+
+
+class SkipReasonTextTests(unittest.TestCase):
+    """整轮跳过也要说人话（2026-10-24 复查）。
+
+    「运行记录」页与首页横幅原来直接把账本里的英文码印出来：
+    `整轮跳过：already_sent`、`原因：account_stopped`。中文界面里突然冒一句英文，
+    用户既看不懂，也不知道该不该管 —— 与发送明细的 reason 码是同一个毛病。
+    """
+
+    def test_run_row_carries_the_chinese_text(self):
+        row = viewmodel.run_row(_record(skip_reason="account_stopped"))
+        self.assertEqual(row["skip_reason"], "account_stopped", "原始码要留着排查")
+        self.assertEqual(row["skip_reason_text"], "账号都已停用")
+
+    def test_unknown_code_is_passed_through(self):
+        """没见过的码原样带出去，不编故事。"""
+        row = viewmodel.run_row(_record(skip_reason="brand_new_code"))
+        self.assertEqual(row["skip_reason_text"], "brand_new_code")
+
+    def test_the_banner_says_it_in_chinese_too(self):
+        banners = viewmodel._banners(
+            cooldown={}, quiet={}, task={}, summary={},
+            missing_browser=[], blocked_reason="", last_skip="already_sent",
+        )
+        text = " ".join(banner["text"] for banner in banners)
+        self.assertIn("今天已经发过了", text)
+        self.assertNotIn("already_sent", text)
+
+
+class SkipReasonCoverageTests(unittest.TestCase):
+    """`core/tasks.py` 里新加的 `reason=` 码必须同时进 SKIP_LABELS。
+
+    少一个，那一轮跳过的原因就会以英文码的形式出现在两个页面上。
+    """
+
+    def test_每个跳过码都有中文标签(self) -> None:
+        import re
+
+        with open(os.path.join(REPO_ROOT, "core/tasks.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        codes = set(re.findall(r'reason="([a-z][a-z_]*)"', src))
+        self.assertTrue(codes, "没抓到任何跳过原因码，正则大概失效了")
+        missing = sorted(c for c in codes if c not in viewmodel.SKIP_LABELS)
+        self.assertEqual(missing, [], f"页面上会显示英文码：{missing}")
 
 
 class PurityTests(unittest.TestCase):

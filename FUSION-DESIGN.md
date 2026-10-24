@@ -833,3 +833,37 @@ CSS 过渡会停在 `startTime: null` 的 pending 状态 —— 看起来像「�
 `tests/test_envfile.py::AccountEnabledTests`、`tests/test_viewmodel.py::StoppedAccountViewTests`、
 `tests/test_webui.py::AccountEnabledWebUITestCase`（含"停用后 cookie/好友/指纹/注释都还在"、
 "启用后键被删掉"、"跨站请求被拒且不动 .env"）。
+
+## 2026-10-24 停用开关的两个尾巴（复查补上）
+
+停用功能本身上线后，复查发现两处「说了不算」：
+
+**① configTool 保存一次就把停用账号重新启用。**
+configTool/models.py 的 Account 没有 enabled 字段，而 to_task() 是整条 TASKS 的重建
+—— 桌面工具打开再保存任何一个账号，"enabled": false 就被静默丢掉，主程序按缺键=启用。
+与 message/time 曾经踩过的是同一个坑，注释也写了同一句「必须原样写回」，但新加的键
+没跟上。修法：Account.enabled（默认 True）+ from_env_map 用与 utils/config.py 逐字
+一致的 task_enabled() 读回来 + to_task() 只在停用时写 "enabled": false（启用账号不落键，
+手改 .env 少一处要看）。两处同义写法集合由测试钉死一致，避免「面板写停用、工具读不懂、
+当启用写回」。
+
+**② 页头「N 个账号，共 M 个目标」两个数字不同源。**
+M（summary.total）只数启用账号的目标，N 原来是「活着的账号数」（含停用）。于是一个停用
++ 一个启用时写「2 个账号，共 2 个目标」，全停用时写「2 个账号，共 0 个目标」—— 数字互相
+打脸，也没提「有账号被停用了」。而且 N 是模板里的纯文本，10 秒轮询只更新 M，页面开着不动
+时两边会越差越远。修法：summarize() 出 accounts_text（「1 个账号（另有 1 个已停用）」/
+「2 个账号全部已停用」），模板与 /api/ops/overview 的 summary.accountsText 共用同一句，
+文案只在这一处定。
+
+**③ 整轮跳过的原因在页面上是英文码。**
+「运行记录」的明细行与首页横幅原来直接打印账本的 skip_reason：
+「整轮跳过：already_sent」、「原因：account_stopped」。这些码来自
+core/tasks.py 的 _skip()（cooldown/quiet_window/no_such_account/account_stopped/
+already_sent/locked），与发送明细的 reason 码是同一个毛病：中文界面里冒英文，用户
+既看不懂也不知道要不要管。修法：viewmodel.SKIP_LABELS + _skip_text()，run_row 出
+skip_reason_text（原始码保留供排查），runs 页与 _banners() 共用这一句；认不出的码
+仍然原样带出去。测试从 core/tasks.py 源码里抓所有 reason= 码，逼映射跟上。
+
+**验证**：tests/test_config_tool.py::EnabledRoundTripTests（8 条：往返、启用不落键、
+同义值、认不出按启用、与主程序逐项一致）、tests/test_viewmodel.py::StoppedAccountViewTests
+新增页头文案与轮询字段两条。
