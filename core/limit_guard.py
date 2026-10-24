@@ -24,6 +24,7 @@
 """
 import json
 import os
+import random
 import tempfile
 from datetime import timedelta
 
@@ -249,3 +250,31 @@ def sleep_jitter_bounds(min_seconds, max_seconds):
     if hi < lo:
         hi = lo
     return lo, hi
+
+#: 长尾停顿的触发概率。约每 7 个目标里有 1 个会额外多停一会儿。
+#:
+#: 为什么需要它：固定区间 [8, 20] 的均匀分布是**最好认的机器特征** —— 间隔全挤在
+#: 同一个窄带里、方差过小，连着几条抽出来一看就知道不是人手点的。给分布加一条
+#: "偶尔走开一下"的尾巴，均值几乎不变，形状就不一样了。
+LONG_PAUSE_PROBABILITY = 0.15
+
+
+def sample_gap_seconds(lo, hi, long_pause_seconds=0.0, rng=None):
+    """抽一个"下一条目标之前等多久"：主体均匀 + 小概率长尾。
+
+    多数时候落在 `[lo, hi]`（与老行为一致）；`LONG_PAUSE_PROBABILITY` 的概率下再多停
+    `[0, long_pause_seconds]`，于是整体是右偏的 —— 短间隔照旧，偶尔冒出一个明显更长
+    的停顿。`long_pause_seconds <= 0` 时退回纯均匀分布（= 完全的老行为）。
+
+    纯函数，`rng` 可注入（单测不用真等，也不用种全局随机数）。
+    """
+    rng = rng or random
+    lo, hi = sleep_jitter_bounds(lo, hi)
+    gap = float(rng.uniform(lo, hi))
+    try:
+        pause = float(long_pause_seconds or 0)
+    except (TypeError, ValueError):
+        pause = 0.0
+    if pause > 0 and rng.random() < LONG_PAUSE_PROBABILITY:
+        gap += float(rng.uniform(0.0, pause))
+    return gap

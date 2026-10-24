@@ -29,6 +29,7 @@ import time
 import traceback
 import json
 import math
+import random
 import re
 import unicodedata
 from urllib.parse import unquote
@@ -2363,6 +2364,46 @@ class DouyinIM:
             return False
         _slow_warn(f"滚动到 {top}", time.monotonic() - t0)
         return result
+    def warmup_browse(self, seconds):
+        """开跑前先在会话列表里"随便看看"若干秒。
+
+        真人打开抖音不会一秒不差地直奔某个会话：先扫两眼列表、偶尔回滚一下，才点进去。
+        这里只**滚动**，不点、不选中、不发 —— 它只是给整轮动作加一点人味。任何一步失败
+        都安静退场（暖场失败绝不能变成不发消息）。返回实际花掉的秒数，供日志记录。
+        """
+        try:
+            budget = float(seconds or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        budget = max(0.0, min(budget, float(self.WARMUP_BROWSE_MAX_SECONDS)))
+        if budget <= 0:
+            return 0.0
+        started = time.monotonic()
+        steps = 0
+        try:
+            probe = self._scroll_probe() or {}
+            if not probe.get("found"):
+                logger.debug("[SEND] 暖场浏览跳过：读不到会话列表的滚动状态")
+                return 0.0
+            height = float(probe.get("clientHeight") or 0) or 800.0
+            bottom = max(0.0, float(probe.get("scrollHeight") or 0) - height)
+            step = max(120.0, height * 0.35)
+            position = float(probe.get("scrollTop") or 0)
+            while time.monotonic() - started < budget:
+                if bottom > 0 and position >= bottom - 1:
+                    # 到底了就回滚一小段，像人在"翻回去看看"
+                    position = max(0.0, position - step * random.uniform(0.8, 1.6))
+                else:
+                    position = min(bottom, position + step * random.uniform(0.6, 1.4))
+                if not self._scroll_to(position):
+                    break
+                steps += 1
+                self._snooze(int(random.uniform(700, 1800)), "暖场浏览")
+        except Exception as exc:                                # noqa: BLE001
+            logger.debug(f"[SEND] 暖场浏览中断：{_brief(exc)}")
+        spent = max(0.0, time.monotonic() - started)
+        logger.info(f"[SEND] 暖场浏览 {spent:.0f}s（滚动 {steps} 次）")
+        return spent
 
     # ---------------------------------------------------- 对外：选中/输入
 
@@ -2636,6 +2677,18 @@ class DouyinIM:
     #: 落地校验读回的次数与间隔：state 重渲染需要时间，一次读回就判死会白拒一条。
     READBACK_ATTEMPTS = 3
     READBACK_SETTLE_MS = 150
+    #: 分段输入的切块大小（字符）与块间停顿（毫秒）。
+    #:
+    #: ★ 一次 `Input.insertText` 把整条消息在**一帧之内**塞进输入框，页面上看到的是
+    #:   "整段凭空出现" —— 真人的输入是逐段长出来的。切成 4~8 字一块、块间停 80~200ms，
+    #:   落进页面的输入事件序列就与键盘输入接近了。
+    #: ★ 安全语义不变：调用方已经全选编辑器，第一块替换选区、后续块接在光标后面，
+    #:   最终内容与一次性插入完全一致；落地校验仍是精确相等，缺字就整条判失败。
+    TYPING_CHUNK_CHARS = 6
+    TYPING_CHUNK_DELAY_MS = 110
+
+    #: 暖场浏览的硬上限（秒）：配置写大了也不至于在开跑前干等半小时。
+    WARMUP_BROWSE_MAX_SECONDS = 120
 
     def _input_mode(self):
         """本次进程用哪种输入方式："real"（CDP 可信输入）/"jsreplace"（JS 原生全选 +
@@ -2815,11 +2868,42 @@ class DouyinIM:
             logger.warning("[SEND] ⚠️ 编辑器全选失败")
             return False
         try:
-            self.page.keyboard.insert_text(text)
+            self._insert_text_in_chunks(text)
         except Exception as exc:                                # noqa: BLE001
             logger.warning(f"[SEND] ⚠️ 可信输入异常：{_brief(exc)}")
             return False
         return self._typing_landed(lines)
+
+    def _typing_chunk_settings(self):
+        """读分段输入的配置快照；读不出来就当"不切块"，绝不因此拒发一条消息。"""
+        try:
+            cfg = get_config()
+            size = int(float(cfg.get("typingChunkChars", self.TYPING_CHUNK_CHARS) or 0))
+            delay = float(cfg.get("typingChunkDelayMs", self.TYPING_CHUNK_DELAY_MS) or 0)
+        except (TypeError, ValueError, AttributeError):
+            return self.TYPING_CHUNK_CHARS, float(self.TYPING_CHUNK_DELAY_MS)
+        return max(0, size), max(0.0, delay)
+
+    def _insert_text_in_chunks(self, text):
+        """分几块把消息打进去，块间停一下（见 `TYPING_CHUNK_CHARS` 的注释）。
+
+        调用前提与一次性插入完全相同：编辑器已经被**全选**，所以第一块是替换、后续块
+        是追加。落地校验仍由调用方做（`_typing_landed`），这里只管"分几次、停多久"。
+        """
+        size, delay = self._typing_chunk_settings()
+        if size <= 0 or delay <= 0 or len(text) <= size:
+            self.page.keyboard.insert_text(text)
+            return
+        for start in range(0, len(text), size):
+            self.page.keyboard.insert_text(text[start:start + size])
+            if start + size >= len(text):
+                break
+            try:
+                self.page.wait_for_timeout(delay * random.uniform(0.6, 1.4))
+            except Exception as exc:                            # noqa: BLE001
+                # 块间停顿失败不必拒发：字已经在编辑器里了，接着打下一块就是。
+                logger.debug(f"[SEND] 分段输入的块间停顿失败：{_brief(exc)}")
+                break
 
     def _type_real(self, editor, lines, dry):
         """可信输入（CDP）：**全选 → `insert_text` 覆盖** → 读回校验。

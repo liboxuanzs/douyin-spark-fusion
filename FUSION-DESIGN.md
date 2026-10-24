@@ -724,3 +724,40 @@ CSS 过渡会停在 `startTime: null` 的 pending 状态 —— 看起来像「�
 「折叠块打不开」。抓 `requestAnimationFrame` 或截图才会出帧。判断动画是否真的跑起来，
 看 `document.getAnimations()` 里 `startTime` 是否非空，别只看采样值。
 
+## 13. 发送节奏人性化（2026-10-24，用户要求「为防止风控，做 B（节奏人性化）」）
+
+背景：检测与熔断（§6）已经够用，真正的短板是**日常行为太像机器** —— 每天整分开始、
+间隔均匀、整条消息在一帧里出现。这一节只调节奏，不改发送内容、不改任何判定语义。
+
+| 键 | 默认 | 作用 | 落点 |
+| --- | --- | --- | --- |
+| `RUN_START_JITTER_SECONDS` | `90` | 门铃到点后先随机等 0~90s 再开浏览器 | `core/tasks.py::_start_delay_seconds`，在**抢运行锁之前**睡 |
+| `SEND_INTERVAL_LONG_PAUSE_SECONDS` | `75` | 约 15% 概率在正常间隔外多停 0~75s | `core/limit_guard.py::sample_gap_seconds` |
+| `TYPING_CHUNK_CHARS` / `_DELAY_MS` | `6` / `110` | 消息分块输入，块间停 66~154ms | `core/douyin_im.py::_insert_text_in_chunks` |
+| `WARMUP_BROWSE_SECONDS` | `0` | 门禁后先在会话列表滚 N 秒再发 | `core/douyin_im.py::warmup_browse` |
+
+**为什么不等手动触发**：面板「立即运行」和 `main.py task` 都意味着有人正看着结果，
+让它们白等 90 秒只会让人以为卡死了。`_start_delay_seconds` 只认 `source == timer`，
+空跑（`select`/`full`）也不等。
+
+**对发送时刻的影响（要跟用户说清楚）**：这只是**在门铃之后**再挪 0~90 秒，叠加原来的
+±15 分钟对称抖动，账号 17:20 的实际窗口是 `[17:05, 17:40]`，最坏情况比抖动算出来的
+再晚 1.5 分钟。它不是"把发送时间往后调"。
+
+**长尾的形状**：`uniform(8, 20)` 的均值是 14s，加长尾后约 19.6s（`0.15 × 37.5`）。均值
+被抬了一点是刻意的 —— 更长的停顿是最便宜的"人手"信号，而 8~20s 的窄带均匀分布在
+统计上一眼就能认出来。纯函数注入 `rng`，单测不真等也不种全局随机数。
+
+**分段输入的安全语义必须保住**：调用方（`_try_trusted_typing`）已经全选编辑器，
+`insert_text` 的**第一块替换选区**、后续块接在光标后面 —— 最终内容与一次性插入一致。
+落地校验仍是 `_typing_landed` 的精确相等，缺一个字就整条判失败并退回 JS 覆盖通道。
+任何"分段之后内容可能对不上"的改动都要先看 `tests/test_douyin_im.py::ReplaceTypingTests`。
+
+**暖场浏览只读**：只滚会话列表，不点、不选中、不发；读不到滚动状态就直接跳过。它默认
+关闭，建议先试 20~40 秒。`_walk()` 第一步就是 `_scroll_to(0)`，所以暖场滚到哪一屏都
+不影响随后的扫描。
+
+**回滚**：四个键全部设 0 即回到改前的行为（`RUN_START_JITTER_SECONDS=0`、
+`SEND_INTERVAL_LONG_PAUSE_SECONDS=0`、`TYPING_CHUNK_CHARS=0`、`WARMUP_BROWSE_SECONDS=0`），
+不需要回退代码。
+

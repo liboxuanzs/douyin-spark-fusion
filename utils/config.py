@@ -247,6 +247,29 @@ def get_config():
         ),
         "sendIntervalMaxSeconds": _env_number(
             "SEND_INTERVAL_MAX_SECONDS", 20, minimum=0, maximum=3600
+        ),        # ---- 节奏人性化（2026-10-24，见 FUSION-DESIGN.md §13）----------------
+        # 定时器到点后先随机等 0~N 秒再开浏览器：门铃每 5 分钟**整分**敲一次，不磨一
+        # 下的话"每天开始发送"的时刻永远是 :00/:05/:10，一年下来没有一次落在 :03。
+        # 只对 timer 生效（见 core/tasks.py::_start_delay_seconds），手动触发不等。
+        "runStartJitterSeconds": _env_number(
+            "RUN_START_JITTER_SECONDS", 90, minimum=0, maximum=600
+        ),
+        # 长尾停顿：约 15% 的概率在正常间隔之外再多停 0~N 秒
+        # （见 core/limit_guard.py::sample_gap_seconds）。0 = 退回纯均匀分布。
+        "sendIntervalLongPauseSeconds": _env_number(
+            "SEND_INTERVAL_LONG_PAUSE_SECONDS", 75, minimum=0, maximum=600
+        ),
+        # 暖场浏览：门禁通过后先在会话列表里滚 N 秒再发（0 = 关闭，默认关）。
+        "warmupBrowseSeconds": _env_number(
+            "WARMUP_BROWSE_SECONDS", 0, minimum=0, maximum=120
+        ),
+        # 分段输入：一条消息按 N 个字切块打进去、块间停 M 毫秒（0 = 一次打完整段）。
+        # 不切块时整段消息在**一帧之内**出现在输入框里，真人不会这样。
+        "typingChunkChars": _env_int(
+            "TYPING_CHUNK_CHARS", 6, minimum=0, maximum=200
+        ),
+        "typingChunkDelayMs": _env_int(
+            "TYPING_CHUNK_DELAY_MS", 110, minimum=0, maximum=2000
         ),
         # 运行账本与运行锁（webui 也读这两个文件，见 core/run_ledger.py）。
         # 相对路径按**仓库根**解析（与 .env.example 里写的"相对路径按仓库根解析"、

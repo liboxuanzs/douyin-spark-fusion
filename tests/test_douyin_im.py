@@ -2483,6 +2483,7 @@ class _ProbePage:
         self.js_replaces = []      # JS 覆盖输入打进去的文本
         self.presses = []
         self.selected_text = None
+        self._has_selection = False   # 编辑器里有没有活动选区（分段输入的第一块靠它替换）
         self.clicked = 0
         self.keyboard = self       # page.keyboard.insert_text / type / press
         self.mouse = self          # page.mouse.move
@@ -2492,10 +2493,15 @@ class _ProbePage:
         self.moves.append((x, y))
 
     def insert_text(self, s):
-        """CDP 可信输入：真机实测这条可靠（全选生效时是覆盖）。"""
+        """CDP 可信输入：真机实测这条可靠（全选生效时是覆盖）。
+
+        分段输入（`TYPING_CHUNK_CHARS`）会连着调好几次：**只有第一块**替换选区，后面的
+        块接在光标后面 —— 这里按 `self._has_selection` 如实模拟，否则替身会比真机宽容。
+        """
         self.typed.append(("cdp-insert", s))
         if self.trusted_text == "same":
-            self.text = s
+            self.text = s if self._has_selection else self.text + s
+            self._has_selection = False
         elif self.trusted_text == "append":
             self.text += s
         else:
@@ -2552,6 +2558,7 @@ class _ProbePage:
             if not self.editor or not self.select_all_ok:
                 return None
             self.selected_text = self.text
+            self._has_selection = True
             return self.text
         if expr is douyin_im.JS_REPLACE_TEXT:
             text = (arg or {}).get("text") or ""
@@ -2588,6 +2595,15 @@ class _TypingIM:
     READBACK_SETTLE_MS = douyin_im.DouyinIM.READBACK_SETTLE_MS
     _editor_probe = douyin_im.DouyinIM._editor_probe
     _clear_editor = douyin_im.DouyinIM._clear_editor
+    _insert_text_in_chunks = douyin_im.DouyinIM._insert_text_in_chunks
+    _typing_chunk_settings = douyin_im.DouyinIM._typing_chunk_settings
+    warmup_browse = douyin_im.DouyinIM.warmup_browse
+    _snooze = douyin_im.DouyinIM._snooze
+    _scroll_probe = douyin_im.DouyinIM._scroll_probe
+    _scroll_to = douyin_im.DouyinIM._scroll_to
+    TYPING_CHUNK_CHARS = douyin_im.DouyinIM.TYPING_CHUNK_CHARS
+    TYPING_CHUNK_DELAY_MS = douyin_im.DouyinIM.TYPING_CHUNK_DELAY_MS
+    WARMUP_BROWSE_MAX_SECONDS = douyin_im.DouyinIM.WARMUP_BROWSE_MAX_SECONDS
 
     def __init__(self, page, mode=None):
         self.page = page
@@ -2758,7 +2774,9 @@ class ReplaceTypingTests(unittest.TestCase):
     def test_trusted_insert_that_lands_is_kept(self):
         page = _ProbePage()
         im = _TypingIM(page, mode="real")
-        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        # 关掉分段输入：这条断言的是"覆盖语义"，切块本身由 ChunkedTypingTests 负责
+        with mock.patch.object(douyin_im, "get_config", lambda: {"typingChunkChars": 0}):
+            self.assertTrue(im._type_real(page, self.LINES, "none"))
         self.assertEqual(page.typed, [("cdp-insert", self.LINES[0])])
         self.assertEqual(page.text, self.LINES[0])
         self.assertEqual(im._input_mode_cache, "real")     # 没有退回
@@ -2798,7 +2816,9 @@ class ReplaceTypingTests(unittest.TestCase):
         """第一次没落地时**必须重试可信输入**，别一步退到不可靠的 JS 通道。"""
         page = _FlakyPage(fail_times=1)
         im = _TypingIM(page, mode="real")
-        self.assertTrue(im._type_real(page, self.LINES, "none"))
+        # 同上：这里数的是"重试了几次"，切块会让一次重试变成多次 insert。
+        with mock.patch.object(douyin_im, "get_config", lambda: {"typingChunkChars": 0}):
+            self.assertTrue(im._type_real(page, self.LINES, "none"))
         self.assertEqual(page.text, self.LINES[0])
         self.assertEqual(im._input_mode_cache, "real")     # 没退到 JS 通道
         self.assertEqual(page.js_replaces, [])
@@ -3002,6 +3022,177 @@ class ClickDecouplingTests(unittest.TestCase):
 
     def test_default_prefers_the_proven_js_clicks(self):
         self.assertFalse(douyin_im.DouyinIM.PREFER_TRUSTED_CLICK)
+
+
+class _TimedPage(_ProbePage):
+    """记下每次块间停顿的毫秒数（真机是 `page.wait_for_timeout`）。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.waits = []
+
+    def wait_for_timeout(self, ms):
+        self.waits.append(ms)
+        return None
+
+
+class ChunkedTypingTests(unittest.TestCase):
+    """分段输入：最终内容一字不差，但打进页面的过程是"一段一段长出来"的。
+
+    ★ 安全语义：调用方已全选编辑器 → 第一块**替换**、后续块**追加**，合起来必须等于
+    要发的消息；落地校验只看最终内容（精确相等），不看"打了几块"。
+    """
+
+    TEXT = "续火花˵>ㅿ<˵"       # 8 个字
+
+    def _run(self, chars, delay, page=None):
+        page = page or _TimedPage()
+        im = _TypingIM(page, mode="real")
+        cfg = {"typingChunkChars": chars, "typingChunkDelayMs": delay}
+        with mock.patch.object(douyin_im, "get_config", lambda: cfg):
+            im._insert_text_in_chunks(self.TEXT)
+        return page
+
+    def test_splits_the_message_into_chunks(self):
+        page = self._run(4, 100)
+        self.assertEqual([t for _, t in page.typed], ["续火花˵", ">ㅿ<˵"])
+        self.assertEqual(page.text, self.TEXT)
+
+    def test_every_chunk_is_followed_by_a_short_pause(self):
+        page = self._run(3, 100)
+        self.assertEqual(len(page.typed), 3)
+        self.assertEqual(len(page.waits), 2)
+        for ms in page.waits:
+            self.assertGreaterEqual(ms, 60)
+            self.assertLessEqual(ms, 140)
+
+    def test_zero_chunk_size_types_in_one_go(self):
+        page = self._run(0, 100)
+        self.assertEqual(page.typed, [("cdp-insert", self.TEXT)])
+        self.assertEqual(page.waits, [])
+
+    def test_zero_delay_types_in_one_go(self):
+        page = self._run(4, 0)
+        self.assertEqual(page.typed, [("cdp-insert", self.TEXT)])
+        self.assertEqual(page.waits, [])
+
+    def test_short_message_is_not_split(self):
+        page = self._run(20, 100)
+        self.assertEqual(page.typed, [("cdp-insert", self.TEXT)])
+        self.assertEqual(page.waits, [])
+
+    def test_chunking_keeps_the_landing_check_intact(self):
+        """切块之后 `_try_trusted_typing` 仍要在"内容精确相等"时才返回 True。"""
+        page = _TimedPage()
+        im = _TypingIM(page, mode="real")
+        cfg = {"typingChunkChars": 3, "typingChunkDelayMs": 100}
+        with mock.patch.object(douyin_im, "get_config", lambda: cfg):
+            self.assertTrue(im._try_trusted_typing(page, [self.TEXT]))
+        self.assertEqual(page.text, self.TEXT)
+
+    def test_a_dropped_chunk_is_detected(self):
+        class _Dropping(_TimedPage):
+            def insert_text(self, s):
+                if s == ">ㅿ<˵":
+                    self.typed.append(("cdp-insert", s))
+                    return                      # 第二块丢了
+                super().insert_text(s)
+
+        page = _Dropping()
+        im = _TypingIM(page, mode="real")
+        cfg = {"typingChunkChars": 4, "typingChunkDelayMs": 100}
+        with mock.patch.object(douyin_im, "get_config", lambda: cfg):
+            self.assertFalse(im._try_trusted_typing(page, [self.TEXT]))
+        self.assertEqual(page.text, "续火花˵")   # 缺字 → 落地校验必须说没满
+
+
+class _WarmPage(_ProbePage):
+    """能读/改滚动位置的页面（暖场浏览只吃这两条 JS）。"""
+
+    def __init__(self, *a, height=800, scroll_height=4000, found=True,
+                 scroll_ok=True, **kw):
+        super().__init__(*a, **kw)
+        self.height = height
+        self.scroll_height = scroll_height
+        self.found = found
+        self.scroll_ok = scroll_ok
+        self.scrolls = []
+        self.top = 0
+
+    def evaluate(self, expr, arg=None):
+        if expr is douyin_im.JS_SCROLL_PROBE:
+            if not self.found:
+                return {"found": False}
+            return {"found": True, "clientHeight": self.height,
+                    "scrollHeight": self.scroll_height, "scrollTop": self.top}
+        if expr is douyin_im.JS_SCROLL_TO:
+            self.scrolls.append(arg)
+            if not self.scroll_ok:
+                return False
+            self.top = arg
+            return True
+        return super().evaluate(expr, arg)
+
+
+class _TickClock:
+    """每取一次时间就前进一小步的假时钟。
+
+    暖场浏览是"按预算循环、每轮取好几次时间"，`_FastClock` 每调用 +1.0 太粗 ——
+    一轮循环就能吃掉整个预算（症状是只滚了一次、还在半截就收手）。
+    """
+
+    def __init__(self, step=0.1):
+        self.t = 0.0
+        self.step = step
+
+    def monotonic(self):
+        self.t += self.step
+        return self.t
+
+
+class WarmupBrowseTests(unittest.TestCase):
+    """暖场浏览：只滚不点、来得及收手；任何异常都不能挡住随后的发送。"""
+
+    def _run(self, page, seconds):
+        im = _TypingIM(page, mode="real")
+        with mock.patch.object(douyin_im, "time", _TickClock()):
+            return im.warmup_browse(seconds)
+
+    def test_zero_seconds_does_nothing(self):
+        page = _WarmPage()
+        self.assertEqual(self._run(page, 0), 0.0)
+        self.assertEqual(page.scrolls, [])
+
+    def test_negative_seconds_does_nothing(self):
+        page = _WarmPage()
+        self.assertEqual(self._run(page, -5), 0.0)
+        self.assertEqual(page.scrolls, [])
+
+    def test_browses_down_and_then_back_up(self):
+        page = _WarmPage(scroll_height=3000, height=800)
+        self._run(page, 8)
+        self.assertGreaterEqual(len(page.scrolls), 3)
+        self.assertGreater(max(page.scrolls), 0)
+        self.assertLess(min(page.scrolls), max(page.scrolls))   # 到底之后回滚过
+        self.assertEqual(page.clicked, 0)                      # 只滚，不点
+
+    def test_seconds_are_capped_by_the_hard_limit(self):
+        page = _WarmPage()
+        spent = self._run(page, 999)
+        cap = douyin_im.DouyinIM.WARMUP_BROWSE_MAX_SECONDS
+        # 收手是在"下一轮检查"时才发生的，所以实际耗时可能比预算多出最后几轮的开销。
+        self.assertLessEqual(spent, cap + 2)
+        self.assertGreater(spent, 0)
+
+    def test_missing_scroll_state_skips_quietly(self):
+        page = _WarmPage(found=False)
+        self.assertEqual(self._run(page, 10), 0.0)
+        self.assertEqual(page.scrolls, [])
+
+    def test_scroll_failure_stops_instead_of_raising(self):
+        page = _WarmPage(scroll_ok=False)
+        self._run(page, 10)                    # 不抛
+        self.assertEqual(len(page.scrolls), 1)
 
 
 if __name__ == "__main__":

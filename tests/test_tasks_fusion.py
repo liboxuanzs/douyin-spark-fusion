@@ -224,6 +224,10 @@ class _TasksCase(unittest.TestCase):
         cfg = mock.patch.dict(tasks_mod.config, {
             "dryRun": "off", "limitGuardEnabled": True,
             "sendIntervalMinSeconds": 0, "sendIntervalMaxSeconds": 0,
+            # 节奏人性化（§13）默认是开的：不钉死的话"间隔必须落在 8~20s 之间"这类
+            # 断言会 15% 的概率被长尾打断（偶发红，最难查的那种）。
+            "runStartJitterSeconds": 0, "sendIntervalLongPauseSeconds": 0,
+            "warmupBrowseSeconds": 0,
             # 抖动读的是 config 快照（不是 os.environ），得一起钉住
             "scheduleJitterMinutes": 0,
         })
@@ -249,6 +253,94 @@ class _TasksCase(unittest.TestCase):
 
     def _runs(self):
         return ledger.read_runs(path=self.ledger_file)
+
+
+class _WarmIM(_FakeIM):
+    """记下暖场浏览有没有在第一个目标之前被调用。"""
+
+    def warmup_browse(self, seconds):
+        self.calls.append(("暖场", float(seconds)))
+        return float(seconds)
+
+
+class PacingTests(_TasksCase):
+    """B（节奏人性化）：开跑前随机延迟、间隔长尾、暖场浏览。
+
+    ★ 共同口径：这三件事都只为"真的发"服务 —— 空跑和手动触发一律不等（否则一次空跑
+    白等几分钟，面板上还会以为卡死）。
+    """
+
+    def test_start_delay_only_applies_to_the_timer(self):
+        cfg = {"runStartJitterSeconds": 90}
+        self.assertGreater(tasks_mod._start_delay_seconds(cfg, "timer", "off"), 0)
+        for source in ("webui", "cli", "test", ""):
+            self.assertEqual(tasks_mod._start_delay_seconds(cfg, source, "off"), 0.0,
+                             source)
+
+    def test_start_delay_is_skipped_in_dry_run(self):
+        for level in ("select", "full"):
+            self.assertEqual(
+                tasks_mod._start_delay_seconds({"runStartJitterSeconds": 90}, "timer", level),
+                0.0, level)
+
+    def test_start_delay_is_bounded_and_tolerates_junk(self):
+        for _ in range(50):
+            delay = tasks_mod._start_delay_seconds(
+                {"runStartJitterSeconds": 30}, "timer", "off")
+            self.assertGreaterEqual(delay, 0.0)
+            self.assertLessEqual(delay, 30.0)
+        for junk in ({}, {"runStartJitterSeconds": 0},
+                     {"runStartJitterSeconds": "abc"},
+                     {"runStartJitterSeconds": None}):
+            self.assertEqual(tasks_mod._start_delay_seconds(junk, "timer", "off"), 0.0)
+
+    def test_timer_waits_before_touching_the_browser(self):
+        self._set_users(self.users)
+        with mock.patch.dict(tasks_mod.config, {"runStartJitterSeconds": 60}):
+            with mock.patch("core.tasks.time.sleep") as sleeper:
+                tasks_mod.runTasks(dry_run="off", source="timer")
+        first = sleeper.call_args_list[0].args[0]
+        self.assertGreater(first, 0)
+        self.assertLessEqual(first, 60)
+        self.assertEqual(len(_FakeIM.instances), 1)
+
+    def test_manual_run_never_waits_for_the_clock(self):
+        self._set_users(self.users)
+        with mock.patch.dict(tasks_mod.config, {"runStartJitterSeconds": 60}):
+            with mock.patch("core.tasks.time.sleep") as sleeper:
+                tasks_mod.runTasks(dry_run="off", source="webui")
+        sleeper.assert_not_called()
+
+    def test_gap_uses_the_long_tail_sampler(self):
+        self._set_users(self.users)
+        with mock.patch.dict(tasks_mod.config, {
+                "sendIntervalMinSeconds": 8, "sendIntervalMaxSeconds": 20,
+                "sendIntervalLongPauseSeconds": 75}):
+            with mock.patch.object(limit_guard, "sample_gap_seconds",
+                                   return_value=42.0) as sampler:
+                with mock.patch("core.tasks.time.sleep") as sleeper:
+                    tasks_mod.runTasks(dry_run="off", source="test")
+        self.assertEqual(sampler.call_count, 2)          # 每个目标各一次
+        self.assertEqual(sampler.call_args_list[0].args[:2], (8.0, 20.0))
+        self.assertEqual(sampler.call_args_list[0].args[2], 75)
+        self.assertEqual([c.args[0] for c in sleeper.call_args_list], [42.0, 42.0])
+
+    def test_warmup_runs_before_the_first_target(self):
+        self._set_users(self.users)
+        with mock.patch.object(tasks_mod, "DouyinIM", _WarmIM):
+            with mock.patch.dict(tasks_mod.config, {"warmupBrowseSeconds": 30}):
+                tasks_mod.runTasks(dry_run="off", source="test")
+        im = _WarmIM.instances[0]
+        self.assertEqual(im.calls[0], ("暖场", 30.0))
+        self.assertEqual([c[0] for c in im.calls[1:]], ["甲同学", "乙同学"])
+
+    def test_warmup_is_skipped_in_dry_run(self):
+        self._set_users(self.users)
+        with mock.patch.object(tasks_mod, "DouyinIM", _WarmIM):
+            with mock.patch.dict(tasks_mod.config, {"warmupBrowseSeconds": 30}):
+                tasks_mod.runTasks(dry_run="full", source="test")
+        self.assertEqual([c[0] for c in _WarmIM.instances[0].calls],
+                         ["甲同学", "乙同学"])
 
 
 class _RaisingIM(_FakeIM):

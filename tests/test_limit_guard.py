@@ -180,6 +180,60 @@ class SleepBoundsTests(unittest.TestCase):
         self.assertEqual(lg.sleep_jitter_bounds("", ""), (0.0, 0.0))
 
 
+class _SeqRandom:
+    """按顺序吐出随机数的假随机源（不种全局随机数，也不真等）。"""
+
+    def __init__(self, uniforms=(), randoms=()):
+        self.uniforms = list(uniforms)
+        self.randoms = list(randoms)
+
+    def uniform(self, a, b):
+        return self.uniforms.pop(0) if self.uniforms else (a + b) / 2
+
+    def random(self):
+        return self.randoms.pop(0) if self.randoms else 0.99
+
+
+class SampledGapTests(unittest.TestCase):
+    """间隔要"多数落在区间里、偶尔明显更长"，不能是整齐的均匀分布。"""
+
+    def test_plain_value_stays_inside_the_bounds(self):
+        rng = _SeqRandom(uniforms=[12.5])
+        self.assertEqual(lg.sample_gap_seconds(8, 20, 0, rng=rng), 12.5)
+
+    def test_long_pause_adds_an_extra_wait(self):
+        rng = _SeqRandom(uniforms=[12.0, 5.0], randoms=[0.0])
+        self.assertEqual(lg.sample_gap_seconds(8, 20, 75, rng=rng), 17.0)
+
+    def test_long_pause_is_not_taken_every_time(self):
+        rng = _SeqRandom(uniforms=[12.0], randoms=[0.9])
+        self.assertEqual(lg.sample_gap_seconds(8, 20, 75, rng=rng), 12.0)
+
+    def test_long_pause_is_bounded_by_its_own_setting(self):
+        rng = _SeqRandom(uniforms=[20.0, 75.0], randoms=[0.0])
+        self.assertEqual(lg.sample_gap_seconds(8, 20, 75, rng=rng), 95.0)
+
+    def test_reversed_bounds_are_normalized(self):
+        rng = _SeqRandom(uniforms=[20.0])
+        self.assertEqual(lg.sample_gap_seconds(20, 8, 0, rng=rng), 20.0)
+        rng = _SeqRandom(uniforms=[1.0])
+        self.assertEqual(lg.sample_gap_seconds(-5, 3, 0, rng=rng), 1.0)
+
+    def test_both_bounds_zero_means_no_wait(self):
+        self.assertEqual(lg.sample_gap_seconds(0, 0, 0), 0.0)
+
+    def test_a_broken_pause_setting_is_ignored(self):
+        rng = _SeqRandom(uniforms=[12.0])
+        self.assertEqual(lg.sample_gap_seconds(8, 20, "通配", rng=rng), 12.0)
+
+    def test_the_tail_is_actually_rare(self):
+        """统计守卫：长尾不能让"每一次都变长"（那等于把均值直接抬走）。"""
+        long_hits = sum(1 for _ in range(4000)
+                        if lg.sample_gap_seconds(8, 20, 75) > 20.0)
+        self.assertGreater(long_hits / 4000.0, 0.08)
+        self.assertLess(long_hits / 4000.0, 0.22)
+
+
 class KeywordCoverageTests(unittest.TestCase):
     def test_categories_are_present(self):
         self.assertEqual(set(lg.CATEGORIES), {"rate_limit", "captcha", "account_risk"})

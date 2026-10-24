@@ -104,6 +104,35 @@ SETTINGS: Tuple[Setting, ...] = (
         maximum=600,
         default="20",
         hint="秒；必须 ≥ 下限",
+    ),    Setting(
+        "RUN_START_JITTER_SECONDS",
+        "开跑前随机延迟",
+        KIND_INT,
+        minimum=0,
+        maximum=600,
+        default="90",
+        hint="秒；定时器到点后先随机等 0~N 秒再开浏览器，磨掉每 5 分钟一次的整分边缘。"
+             "只影响定时触发（面板/命令行立即运行不等）；0 = 准点开跑",
+    ),
+    Setting(
+        "SEND_INTERVAL_LONG_PAUSE_SECONDS",
+        "长尾停顿",
+        KIND_INT,
+        minimum=0,
+        maximum=600,
+        default="75",
+        hint="秒；约 15% 的概率在正常间隔之外再多停 0~N 秒，让间隔不是整齐的均匀分布；"
+             "0 = 关闭（回到纯均匀）",
+    ),
+    Setting(
+        "WARMUP_BROWSE_SECONDS",
+        "暖场浏览",
+        KIND_INT,
+        minimum=0,
+        maximum=120,
+        default="0",
+        hint="秒；门禁通过后先在会话列表里滚 N 秒再发（只滚不点，失败不影响发送）；"
+             "0 = 关闭（默认）",
     ),
     Setting(
         "LIMIT_GUARD_ENABLED",

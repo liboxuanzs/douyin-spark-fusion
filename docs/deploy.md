@@ -106,6 +106,10 @@ cd /opt/douyin-spark-fusion
 | `QUIET_WINDOW` | `off` | 禁跑时间窗（`HH:MM-HH:MM`，跨零点也认）。这段**绝对不发**，用来避免两个程序抢同一个账号；`off`（默认）关闭。盖住定时器时间会让那一轮整轮跳过，面板会报红 |
 | `QUIET_WINDOW_OVERRIDE` | 空 | 设为 `1` 时**临时无视** `QUIET_WINDOW` 放行一轮（默认窗口内面板"立即运行"会返回 409） |
 | `SEND_INTERVAL_MIN_SECONDS` / `MAX` | `8` / `20` | 每两个目标之间的额外间隔（0/0 = 不额外等待） |
+| `RUN_START_JITTER_SECONDS` | `90` | 定时器到点后先随机等 0~N 秒再开浏览器（磨掉每 5 分钟整分敲门的边缘）。只影响定时触发；面板/命令行立即运行与空跑都不等 |
+| `SEND_INTERVAL_LONG_PAUSE_SECONDS` | `75` | 长尾停顿：约 15% 的概率在正常间隔之外再多停 0~N 秒；`0` = 回到纯均匀分布 |
+| `WARMUP_BROWSE_SECONDS` | `0` | 暖场浏览：门禁通过后先在会话列表里滚 N 秒再发（只滚不点，失败不影响发送）；`0` = 关闭 |
+| `TYPING_CHUNK_CHARS` / `TYPING_CHUNK_DELAY_MS` | `6` / `110` | 分段输入：按 N 字切块、块间停 M 毫秒；任一为 `0` = 一次性打完整段 |
 | `RUN_LEDGER_FILE` | `logs/runs.jsonl` | 运行账本（面板读它画图表） |
 | `RUN_LOCK_FILE` | `logs/run.lock` | 运行锁（防止两个任务同时开浏览器） |
 | `RATE_LIMIT_FILE` | `logs/rate_limit.json` | 冷却状态 |

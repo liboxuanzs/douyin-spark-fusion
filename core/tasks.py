@@ -12,6 +12,7 @@
   绝不允许两个 Chromium 同时对同一个账号操作。
 """
 import os
+import random
 import time
 import traceback
 
@@ -333,8 +334,15 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
             logger.warning(f"账号 {username} 门禁后发现风控提示：{pre_hit} —— "
                            f"空跑不写冷却、不中止本轮（一条都没发出去）")
 
-        lo, hi = limit_guard.sleep_jitter_bounds(
-            config.get("sendIntervalMinSeconds"), config.get("sendIntervalMaxSeconds"))
+        warmup = _warmup_seconds(config, dry_run)
+        if warmup > 0:
+            browse = getattr(im, "warmup_browse", None)
+            if callable(browse):
+                spent = browse(warmup)
+                logger.info(f"账号 {username} 暖场浏览 {spent:.0f}s 后开始发送"
+                            f"（WARMUP_BROWSE_SECONDS={warmup:g}）")
+
+        lo, hi = limit_guard.sleep_jitter_bounds(            config.get("sendIntervalMinSeconds"), config.get("sendIntervalMaxSeconds"))
         if dry_run != DRY_RUN_OFF:
             lo = hi = 0.0      # 空跑不发送，没必要为"风控"而放慢
 
@@ -487,8 +495,10 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
             # 发送完让列表状态落定，再继续滚动（发送会把该会话移到顶部）
             page.wait_for_timeout(800)
             if hi > 0:
-                import random
-                gap = random.uniform(lo, hi)
+                # 主体均匀 + 小概率长尾：均匀分布是最好认的机器特征
+                # （见 core/limit_guard.py::sample_gap_seconds）。
+                gap = limit_guard.sample_gap_seconds(
+                    lo, hi, config.get("sendIntervalLongPauseSeconds"))
                 logger.debug(f"账号 {username} 下一条目标前等待 {gap:.1f}s")
                 time.sleep(gap)
 
@@ -796,6 +806,39 @@ def _dedupe_plans(planned):
     return kept, dropped
 
 
+def _start_delay_seconds(cfg, source, level):
+    """定时器到点后先随机等多久（秒）再开浏览器。
+
+    门铃是每 5 分钟**整分**敲一次（`deploy/douyin-spark-fusion-daily.timer` 的
+    `OnCalendar=*:0/5`），`schedule.select` 又会把到点时刻量化到分钟 —— 于是线上"开始
+    发送"的时刻永远是 :00/:05/:10，一年下来没有一次落在 :03 或 :07。在开浏览器之前
+    随机等 0~N 秒，把这个整齐的边缘磨掉。
+
+    只对 `timer` 生效：面板"立即运行"、`main.py task` 手动触发都意味着有人正看着结果，
+    让它们白等没意义；空跑也不等（一条都不发，等它做什么）。
+    """
+    if source != ledger.SOURCE_TIMER or level != DRY_RUN_OFF:
+        return 0.0
+    try:
+        span = float(cfg.get("runStartJitterSeconds") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if span <= 0:
+        return 0.0
+    return random.uniform(0.0, span)
+
+
+def _warmup_seconds(cfg, level):
+    """暖场浏览的秒数；空跑一律 0（一条都不发，暖场没有意义）。"""
+    if level != DRY_RUN_OFF:
+        return 0.0
+    try:
+        seconds = float(cfg.get("warmupBrowseSeconds") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, seconds)
+
+
 def runTasks(dry_run=None, source="cli", force=False, only=""):
     """跑一轮。返回结构化汇总，并追加进运行账本。
 
@@ -938,6 +981,17 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             f"⚠️ TASKS 里有重复的账号（{('、'.join(duplicates))}），"
             f"本轮每个账号只处理一次；请到面板核对账号列表"
         )
+
+    start_delay = _start_delay_seconds(config, source, level)
+    if start_delay > 0:
+        logger.info(
+            f"定时器到点：先随机等 {start_delay:.0f}s 再开浏览器"
+            f"（RUN_START_JITTER_SECONDS={config.get('runStartJitterSeconds')}；"
+            f"磨掉门铃每 5 分钟一次的整分边缘）"
+        )
+        # 注意：这一段必须在抢运行锁**之前** —— 拿着锁睡 90 秒会让面板上的"派发器正在跑"
+        # 白闪一分半，期间连给账号扫码登录都会被拦（见 webui 的 _panel_busy_reason）。
+        time.sleep(start_delay)
 
     logger.debug("当前配置如下：")
     # ★ 用 repr：模板里的换行是**字面 `\n`（两个字符）**，直接打印看不出区别 ——
