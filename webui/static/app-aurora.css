@@ -3549,3 +3549,15 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(21, 28, 56
 @media (min-width: 1081px) {
   .metric-grid .metric-value { font-size: clamp(30px, 1.6vw + 14px, 40px); }
 }
+
+/* 18.5 的「左上角渗光」原来是为发光数字配的底；数字收干净之后，它在两列宽的
+   运行页卡片上会变成一块斜向的污渍。改成由语义色自己算一个很低的 alpha，
+   四档不再各写一遍。 */
+.metric-card:is(.success, .warning, .danger, .info) { --metric-wash: color-mix(in oklab, var(--metric-tone) 11%, transparent); }
+html[data-theme="light"] .metric-card:is(.success, .warning, .danger, .info) { --metric-wash: color-mix(in oklab, var(--metric-tone) 7%, transparent); }
+
+/* 宽屏上四张 KPI 卡并排：两列 2×2 会把「本轮状态」拉成一大块空白，四列横排
+   更接近控制台，也把首屏留给下面的列表。 */
+@media (min-width: 1400px) {
+  .metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
