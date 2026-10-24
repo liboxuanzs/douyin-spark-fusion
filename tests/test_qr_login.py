@@ -642,6 +642,37 @@ class CodeVerifyTests(unittest.TestCase):
         session.submit_code("9876")
         self.assertEqual(session._wait_for_code(_FakeCtx(), self.code_page(), 1.0), "9876")
 
+    def test_wait_for_code_clears_the_event_under_the_lock(self):
+        """`_code_event.clear()` 必须在锁里、且早于读值。
+
+        以前 clear 排在"解锁"之后，用户提交验证码正好落在这个窗口（submit_code
+        持锁写值 + set 事件）就会被 clear 抹掉：这一轮之后只等事件、不再读值，
+        明明填了码却白等满 300 秒再报 code_timeout。
+        """
+        session = self.session()
+        session._set(qr_login.STATE_WAITING_CODE, "等你填验证码")
+        real = session._code_event
+        probe = {}
+
+        class _ProbeEvent:
+            def clear(self):
+                probe["locked"] = session._lock.locked()
+                real.clear()
+
+            def set(self):
+                real.set()
+
+            def is_set(self):
+                return real.is_set()
+
+            def wait(self, timeout=None):
+                return real.wait(timeout)
+
+        session._code_event = _ProbeEvent()
+        session.submit_code("1234")
+        self.assertEqual(session._wait_for_code(_FakeCtx(), self.code_page(), 1.0), "1234")
+        self.assertTrue(probe.get("locked"), "clear() 必须在持锁时调用，否则会吞掉并发提交的码")
+
     def test_wait_for_code_times_out_and_reports_cancel(self):
         session = self.session()
         self.pin_login_cookie_state([False])
@@ -1069,6 +1100,52 @@ class WatchdogTests(unittest.TestCase):
                 time.sleep(0.2)
         self.assertTrue(session._forced)
         self.assertIn("取消", session._forced)
+
+    def test_the_human_code_stage_gets_its_own_budget(self):
+        """人工填码阶段不该被二维码 TTL 掐断。
+
+        旧判据是 `_started_at + ttl + 420s`：第 290 秒才扫码的人刚进验证码页就
+        被判"会话卡住"强杀，CODE_MAX_ATTEMPTS 的三次机会一次都轮不上。
+        """
+        from unittest import mock
+
+        session = self.make()
+        session._set(qr_login.STATE_WAITING_CODE, "等你填验证码")
+        session._started_at = time.time() - (qr_login.WATCHDOG_GRACE_SECONDS + 10)
+        killed = []
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=lambda path, **kw: killed.append(path)):
+            session._start_watchdog()
+            time.sleep(2.6)
+        self.assertEqual(killed, [], "等人填验证码的时候不许强杀")
+        self.assertEqual(session._forced, "")
+        self.assertGreater(session._human_since, 0.0)
+
+        # 收尾：留一个活着的守夜线程会每 2 秒醒一次，后面有测试把 time.sleep
+        # 打成 mock 在计数（test_tasks_fusion 的间隔测试）时，这个线程会把计数
+        # 刷到几十万 —— 这里明确让守夜线程退出。
+        session._finished_at = time.time()
+        session._closing = True
+
+    def test_the_human_stage_is_still_bounded(self):
+        """独立预算是"更长"，不是"无限"：三轮回合耗光后照样收尾。"""
+        from unittest import mock
+
+        session = self.make()
+        session._set(qr_login.STATE_WAITING_CODE, "等你填验证码")
+        session._started_at = time.time() - (qr_login.WATCHDOG_GRACE_SECONDS + 10)
+        session._human_since = time.time() - (
+            qr_login.CODE_MAX_ATTEMPTS * (qr_login.CODE_WAIT_SECONDS + qr_login.CODE_VERIFY_SECONDS)
+            + qr_login.WATCHDOG_GRACE_SECONDS + 10)
+        killed = []
+        with mock.patch("core.browser.kill_profile_processes",
+                        side_effect=lambda path, **kw: (killed.append(path), 1)[1]):
+            session._start_watchdog()
+            deadline = time.time() + 8
+            while time.time() < deadline and not session._forced:
+                time.sleep(0.2)
+        self.assertTrue(session._forced, "人工阶段也必须有个上限")
+        self.assertIn("超过时限", session._forced)
 
     def test_kill_failure_does_not_escape(self):
         """守夜线程自己不许抛：杀进程失败也要把会话置成明确的错误态。"""

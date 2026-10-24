@@ -544,6 +544,20 @@ class WalkTests(unittest.TestCase):
         self.assertEqual(self.s._walk_stat["stopped"], "caller-break")
         self.assertFalse(self.s.last_scan["scanned_all"])
 
+    def test_all_found_by_the_caller_stays_all_found(self):
+        """调用方找齐目标后写的 all-found 必须保留。
+
+        线上每一轮都是"目标全找到就 break"，_walk 的 finally 却把它统一改写成
+        caller-break → scanned_all 永远 False，账本和面板整天说"扫描未完成，
+        missing 不代表不存在"（10-15/10-16 每天如此）。
+        """
+        for _ in self.s._walk():
+            self.s._walk_stat["stopped"] = "all-found"
+            break
+        self.s._finish_scan({}, [])
+        self.assertEqual(self.s._walk_stat["stopped"], "all-found")
+        self.assertTrue(self.s.last_scan["scanned_all"])
+
     def test_no_container_reports_not_scanned(self):
         self.s._scroll_probe = lambda: {"found": False}
         self.assertEqual(list(self.s._walk()), [])

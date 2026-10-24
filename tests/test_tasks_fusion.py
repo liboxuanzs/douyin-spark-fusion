@@ -909,6 +909,41 @@ class ScheduleGateTests(_TasksCase):
         self.assertTrue(rec["schedule"]["forced"])
         self.assertEqual(self._state()["accounts"]["222"]["source"], "webui")
 
+    def test_force_retries_an_error_record_instead_of_calling_it_sent(self):
+        """★ 今天一条都没发出去（error）时，面板「立即运行」必须真的再跑一次。
+
+        schedule.select() 把 error 记录也归进 sent（当天不再自动重试是对的），
+        但 force 分支直接拿那一堆当"今天已发"：用户修好登录、改完好友名，点
+        「立即运行」得到的却是"这 N 个账号今天都已经发过了"—— 而实际一条都没送达。
+        """
+        self._set_users(self.early)
+        _FakeIM.result = {"ok": False, "via": None, "message_id": None,
+                          "code": None, "status": None, "conv_id": "0:1:2",
+                          "display": "甲同学", "reason": "no_receipt",
+                          "level": "none", "dry_run": "off",
+                          "rate_limited": False, "limit": None}
+        tasks_mod.runTasks(dry_run="off", source="test")
+        self.assertEqual(self._state()["accounts"]["111"]["status"], "error")
+
+        _FakeIM.instances = []
+        _FakeIM.result = None                    # 修好了，这回能发
+        rec = tasks_mod.runTasks(dry_run="off", source="webui", force=True)
+        self.assertNotEqual((rec.get("skipped") or {}).get("reason"), "already_sent")
+        self.assertEqual(len(_FakeIM.instances), 1,
+                         "error 记录被当成今天已发，重试被挡掉了")
+        self.assertEqual(self._state()["accounts"]["111"]["status"], "ok")
+        self.assertEqual(rec["accounts"][0]["status"], "ok")
+
+    def test_force_still_skips_a_real_success(self):
+        """对照：真发过仍然跳过 —— 否则「立即运行」就是重复发送按钮。"""
+        self._set_users(self.early)
+        tasks_mod.runTasks(dry_run="off", source="webui", force=True)
+        _FakeIM.instances = []
+        rec = tasks_mod.runTasks(dry_run="off", source="webui", force=True)
+        self.assertEqual(_FakeIM.instances, [], "真发过的账号被强制重发了")
+        self.assertEqual((rec.get("skipped") or {}).get("reason"), "already_sent")
+        self.assertEqual(self._state()["accounts"]["111"]["status"], "ok")
+
     def test_only_narrows_the_candidate_set(self):
         self._set_users(self.early + self.late)
         tasks_mod.runTasks(dry_run="off", source="timer", only="222")

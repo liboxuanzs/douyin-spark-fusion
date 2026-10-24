@@ -488,6 +488,7 @@ class QrLoginSession(threading.Thread):
         self._updated_at = self._started_at
         self._finished_at = 0.0
         self._cancel_at = 0.0      # 用户点取消的时刻（守夜线程据此缩短宽限）
+        self._human_since = 0.0    # 第一次进入人工阶段（等短信/在手机上确认）的时刻
         self._forced = ""          # 非空 = 守夜线程强制收尾过（原因，排障用）
         self._watchdog_started = False
         self.result = None          # 成功后：cookies / 账号资料 / 诊断信息
@@ -1159,10 +1160,14 @@ class QrLoginSession(threading.Thread):
         # 先看看有没有"上一轮等的时候就送进来、还没来得及用"的码：用户完全可能
         # 在"正在等抖音放行"那几秒里又敲了一条，直接 clear() 会把它丢掉，
         # 然后这一轮又空等到超时。
+        # clear 必须在**同一把锁里、并且在读值之前**：submit_code 是持锁写值再
+        # set() 事件，若 clear 落在"解锁"与"clear"之间（微秒级窗口），用户刚提交
+        # 的码就被抹掉，这一轮之后只等事件、不再读值，白等满 300 秒还报
+        # code_timeout。先 clear 再读，才不会吃掉"上一轮送达的码"。
         with self._lock:
+            self._code_event.clear()
             pending = self._code_value
             self._code_value = ""
-        self._code_event.clear()
         if pending:
             return pending
         deadline = time.time() + timeout
@@ -1448,6 +1453,16 @@ class QrLoginSession(threading.Thread):
             now = time.time()
             limit = self._started_at + self.ttl + WATCHDOG_GRACE_SECONDS
             reason = "超过时限还没结束"
+            if self._state in (STATE_WAITING_CODE, STATE_VERIFYING):
+                # 人工阶段不该被**二维码** TTL 掐断：_code_budget 早就写明"刻意不受
+                # 会话 TTL 约束"，可这里仍按 300+120=420s 硬杀 —— 第 290 秒才扫码
+                # 的人刚进验证码页就被判"会话卡住"，CODE_MAX_ATTEMPTS 的三次机会
+                # 一次都轮不上。给人工阶段一个独立的、仍然有界的预算：
+                # 3 轮 ×（等码 300s + 等放行 60s）。机器阶段照旧按 TTL 收尾。
+                if not self._human_since:
+                    self._human_since = now
+                limit = max(limit, self._human_since + CODE_MAX_ATTEMPTS * (
+                    CODE_WAIT_SECONDS + CODE_VERIFY_SECONDS) + WATCHDOG_GRACE_SECONDS)
             if self._cancel_at:
                 limit = min(limit, self._cancel_at + CANCEL_GRACE_SECONDS)
                 reason = "取消后浏览器没有及时关闭"

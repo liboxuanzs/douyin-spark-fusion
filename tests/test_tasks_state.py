@@ -307,6 +307,31 @@ class TaskStateTests(unittest.TestCase):
         self.assertEqual(out["status"], "ok")
         self.assertTrue(browser.contexts[0].closed, "上下文必须照常关闭")
 
+    def test_关闭上下文抛错也不许吃掉这一轮的成绩(self):
+        """浏览器崩了，`context.close()` 抛错很常见，它不能把已发出的消息判成失败。
+
+        以前 close() 在 finally 里没有保护，异常一路冒到 runTasks 的 except，账本
+        记成"error / 0 条"，用户照提示重新扫码后 requeue 会当天再补发一遍 ——
+        好友收到两条同样的内容。
+        """
+
+        class _AngryContext(_Context):
+            def close(self):
+                self.closed = True
+                raise RuntimeError("Target closed")
+
+        class _AngryBrowser(_Browser):
+            def new_context(self, **kwargs):
+                ctx = _AngryContext(snapshot=self.snapshot)
+                self.contexts.append(ctx)
+                return ctx
+
+        browser = _AngryBrowser()
+        out = self._run(browser)
+        self.assertEqual(out["status"], "ok")
+        self.assertGreaterEqual(out["sent_ok"], 1, "已经发成功的那条要留在结果里")
+        self.assertTrue(browser.contexts[0].closed)
+
     def test_没有抖音号就不存快照(self):
         browser = _Browser(snapshot=_state([_cookie()]))
         out = self._run(browser, unique_id=None)

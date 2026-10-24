@@ -153,6 +153,13 @@ class CooldownTests(unittest.TestCase):
         g = lg.LimitGuard(path=self.path)
         g.trip({"keyword": "操作频繁"})
         self.assertFalse(os.path.exists(self.path + ".tmp"))
+        self.assertEqual([n for n in os.listdir(os.path.dirname(self.path))
+                          if n.endswith(".tmp")], [],
+                         "临时文件必须随机命名（两个进程同时写不能共用同一个 inode），且写完不留残渣")
+    def test_write_is_atomic_via_tmp(self):
+        g = lg.LimitGuard(path=self.path)
+        g.trip({"keyword": "操作频繁"})
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
         with open(self.path, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["keyword"], "操作频繁")
 

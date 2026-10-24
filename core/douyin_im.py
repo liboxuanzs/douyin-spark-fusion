@@ -2087,7 +2087,15 @@ class DouyinIM:
         finally:
             # 「stopped 还是初始值」+「while 没跑完」= 调用方提前 break，
             # 不能报 scanned_all —— 那会让 missing 被误读成"确实不存在"。
-            if not finished and stopped == "exhausted":
+            # ★ 调用方"目标全部找到"提前 break 时，会先把结论写进 self._walk_stat
+            #   （见 iter_find_and_select）。这里必须尊重它：以前只判断局部变量
+            #   stopped（还是初始的 exhausted），于是把每一次"找齐就停"都改写成
+            #   caller-break，最终 scanned_all 永远 False —— 面板和账本整天说
+            #   "扫描未完成，missing 不代表不存在"，"确实不在列表里"这个结论
+            #   根本出不来（线上 10-15/10-16 每天如此）。
+            if self._walk_stat.get("stopped") == "all-found":
+                stopped = "all-found"
+            elif not finished and stopped == "exhausted":
                 stopped = "caller-break"
             self._scan_cache = seen
             stat = {"stopped": stopped, "steps": steps, "seen": seen}

@@ -626,7 +626,15 @@ def do_user_task(browser, username, cookies, targets, unique_id=None,
                 # 这两个函数自己已经吃掉了 OSError / 坏 JSON；这里兜的是它们没想
                 # 到的形状。收尾永远不许改变本轮结果 —— 上面 out 已经写好了。
                 logger.debug(f"账号 {username} 保存浏览器状态失败：{type(exc).__name__}: {exc}")
-        context.close()  # 任务完成后关闭上下文
+        try:
+            context.close()  # 任务完成后关闭上下文
+        except Exception as exc:                                  # noqa: BLE001
+            # ★ 浏览器已经崩了/CDP 超时的收尾很常见（上面的 storage_state 也防了
+            #   一手）。这里**绝不能**抛出去：一抛，这一轮已经发成功的记录连同
+            #   sent_ok/entries 一起丢，runTasks 的 except 记成"error, 0 条"，用户
+            #   照提示重新扫码后 requeue 会把它当没发过，当天再补发一遍 —— 好友
+            #   收到两条同样的内容。
+            logger.debug(f"账号 {username} 关闭浏览器上下文失败：{type(exc).__name__}: {exc}")
 
     out["sent_ok"] = sent_ok
     out["sent_fail"] = sent_fail
@@ -882,7 +890,17 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
         if force == "all":
             planned = everything
         else:
-            done = {str(p["unique_id"]) for _, p, _ in forced["sent"]}
+            # ★ 只把「真发出去」的（status=ok）算成"今天已经发过"。
+            #   forced["sent"] 里还混着今天的 error 记录（login_lost / nothing_sent）
+            #   与"试够 6 次"的 skipped —— 那些情况一条都没送达。把它们也当成
+            #   "已发"，用户修好登录、改完好友名之后点「立即运行」，得到的却是
+            #   "今天都已经发过了"并直接退回（面板上没有 --force-all 的入口）。
+            #   真正的成功记录仍然跳过 —— 防重复发送这条不能破。
+            done = {
+                str(p["unique_id"])
+                for _, p, record in forced["sent"]
+                if str((record or {}).get("status") or "") == schedule.STATUS_OK
+            }
             planned = [pair for pair in everything if str(pair[1]["unique_id"]) not in done]
             if not planned and users:
                 # 说清楚，别让面板报"运行成功、0 个账号"——用户会以为程序坏了。

@@ -633,3 +633,31 @@ core 里 `dry_run`/`quiet_window`/`limit`/`lock` 的支持面，逐条对齐。
 | 重试时可能把同一条消息叠着发两遍 | 清空的成功与否只看"我调用过"，没人验证 | `_editor_dirty` 记账 + 清不掉就不发（`editor_not_cleared`）+ 发送前 `_residue_echo` 拦"同一条消息两遍"（`editor_residue`），两条都有单测 |
 | `dry-run=full` 明明读回对了却判"不一致" | Draft 在软换行处塞 `\u200b`，`strip()`/`trim()` 都删不掉 | `ZERO_WIDTH_CHARS` 统一先删；`test_zero_width_filler_never_counts_as_content` 钉住三处 JS |
 | 读到的是 A、清的是 B | 判空/清空 2 个选择器、读回/输入 4 个 | 共用 `JS_EDITOR_SELECTORS`；`test_all_editor_js_share_the_same_selectors` 钉住"数量和顺序一致" |
+
+## 10. 上线后的缺陷修复（2026-10-24）
+
+按"这一条会不会把话发错 / 发丢"重新审了调度、登录、回执三块，修掉七处。
+共同点都是**错的方向**：宁可多等一轮、多报一次错，也不能把"不确定"报成"已发送"。
+
+| # | 位置 | 症状（线上可见） | 现在 |
+|---|------|------------------|------|
+| 1 | `core/tasks.py` `runTasks` 的 `force` 分支 | 面板「立即运行」(`force=True`) 重跑时，只要今天有 error 记录（登录失效 / 一条没发）就回「今天都已经发过了」，一条都不重试 | 只有 `status=ok` 才算"今天已发"；error 与试满上限的 skipped 会被真正重跑。真成功记录照旧跳过（防重复发送这条不能破） |
+| 2 | `core/strict_verify.py` `verify_receipt` | 服务端回执明确失败，但页面先画出气泡 → 判 `ok=True/medium`，调用方 `sent_ok += 1`，当天不再补发 | `http_ok is False` 先返回 `receipt_failed` / `conflict`；DOM 气泡只在**完全没有 HTTP 回执**（可能走 WS）时兜底 |
+| 3 | `core/douyin_im.py` `_walk` 的 `finally` | 调用方"目标全找到"写进 `_walk_stat` 的 `all-found` 被覆盖成 `caller-break` → `scanned_all` 永远 False，账本和面板整天说"扫描未完成，missing 不代表不存在" | 保留 `all-found`；只有真被外部打断才记 `caller-break` |
+| 4 | `core/qr_login.py` `_watch` | 超过"二维码 TTL + 420s"就强杀：第 290 秒才扫码的人刚进验证码页就被判"会话卡住"，`CODE_MAX_ATTEMPTS` 的三次机会一次都轮不上 | 人工阶段（`WAITING_CODE`/`VERIFYING`）另给**有界**预算：`3 ×（等码 300s + 等放行 60s）+ 宽限`，从第一次进入人工阶段起算；机器阶段照旧按 TTL 收尾 |
+| 5 | `core/qr_login.py` `_wait_for_code` | `_code_event.clear()` 排在解锁之后：恰好落进"解锁 → clear"窗口里提交的验证码被抹掉，这一轮之后只等事件、不再读值，白等 300s 报 `code_timeout` | clear 移进锁内且先于读值 |
+| 6 | `core/tasks.py` `do_user_task` 收尾 | `context.close()` 抛错（浏览器已崩 / CDP 超时）→ 异常冒到 `runTasks`，本轮已发成功的记录连同 `sent_ok`/`entries` 一起丢，记成 `error / 0 条`；用户照提示重新扫码后当天补发一遍，好友收到两条 | close 也包 `try/except`：收尾**永远**不许改变本轮结果 |
+| 7 | `core/limit_guard.py` `_write` | 固定 `.tmp` 名，timer 与面板两个进程写同一个 inode，可能发布半截 JSON；`read()` 解析失败静默返回 None → 冷却被当成"没有"，熔断失效还接着发 | `tempfile.mkstemp` 随机名 + `os.replace`，失败清理残渣 |
+| 8 | `webui/envfile.py` `dotenv_hazard` | 值以引号开头时面板说"保存成功"，dotenv 却整条键读不到（模板回落内置默认值）；成对引号则被悄悄吃掉 | 首字符是 `"` / `'` 直接拒收 |
+
+每处各配一条回归测试：`test_force_retries_an_error_record_instead_of_calling_it_sent`、
+`test_failed_receipt_beats_a_dom_bubble`、`test_all_found_by_the_caller_stays_all_found`、
+`test_the_human_code_stage_gets_its_own_budget` / `test_the_human_stage_is_still_bounded`、
+`test_wait_for_code_clears_the_event_under_the_lock`、
+`test_关闭上下文抛错也不许吃掉这一轮的成绩`、`test_write_is_atomic_via_tmp`（加验"无残渣"）、
+`test_a_leading_quote_is_refused`。
+
+**故意没改**：`TASK_RETRY_TIMES` 的重试对"20s 内没拿到可信回执（`unknown`/`no_evidence`）"
+也会重发整段 —— `core/douyin_im.py` 自己写着"没回执 ≠ 失败（可能走 WS）"，但重发确实可能让
+好友收到两遍。这是**产品取舍**（漏发 vs 叠发），默认保持现状；要改成不重试，在
+`core/tasks.py` 的重试条件里排除 `unknown`/`no_evidence` 即可，别顺手改。

@@ -451,7 +451,15 @@ def verify_receipt(expect: Expectation, *, before, after,
                        "HTTP 回执 ok，但 DOM 状态取不到、没有气泡证据"
                        "（回执本身不带收件人）",
                        "HTTP 回执 ok", evidence)
+    if http_ok is False:
+        # ★ 服务端**明确**回了失败（`receipts` 非空却没有一条 ok）：DOM 气泡只是
+        #   页面的乐观渲染，不能拿它推翻回执。以前这里先看 dom_ok，于是"回执失败 +
+        #   页面上出现了一个气泡"被判成 ok=True/medium —— 调用方记 sent_ok += 1，
+        #   调度认定今天已发、不再补发，而对方其实没收到。不命中优先于命中
+        #   （本模块 docstring 的契约）。
+        return Verdict(False, LEVEL_CONFLICT, "receipt_failed", "；".join(reasons), evidence)
     if dom_ok is True:
+        # 只有**完全没有 HTTP 回执**（可能走 WS 通道）时，DOM 气泡才配兜底。
         return Verdict(True, LEVEL_MEDIUM, "", "DOM 气泡确认（同会话内增加）", evidence)
     return Verdict(False, LEVEL_NONE, "receipt_unconfirmed", "；".join(reasons), evidence)
 

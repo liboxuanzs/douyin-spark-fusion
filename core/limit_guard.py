@@ -24,6 +24,7 @@
 """
 import json
 import os
+import tempfile
 from datetime import timedelta
 
 from core.util_time import cooldown_human, iso, now, parse_iso  # noqa: F401  (re-export)
@@ -214,12 +215,24 @@ class LimitGuard:
         d = os.path.dirname(os.path.abspath(self.path))
         if d:
             os.makedirs(d, exist_ok=True)
-        # 先写临时文件再 replace：避免 web 进程正好读到写了一半的 JSON
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(tmp, self.path)
+        # 先写临时文件再 replace：避免 web 进程正好读到写了一半的 JSON。
+        # ★ 临时名必须**唯一**：定时器与面板是两个进程，固定的 .tmp 会让它们写
+        #   同一个 inode，可能把对方的半截内容发布出去 —— read() 解析失败是静默
+        #   返回 None，冷却于是被当成"没有"，熔断失效还接着发（喂风控）。
+        #   照抄 core/schedule.py / core/browser_state.py 的做法。
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(self.path) + ".",
+                                   suffix=".tmp", dir=d or ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 # ---- 发送节奏（借鉴 A 的限流熔断之外，给自己一个"别太快"的下限） ----------

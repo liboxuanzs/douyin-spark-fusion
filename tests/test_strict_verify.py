@@ -379,6 +379,27 @@ class ReceiptVerdictTests(unittest.TestCase):
         v = verify_receipt(self.e, before=self.before, after=after, receipts=[])
         self.assertFalse(v.ok)
 
+    def test_failed_receipt_beats_a_dom_bubble(self):
+        """回执明确失败 + 页面冒出一个气泡 → 不许判成功。
+
+        气泡是**乐观渲染**：服务端返回 code!=0（限流 / 安全验证 / 消息被拒）时，
+        本地照样可能先把这条画出来。以前这里先看 dom_ok，于是判 ok=True/medium，
+        调用方 sent_ok += 1、调度认定"今天已发"，对方其实没收到也不会补发。
+        """
+        after = {"convId": CONV_A, "count": 11, "lastFromMe": True}
+        v = verify_receipt(self.e, before=self.before, after=after,
+                           receipts=[{"ok": False, "code": 5, "status": "fail"}])
+        self.assertFalse(v.ok, "回执说失败，页面气泡不能把它救回来")
+        self.assertEqual(v.reason, "receipt_failed")
+        self.assertEqual(v.level, LEVEL_CONFLICT)
+
+    def test_a_healthy_receipt_still_passes_with_a_bubble(self):
+        """反向：正常回执 + 气泡照旧判成功（别把上面的修复做成一律失败）。"""
+        after = {"convId": CONV_A, "count": 11, "lastFromMe": True}
+        v = verify_receipt(self.e, before=self.before, after=after,
+                           receipts=[{"ok": True, "message_id": "mid-9"}])
+        self.assertTrue(v.ok)
+
     def test_http_failure_and_no_dom_growth_is_failure(self):
         after = {"convId": CONV_A, "count": 10, "lastFromMe": False}
         v = verify_receipt(self.e, before=self.before, after=after,

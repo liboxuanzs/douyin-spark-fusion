@@ -92,6 +92,27 @@ class PathTests(EnvFileTestCase):
         self.assertEqual(envfile.env_path().name, ".env")
 
 
+class HazardTests(EnvFileTestCase):
+    """`dotenv_hazard`：写进 `.env` 的值必须能被 dotenv 原样读回来。"""
+
+    def test_a_leading_quote_is_refused(self):
+        """值以引号开头必须拒收。
+
+        落盘是 `quote_mode="never"`（不加引号），dotenv 见开头是引号就当"带引号的
+        值"重新解析：不成对时**整条键消失**（模板回落到内置默认值，面板却显示
+        保存成功），成对时引号被悄悄吃掉（值被改掉）。两种都是"面板说成功、实际
+        配置变了"，宁可让面板报错。
+        """
+        for bad in ('"早安', "'早安", '"早安"', "'"):
+            with self.subTest(value=bad):
+                self.assertTrue(envfile.dotenv_hazard(bad), bad)
+
+    def test_quotes_elsewhere_are_fine(self):
+        for good in ("早安", '他说"早"好', '早安"', "abc\\"):
+            with self.subTest(value=good):
+                self.assertEqual(envfile.dotenv_hazard(good), "")
+
+
 class ReadTests(EnvFileTestCase):
     def test_read_keys_lists_every_set_variable(self):
         keys = envfile.read_keys()
