@@ -1094,6 +1094,61 @@ class ScheduleGateTests(_TasksCase):
 
 
 
+class EnabledAccountTests(ScheduleGateTests):
+    """账号停用（`TASKS[].enabled=false`）在派发器里的语义。
+
+    停用挡的是"每天自动发"：门铃不派发、面板「立即运行」也不碰它；
+    但 `--only` 点名是人**现在**就要发它，照发。
+    """
+
+    def _stopped(self):
+        return [{**self.early[0], "enabled": False}]
+
+    def _state_or_empty(self):
+        """停用到底时连时间表文件都不该被创建（本用例要能区分"没写"和"写了空的"）。"""
+        if not os.path.exists(self.schedule_file):
+            return {"accounts": {}}
+        return self._state()
+
+    def test_a_stopped_account_is_not_dispatched(self):
+        self._set_users(self._stopped())
+        rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(_FakeIM.instances, [], "停用的账号被自动派发了")
+        self.assertTrue(rec["nothing_due"])
+        self.assertNotIn("111", self._state_or_empty()["accounts"], "停用的账号不该写进时间表")
+        self.assertEqual(self._runs(), [], "没发就没必要往账本里写一行")
+
+    def test_the_brief_names_it_as_paused(self):
+        self._set_users(self._stopped())
+        rec = tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual([p["unique_id"] for p in rec["schedule"]["paused"]], ["111"])
+        self.assertEqual(rec["schedule"]["due"], [])
+
+    def test_other_accounts_still_run(self):
+        other = {**self.early[0], "unique_id": "222", "username": "账号乙"}
+        self._set_users(self._stopped() + [other])
+        tasks_mod.runTasks(dry_run="off", source="timer")
+        self.assertEqual(len(_FakeIM.instances), 1, "停一个不该把别人一起停了")
+        self.assertIn("222", self._state()["accounts"])
+        self.assertNotIn("111", self._state()["accounts"])
+
+    def test_only_naming_it_still_runs_it(self):
+        self._set_users(self._stopped())
+        rec = tasks_mod.runTasks(dry_run="off", source="cli", only="111")
+        self.assertEqual(len(_FakeIM.instances), 1, "点名要跑却不跑")
+        self.assertEqual(rec["accounts"][0]["status"], "ok")
+        self.assertEqual(self._state()["accounts"]["111"]["status"], "ok")
+
+    def test_force_leaves_it_alone_and_says_why(self):
+        self._set_users(self._stopped())
+        rec = tasks_mod.runTasks(dry_run="off", source="webui", force=True)
+        self.assertEqual(_FakeIM.instances, [], "「立即运行」把停用的账号发了一遍")
+        skipped = rec.get("skipped") or {}
+        self.assertEqual(skipped.get("reason"), "account_stopped")
+        self.assertEqual(skipped.get("stopped"), 1)
+
+
+
 class RuntimeLoginLostTests(_TasksCase):
     """运行期掉登录：账号级结论必须记 error，并且立刻停掉剩余目标。
 

@@ -1876,6 +1876,12 @@ pre {
   border-color: var(--warning-line);
 }
 
+/* 人自己停用的账号（TASKS[].enabled=false）：不是故障，所以不染报警色；虚线边
+   一眼看出"这张卡是关着的"，而不是"它今天出错了"（错误另有 issues 里的红字）。 */
+.account-card[data-account-state="stopped"] {
+  border-style: dashed;
+}
+
 .account-card + .account-card {
   margin-top: 12px;
 }

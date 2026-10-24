@@ -733,11 +733,12 @@ def _fingerprint_from(value) -> int:
 
 @_serialized
 def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
-                   message=None, send_time=None, path=None, add_if_missing=True) -> dict:
+                   message=None, send_time=None, enabled=None, path=None,
+                   add_if_missing=True) -> dict:
     """把账号加进 TASKS（已在则就地更新），返回结果字典。
 
     只动给出的字段：`username` 为空就保留原值，`targets` 为 None 就保留原列表，
-    `message` / `send_time` 为 None 就保留原值。
+    `message` / `send_time` / `enabled` 为 None 就保留原值。
     fingerprint 只在账号**还没有**指纹时生效（读不出来就随机补一个）；已有指纹
     一律保留 —— 它是"这个账号固定用哪台设备"的锚，必须写进文件、以后每次都读
     同一份，不能让浏览器每次自己随机，也不能被顺手传进来的值悄悄换掉。
@@ -811,6 +812,18 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
             # 而不是留一个 "" —— "这个账号到底有没有单独配过时间"要一眼可辨。
             entry.pop("time", None)
             changed = True
+    if enabled is not None:
+        # 停用写成 `"enabled": false`；启用则把这个键**删掉**（缺键 = 启用）。
+        # 和 message/time 同一语感：写空 = 回默认，键留着只会让"这个账号到底停过
+        # 没有"变得更难一眼看出。别的形态（字符串 "false"、"0"）一律重写成
+        # 布尔 false，读取端的 task_enabled 认它，面板也不至于显示错。
+        if enabled:
+            if "enabled" in entry:
+                entry.pop("enabled", None)
+                changed = True
+        elif entry.get("enabled") is not False:
+            entry["enabled"] = False
+            changed = True
     # 指纹是"这个账号固定用哪台设备"的锚，一旦定下就不许漂。
     # 传进来的种子只在**账号还没有指纹**时生效；已有指纹时保留原值，
     # 免得面板/命令行顺手传一个值就把账号悄悄换成"另一台设备"。
@@ -828,6 +841,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
                   "targets": list(entry.get("targets") or []),
                   "fingerprint": entry.get("fingerprint"),
                   "time": str(entry.get("time") or ""),
+                  "enabled": schedule_mod.user_enabled(entry),
                   "message": "TASKS 里已经是这个账号，没有改动"}
         if kept:
             result["fingerprint_kept"] = kept
@@ -859,6 +873,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
         "targets": list(entry.get("targets") or []),
         "fingerprint": entry.get("fingerprint"),
         "time": str(entry.get("time") or ""),
+        "enabled": schedule_mod.user_enabled(entry),
         "message": "已加入 TASKS" if created else "已更新 TASKS",
     }
     if kept:
@@ -1066,6 +1081,34 @@ def set_account_time(unique_id, time_text, *, path=None) -> dict:
     result = upsert_account(uid, send_time=text, path=path)
     if result.get("ok"):
         result["time_set"] = text
+    return result
+
+
+@_serialized
+def set_account_enabled(unique_id, enabled, *, path=None) -> dict:
+    """停用 / 启用一个账号（面板账号卡上的「停用」「启用」）。
+
+    ★ 停用只是**不自动发**：TASKS 里的昵称、目标好友、发送时间、指纹和
+      `COOKIES_*` 全部留着，点「启用」就恢复原样 —— 这正是它和
+      `remove_account` 的区别（那个连 cookie 一起删，想再发就得重新扫码）。
+
+    返回里的 `enabled` 是**落盘后**的状态（`upsert_account` 同一口径），
+    `message` 仍是人话提示。
+    """
+    uid = str(unique_id or "").strip()
+    if not uid:
+        return {"ok": False, "error": "没读到抖音号"}
+    if task_for(uid, path) is None:
+        return {"ok": False, "error": f"{uid} 还不在 TASKS 里，先完成一次扫码登录"}
+
+    result = upsert_account(uid, enabled=bool(enabled), path=path)
+    if result.get("ok"):
+        result["enabled"] = bool(enabled)
+        result["message"] = (
+            "已启用：到点后照常自动发送（今天还没发过的话，下一次门铃就会补上）"
+            if enabled else
+            "已停用：不再自动发送；配置、cookie、好友都还留着，随时可以启用"
+        )
     return result
 
 

@@ -583,6 +583,69 @@ class AccountTimeTests(EnvFileTestCase):
         self.assertTrue(self.backups(), "写 .env 之前必须先留一份备份")
 
 
+class AccountEnabledTests(EnvFileTestCase):
+    """账号停用开关（`TASKS[].enabled`）：停用写 `false`，启用时**删键**。
+
+    ★ 停用和「移除」是两件事：这里一个字节都不碰 `COOKIES_*`、好友、时间、指纹，
+      只是让派发器别再自动发它（见 core/schedule.py 的 `paused`）。
+    """
+
+    def enabled_of(self, uid=UID):
+        for task in json.loads(self.value_of("TASKS")):
+            if str(task.get("unique_id")) == uid:
+                return task.get("enabled", True)
+        return None
+
+    def test_disable_writes_false_and_keeps_everything_else(self):
+        result = envfile.set_account_enabled(UID, False)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["enabled"])
+        self.assertIn("随时可以启用", result["message"])
+        task = json.loads(self.value_of("TASKS"))[0]
+        self.assertEqual(task["enabled"], False)
+        self.assertEqual(task["targets"], ["好友A"], "目标好友不能被停用弄丢")
+        self.assertEqual(task["fingerprint"], 12345, "指纹不能被停用弄丢")
+        self.assertIn("COOKIES_12345678905", self.text(), "cookie 不能被停用弄丢")
+        self.assertIn("# 续火花配置（这份注释必须活下来）", self.text())
+
+    def test_enable_removes_the_key(self):
+        self.assertTrue(envfile.set_account_enabled(UID, False)["ok"])
+        result = envfile.set_account_enabled(UID, True)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["enabled"])
+        self.assertIn("下一次门铃", result["message"])
+        self.assertNotIn("enabled", json.loads(self.value_of("TASKS"))[0], "启用 = 删键，不留 true")
+        self.assertIs(self.enabled_of(), True)
+
+    def test_disable_is_idempotent(self):
+        envfile.set_account_enabled(UID, False)
+        backups = self.backups()
+        result = envfile.set_account_enabled(UID, False)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["changed"], "状态没变就不该再写盘")
+        self.assertEqual(self.backups(), backups, "没改动就不该多一份备份")
+
+    def test_unknown_account_is_refused(self):
+        result = envfile.set_account_enabled(UID2, False)
+        self.assertFalse(result["ok"])
+        self.assertIn("扫码登录", result["error"])
+        self.assertNotIn(UID2, self.text())
+
+    def test_blank_uid_is_refused(self):
+        self.assertFalse(envfile.set_account_enabled("  ", False)["ok"])
+
+    def test_a_disabled_account_can_still_be_edited(self):
+        """停用之后改内容/时间要照常能存 —— 停用不是只读。"""
+        envfile.set_account_enabled(UID, False)
+        self.assertTrue(envfile.set_account_time(UID, "08:00")["ok"])
+        self.assertTrue(envfile.set_account_message(UID, "停用期间改的内容")["ok"])
+        task = json.loads(self.value_of("TASKS"))[0]
+        self.assertEqual(task["enabled"], False, "改内容把停用状态弄丢了")
+        self.assertEqual(task["time"], "08:00")
+        self.assertEqual(task["message"], "停用期间改的内容")
+
+
+
 class RemoveAccountTests(EnvFileTestCase):
     def test_removes_account_and_cookie(self):
         result = envfile.remove_account(UID)

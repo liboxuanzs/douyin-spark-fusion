@@ -2705,6 +2705,48 @@ def create_app() -> FastAPI:
             )
         return JSONResponse(payload, status_code=200 if payload.get("ok") else 409)
 
+    @app.post("/ops/account/enabled")
+    def ops_account_enabled(request: Request, unique_id: str = Form(""),
+                            enabled: str = Form("")) -> Response:
+        """停用 / 启用一个账号（账号卡上的「停用」「启用」）。
+
+        ★ 停用只写 `TASKS[].enabled = false`：不派发、不自动发，但昵称、好友、
+          发送时间、指纹和 cookie 全留着 —— 和「移除」是两件事（那个连 cookie 一起删，
+          想再发就得重新扫码）。当天已经发过的记录**不动**：恢复后如果今天还没发，
+          下一次门铃就会补上（不需要手动补发）。
+
+        表单里的 `enabled` 用 "1"/"0"：HTML 的 checkbox 不勾就不提交，两个都当按钮
+        提交更省事，也不用在模板里写隐藏域兜底。
+        """
+        as_html = wants_html(request)
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        flag = str(enabled or "").strip().lower() in ("1", "true", "on", "yes", "enable", "enabled")
+        uid = str(unique_id or "").strip()
+        result = envfile.set_account_enabled(uid, flag)
+        if result.get("ok"):
+            envfile.reload()
+            try:
+                store.refresh_env()
+            except Exception:  # noqa: BLE001
+                pass
+            _log(f"账号 {uid} 已{'启用' if flag else '停用'}（TASKS[].enabled={'true' if flag else 'false'}）")
+        if as_html:
+            if result.get("ok"):
+                return redirect_with(
+                    request, path="/", anchor=f"account-{uid}",
+                    saved=result.get("message") or ("已启用" if flag else "已停用"),
+                )
+            return redirect_with(request, path="/", error=result.get("error") or "操作失败")
+        return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
     @app.post("/ops/account/remove")
     def ops_account_remove(request: Request, unique_id: str = Form("")) -> Response:
         as_html = wants_html(request)

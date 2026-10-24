@@ -172,6 +172,9 @@ STATE_LABELS: Dict[str, str] = {
     "blocked": "账号阻断",
     "idle": "尚未运行",
     "orphan": "已不在配置里",
+    # 人自己在面板上停用的账号（`TASKS[].enabled=false`）。它不是故障，
+    # 所以配色要"安静"，但状态文字必须显眼 —— 否则"今天怎么没发"会被当成 bug 去查。
+    "stopped": "已停用",
 }
 
 STATE_CSS: Dict[str, str] = {
@@ -180,6 +183,7 @@ STATE_CSS: Dict[str, str] = {
     "blocked": "paused",
     "idle": "pending",
     "orphan": "pending",
+    "stopped": "stopped",
 }
 
 #: ``status-chip`` 的配色（B 的三档）。
@@ -189,6 +193,7 @@ STATE_CHIP: Dict[str, str] = {
     "blocked": "danger",
     "idle": "warning",
     "orphan": "info",
+    "stopped": "info",
 }
 
 _LEVEL_STRONG = "strong"
@@ -397,7 +402,8 @@ def _account_state_for(data: Dict[str, Any], *, ready: bool, gate: str, status: 
     )
 
 
-def schedule_fields(unique_id: str, send_time: str = "", *, when=None) -> Dict[str, Any]:
+def schedule_fields(unique_id: str, send_time: str = "", *, when=None,
+                    enabled: bool = True) -> Dict[str, Any]:
     """一个账号「什么时候发」的展示行 —— 面板上的时间输入框与今日状态都用它。
 
     ★ 判定逻辑**一律走 `core.schedule`**，这里只把结果翻成人话。面板写着
@@ -407,6 +413,11 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None) -> Dict[s
     读状态文件是每张卡一次小文件读（≤10 个账号、只在渲染首页时发生），
     刻意不做缓存：缓存要么跨请求读到旧状态，要么得引入失效逻辑，
     都比这一次 `open()` 贵。
+
+    ``enabled=False`` 是**人自己停用的**（`TASKS[].enabled=false`）：调度器根本不把它
+    放进 `due`（见 `core/schedule.py` 的 `paused` 那一堆），所以这里不能再写
+    "等 17:20 到点"——那会让人以为到点就会发。仍算出 `due_text`，是为了说明
+    "本来该在什么时候发"，方便判断要不要恢复。
     """
     uid = _text(unique_id)
     when = when or schedule.now()
@@ -427,6 +438,17 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None) -> Dict[s
         when=when,
         jitter=schedule.jitter_minutes_env(),
     )
+    if not enabled:
+        return {
+            "send_time": plan["time"],
+            "send_time_custom": bool(plan["custom"]),
+            "send_window": schedule.window_text(plan),
+            "send_due": plan["due_text"],
+            "send_state": "stopped",
+            "send_state_text": f"已停用：不会自动发送（本来该在 {plan['due_text']} 前后）",
+            "send_status": "",
+            "send_sent_at": "",
+        }
     state = schedule.load_state()
     record = schedule.entry_for(state, uid, when)
     status = str((record or {}).get("status") or "")
@@ -494,6 +516,10 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
     for item in accounts or []:
         uid = _text(_get(item, "unique_id"))
         if not uid:
+            continue
+        if not bool(_get(item, "enabled", True)):
+            # 停用的账号根本不进派发（`core/schedule.py` 的 `paused` 那一堆）。
+            # 把它算进"下一个"会让面板永远指着一个不会发生的时刻，用户守着等。
             continue
         # 今天已经记过账的账号不会再发 —— 不排除掉的话"下次"会一直指向一个
         # 已经发生过、且今天不会再发生的时间。
@@ -615,6 +641,9 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     gate = _text(data.get("gate")).upper()
     status = _text(data.get("status")).lower()
     orphan = bool(data.get("orphan"))
+    # 人自己停用的账号（`TASKS[].enabled=false`，缺键 = 启用）。停用的账号照旧有
+    # 配置、cookie 和上一轮的结果 —— 只是调度器不再自动发它。
+    enabled = bool(data.get("enabled", True))
     # 「运行期掉登录」/「一条都没送达」只写在账本的账号结果里
     # （`core/tasks.py` 的 `out["error"]`），配置快照 `data` 上没有这个字段
     # —— 必须从 `account` 上取。
@@ -631,6 +660,11 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         data, ready=ready, gate=gate, status=status, attempted=attempted, failed=failed,
         login_lost=login_lost or kicked or nothing_sent or login_dead,
     )
+    if not enabled and not orphan:
+        # 停用压过一切运行态：那些"需要处理/账号阻断"讲的是**停用之前**发生的事，
+        # 而这张卡现在要回答的是"今天为什么没发" —— 答案是"我把它停了"。
+        # 上一轮的问题仍然在 issues 里列着，恢复后照旧看得见。
+        state = "stopped"
 
     issues: List[Dict[str, str]] = []
     # orphan 卡不往 issues 里塞东西：模板在卡头下面已经有一段说明，
@@ -729,9 +763,11 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         "has_message": bool(_text(data.get("message"))),
         "message_lines": message_lines(_text(data.get("message"))),
         # 发送时间（每账号可自定义，见 core/schedule.py）。
-        **schedule_fields(data.get("unique_id"), _text(data.get("send_time"))),
+        **schedule_fields(data.get("unique_id"), _text(data.get("send_time")),
+                          enabled=enabled),
         "ready": ready,
         "orphan": orphan,
+        "enabled": enabled,
         "gate": gate,
         "gate_text": _text(data.get("gate_text"), store.gate_label(gate)),
         "status": status,
@@ -831,12 +867,16 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
     下一轮根本不会碰它们，计进去只会让"共 N 个目标"和"账号被阻断"对不上实际。
     """
     live = [card for card in cards if not card.get("orphan")]
-    total = sum(_int(card.get("total")) for card in live)
-    confirmed = sum(_int(card.get("confirmed")) for card in live)
-    weak = sum(_int(card.get("weak")) for card in live)
-    failed = sum(_int(card.get("failed")) for card in live)
-    pending = sum(_int(card.get("pending")) for card in live)
-    blocked_targets = sum(_int(card.get("total")) for card in live if card.get("state") == "blocked")
+    # 停用的账号**不进计数**：它不会被派发，目标数计进去会让"未尝试 N"永远归不了零，
+    # 看着像"还有活没干完"，其实是"这个账号被关掉了"。
+    active = [card for card in live if card.get("enabled", True)]
+    stopped = len(live) - len(active)
+    total = sum(_int(card.get("total")) for card in active)
+    confirmed = sum(_int(card.get("confirmed")) for card in active)
+    weak = sum(_int(card.get("weak")) for card in active)
+    failed = sum(_int(card.get("failed")) for card in active)
+    pending = sum(_int(card.get("pending")) for card in active)
+    blocked_targets = sum(_int(card.get("total")) for card in active if card.get("state") == "blocked")
     sent = confirmed + weak
     strong_pct, weak_pct = progress_pair(confirmed, sent, total)
 
@@ -860,8 +900,12 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
         "weak_pct": weak_pct,
         "blocked_targets": blocked_targets,
         "accounts": len(live),
-        "accounts_blocked": sum(1 for card in live if card.get("state") == "blocked"),
-        "accounts_attention": sum(1 for card in live if card.get("state") == "attention"),
+        "accounts_active": len(active),
+        # 停用的账号：不进上面的分母，但必须单独报出来 —— 否则"共 N 个目标"会
+        # 凭空空掉一块，用户在页面上找不到原因（卡片本身也会写"已停用"）。
+        "accounts_stopped": stopped,
+        "accounts_blocked": sum(1 for card in active if card.get("state") == "blocked"),
+        "accounts_attention": sum(1 for card in active if card.get("state") == "attention"),
         "accounts_orphan": len(cards) - len(live),
         # 这一格叫「最近强确认」，说明文字是"回执 ok 且能点名收件人（发送后就停在目标
         # 会话）"—— 别写成"双确认"：收件人校验不过只会把证据降级成弱证据（ok 仍为
@@ -1050,7 +1094,8 @@ def _quiet_clash(spec: str, timer_times: Sequence[str]) -> Dict[str, Any]:
 def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedules: Sequence[str],
                     timer: Optional[Dict[str, Any]] = None,
                     quiet: Optional[Dict[str, Any]] = None,
-                    next_due: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    next_due: Optional[Dict[str, Any]] = None,
+                    stopped: int = 0, accounts_total: int = 0) -> Dict[str, Any]:
     labels = [_text(item) for item in (schedules or []) if _text(item)]
     timer = dict(timer or {})
     # 新架构：timer 是每 N 分钟敲一次门的**派发器**，`OnCalendar` 里没有"几点发"。
@@ -1088,7 +1133,15 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
                 next_short = f"{name} · {overdue}{due_text}"
         else:
             next_iso = ""
-            next_text = "今天该发的都发完了"
+            # "今天该发的都发完了"在**全部停用**时是句假话：不是发完了，是没人要发。
+            # 停用账号不进 next_due（见 `next_due()`），所以没有它这句话会骗人，
+            # 用户会以为程序还在正常跑，只是今天没事干。
+            if stopped and accounts_total and stopped >= accounts_total:
+                next_text = "所有账号都已停用，不会再自动发送"
+            elif stopped:
+                next_text = f"今天该发的都发完了（另有 {stopped} 个账号已停用）"
+            else:
+                next_text = "今天该发的都发完了"
     elif next_run is not None:
         label = "每日 " + "、".join(labels) if labels else "已配置定时"
         next_iso = next_run.isoformat()
@@ -1363,6 +1416,8 @@ def build(
     schedule = _schedule_state(
         records, summary["pending"], next_run, schedules, timer=timer, quiet=quiet_info,
         next_due=next_due,
+        stopped=summary.get("accounts_stopped", 0),
+        accounts_total=summary.get("accounts", 0),
     )
 
     level = _text(default_dry_run, "off").lower()

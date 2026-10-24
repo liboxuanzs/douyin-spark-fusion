@@ -214,12 +214,32 @@ def day_of(when):
 # 计划
 # ---------------------------------------------------------------------------
 
+def user_enabled(user):
+    """这个账号现在启用没有（`TASKS[].enabled`，缺键 = 启用）。
+
+    解析规则只有一份，在 `utils.config.task_enabled`（它认得手写进 `.env` 的
+    "false"/"0"/"off"/"停用" 这些形态）。派发器与面板拿到的账号字典里已经是布尔，
+    只有**别人手搓的调用**（测试、探测脚本）会传字符串，所以这里只在那一种情况下
+    才去借那一份规则，模块级不 import `utils.config`（见 `state_path` 的注释）。
+    """
+    if not isinstance(user, dict):
+        return True
+    value = user.get("enabled", True)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    from utils.config import task_enabled       # noqa: PLC0415 函数内 import：避免 import 期耦合
+
+    return task_enabled({"enabled": value})
+
+
 def plan_for(user, *, when=None, fallback=None, jitter=None):
     """算出一个账号"今天几点该发"。
 
     返回的字典是**只读的展示/判定用快照**，不落盘：
         unique_id / username / time（最终生效的 HH:MM）/ custom（是不是账号自己写的）
-        jitter_minutes / due_at（datetime）/ due_text / tick_minutes
+        enabled（`TASKS[].enabled`）/ jitter_minutes / due_at（datetime）/ due_text / tick_minutes
     """
     when = when or now()
     uid = str((user or {}).get("unique_id") or "")
@@ -248,6 +268,8 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
         "username": str((user or {}).get("username") or uid),
         "time": final,
         "custom": bool(own),
+        # 停用的账号照样算得出"今天几点该发"（面板要显示它的时间），只是不会被派发。
+        "enabled": user_enabled(user),
         "jitter_minutes": span,
         "offset_minutes": offset,
         "due_at": due,
@@ -758,23 +780,34 @@ def skip_retry_exhausted(record, *, limit=None, day=None):
 
 
 def select(users, *, when=None, state=None, fallback=None, jitter=None):
-    """把账号分成三堆：到点了 / 还没到 / 今天发过了。
+    """把账号分成四堆：到点了 / 还没到 / 今天发过了 / 已停用。
 
     判定顺序很重要 —— **"今天发过了"优先于"到没到点"**，否则手动跑过一轮之后，
     到点那一轮会把它再发一遍。
+
+    `paused` 是 2026-10-24 新增的一堆（`TASKS[].enabled=false`）：停用的账号
+    **不参与派发**，既不进 `due`（不能被发）也不进 `waiting`（面板拿 waiting
+    算"下一个是谁"，停用账号会给出一个永远不会发生的时刻）。它也不进 `sent`：
+    那是"今天办过了"的口径，停用账号今天根本没被尝试，混进去会让日志里的
+    "今天已发 N 个"和真实回执对不上。
     """
     when = when or now()
     state = state if state is not None else load_state()
     fallback = fallback if fallback is not None else os.getenv("TASK_SCHEDULE_TIMES", "")
     if jitter is None:
         jitter = jitter_minutes_env()
-    due, waiting, sent = [], [], []
+    due, waiting, sent, paused = [], [], [], []
     plans = {}
     today = day_of(when)
     for user in users or []:
         plan = plan_for(user, when=when, fallback=fallback, jitter=jitter)
         uid = plan["unique_id"]
         plans[uid] = plan
+        # ★ 停用排在最前：它的"今天到没到点""今天发没发过"都不影响派发决定，
+        #   早一步分出去，后面的判定就不必逐个再想一遍"这个账号是不是停了"。
+        if not plan.get("enabled", True):
+            paused.append((user, plan))
+            continue
         record = entry_for(state, uid, when)
         # 「今天发过了」只认**真发出去**的那一次。状态是 `skipped` 的记录意味着
         # 门禁没过 / 命中风控 —— 一条都没发出去，当天的名额还在，必须让下一次
@@ -802,6 +835,7 @@ def select(users, *, when=None, state=None, fallback=None, jitter=None):
         "due": due,
         "waiting": waiting,
         "sent": sent,
+        "paused": paused,
         "idle": not due,
     }
 

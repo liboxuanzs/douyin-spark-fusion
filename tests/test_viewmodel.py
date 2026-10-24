@@ -508,6 +508,67 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["receiptOnly"], 0, "C 没有「仅回执」这一档，恒定 0")
 
 
+class StoppedAccountViewTests(unittest.TestCase):
+    """停用账号在面板上的样子：说"已停用"，并且不占"今天要发多少"。"""
+
+    def _stopped(self, **kwargs):
+        base = {"enabled": False, "targets": ["甲"], "target_count": 1}
+        base.update(kwargs)
+        return _snapshot(**base)
+
+    def test_the_card_says_stopped(self):
+        card = viewmodel.build_account(self._stopped(), None)
+        self.assertFalse(card["enabled"])
+        self.assertEqual(card["state"], "stopped")
+        self.assertEqual(card["state_label"], "已停用")
+        self.assertEqual(card["chip"], "info")
+        self.assertEqual(card["send_state"], "stopped")
+        self.assertIn("已停用", card["send_state_text"])
+        self.assertIn("不会自动发送", card["send_state_text"])
+
+    def test_stopped_beats_blocked(self):
+        """登录态掉了 + 已停用：显示"已停用"（它本来就不该发，别催人去扫码）。"""
+        card = viewmodel.build_account(
+            self._stopped(gate="EXPIRED", gate_text="登录失效", ready=False, cookie_configured=0),
+            None,
+        )
+        self.assertEqual(card["state"], "stopped")
+
+    def test_summary_does_not_count_stopped_targets(self):
+        live = viewmodel.build_account(
+            _snapshot(targets=["甲", "乙"], target_count=2),
+            _record(accounts=[_account(targets=["甲", "乙"], entries=[_entry("甲")])]),
+        )
+        stopped = viewmodel.build_account(
+            self._stopped(targets=["甲", "乙", "丙"], target_count=3), None
+        )
+        summary = viewmodel.summarize([live, stopped], last_at="2026-10-01 12:30:03")
+        self.assertEqual(summary["accounts"], 2, "两个账号都还在配置里")
+        self.assertEqual(summary["accounts_active"], 1)
+        self.assertEqual(summary["accounts_stopped"], 1)
+        self.assertEqual(summary["total"], 2, "停用账号的目标不该算进今天的进度")
+        self.assertEqual(summary["pending"], 1)
+
+    def test_all_stopped_is_said_out_loud(self):
+        schedule_view = viewmodel._schedule_state(
+            [], 0, None, [],
+            timer={"dispatchMinutes": 5, "state": "enabled"},
+            stopped=1, accounts_total=1,
+        )
+        self.assertEqual(schedule_view["nextTriggerText"], "所有账号都已停用，不会再自动发送")
+
+    def test_partly_stopped_is_mentioned(self):
+        schedule_view = viewmodel._schedule_state(
+            [], 0, None, [],
+            timer={"dispatchMinutes": 5, "state": "enabled"},
+            stopped=1, accounts_total=3,
+        )
+        self.assertEqual(
+            schedule_view["nextTriggerText"], "今天该发的都发完了（另有 1 个账号已停用）"
+        )
+
+
+
 class ScheduleTimerTests(unittest.TestCase):
     """`.env` 里的 12:30 只是"打算几点跑"，真正会不会跑由 systemd 定时器说了算。"""
 
@@ -1209,6 +1270,14 @@ class NextDueSkipTests(unittest.TestCase):
         self.assertIsNone(
             viewmodel.next_due([self._account()], when=self._when("2026-10-09 22:40:00"))
         )
+
+    def test_a_stopped_account_is_not_the_next_one(self):
+        """停用的账号不该被报成"下一个到点"—— 它今天不会自动发。"""
+        got = viewmodel.next_due(
+            [{**self._account(), "enabled": False}], when=self._when("2026-10-09 10:00:00")
+        )
+        self.assertIsNone(got)
+
 
     def test_yesterdays_skip_does_not_resurrect_today(self):
         self._mark(schedule.STATUS_SKIPPED, text="2026-10-08 17:31:00")

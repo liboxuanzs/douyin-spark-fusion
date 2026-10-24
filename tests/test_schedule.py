@@ -1208,5 +1208,68 @@ class StateLockTests(_StateCase):
         self.assertEqual(self._disk()["accounts"]["11223344556"]["status"], schedule.STATUS_OK)
 
 
+
+
+class EnabledAccountTests(unittest.TestCase):
+    """账号停用开关（`TASKS[].enabled`）：停的是"每天自动发"，不是这个账号。
+
+    2026-10-24 新增。以前想停一个账号只能「移除」——那会连 `COOKIES_*`、好友、
+    指纹一起删掉，想恢复还得重新扫码登录；而多数停用只是"这阵子先别发"。
+    """
+
+    def test_missing_key_means_enabled(self):
+        """★ 缺键必须是启用：老 `.env` 里没有这一项，按停用处理 = 升级当晚静默停发。"""
+        for user in ({}, {"unique_id": "u"}, {"enabled": None}, {"enabled": True},
+                     {"enabled": "true"}, {"enabled": "ON"}, {"enabled": 1}):
+            with self.subTest(user=user):
+                self.assertTrue(schedule.user_enabled(user))
+
+    def test_false_like_values_disable_it(self):
+        for value in (False, 0, 0.0, "false", "FALSE", " off ", "0", "no", "disabled", "停用"):
+            with self.subTest(value=value):
+                self.assertFalse(schedule.user_enabled({"unique_id": "u", "enabled": value}))
+
+    def test_junk_is_treated_as_enabled(self):
+        """认不出的值按启用处理：宁可多发一天，也别让账号整天静默（那是最难查的故障）。"""
+        for value in ("maybe", "yesnt", {}, [], 2.5):
+            with self.subTest(value=value):
+                self.assertTrue(schedule.user_enabled({"enabled": value}))
+
+    def test_plan_carries_the_flag(self):
+        plan = schedule.plan_for(
+            {"unique_id": "u", "username": "甲", "time": "08:00", "enabled": False},
+            when=_at("2026-10-07 07:00:00"), jitter=0,
+        )
+        self.assertFalse(plan["enabled"])
+
+    def test_a_stopped_account_never_lands_in_due(self):
+        users = [
+            {"unique_id": "zao", "username": "早", "time": "08:00", "enabled": False},
+            {"unique_id": "wan", "username": "晚", "time": "20:30"},
+        ]
+        result = schedule.select(users, when=_at("2026-10-07 08:30:00"),
+                                 state={"accounts": {}}, fallback="20:30", jitter=0)
+        self.assertEqual(result["due"], [], "停用的账号被排进了本轮要发")
+        self.assertEqual([plan["unique_id"] for _u, plan in result["paused"]], ["zao"])
+        self.assertEqual([plan["unique_id"] for _u, plan in result["waiting"]], ["wan"])
+        self.assertTrue(result["idle"])
+
+    def test_a_stopped_account_is_not_reported_as_sent(self):
+        """今天发过一轮之后再停用：它也不该混进"今天已经发过"那一堆。"""
+        users = [{"unique_id": "zao", "username": "早", "time": "08:00", "enabled": False}]
+        state = {"accounts": {"zao": {"date": "2026-10-07", "status": schedule.STATUS_OK}}}
+        result = schedule.select(users, when=_at("2026-10-07 21:00:00"), state=state,
+                                 fallback="20:30", jitter=0)
+        self.assertEqual(result["sent"], [])
+        self.assertEqual([plan["unique_id"] for _u, plan in result["paused"]], ["zao"])
+
+    def test_an_enabled_account_is_unaffected(self):
+        users = [{"unique_id": "zao", "username": "早", "time": "08:00", "enabled": True}]
+        result = schedule.select(users, when=_at("2026-10-07 08:30:00"),
+                                 state={"accounts": {}}, fallback="20:30", jitter=0)
+        self.assertEqual([plan["unique_id"] for _u, plan in result["due"]], ["zao"])
+        self.assertEqual(result["paused"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

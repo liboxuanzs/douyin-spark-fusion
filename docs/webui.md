@@ -109,6 +109,7 @@ echo -n '我的口令' | .venv/bin/python -m webui.hash_password --stdin
 | POST | `/ops/account/targets` | 表单 `unique_id` + **`picked`（可重复，每个值是一小段 JSON `{"name","uid","conv_id"}`）**，保存勾选结果到 `.env` 的 `TASKS`；`picked` 为空时回落到旧的 `targets` 文本字段（每行/逗号分隔的名字，给命令行与老配置用） |
 | POST | `/ops/account/remove` | 移除账号（连 `COOKIES_<抖音号>` 一起删） |
 | POST | `/ops/account/requeue` | 表单 `unique_id`：**撤回今天的记账**，让当天剩下的门铃把它补发一次（issue #12 的手动出口）。**今天已经成功发过的账号会被拒绝**（"已经发过就不撤"的判定在 `core/schedule.requeue_after_relogin()`），所以这个按钮造不出"一天发两遍"；`?format=json` 走 JSON |
+| POST | `/ops/account/enabled` | 表单 `unique_id` + `enabled`（`1` 启用 / 其他停用）：只改 `.env` 里 `TASKS[].enabled` —— 停用写 `false`，启用**删键**；好友、时间、指纹、`COOKIES_*` 一个都不动（和「移除」是两件事）。停用的账号不进自动派发，`--only` 点名照发；`?format=json` 走 JSON |
 | POST | `/ops/config/save` | 保存「运行配置」表单：只认 `webui/settings.py` 白名单里的键，写前备份 `.env`；`?format=json` 走 JSON 报错 |
 | POST | `/ops/notify/test` | 按当前配置推一条**测试**通知（200 成功 / 400 失败并在 `detail` 里说原因）。同步执行，最坏等 `NOTIFY_TIMEOUT_SECONDS` 秒；`?format=json` 走 JSON |
 | POST | `/ops/password` | 改面板自己的访问口令：字段 `current`/`new`/`confirm`/`store`（`plain`\|`hash`）。`WEBUI_PASSWORD` 与 `WEBUI_PASSWORD_HASH` **两个键一起写**（不用的那个写成空行），成功即**所有旧会话立刻失效**（303 回登录页）；`?format=json` 走 JSON |

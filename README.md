@@ -12,7 +12,7 @@
 
 ### 发送这条链路
 
-- **账号独立配置**：`TASKS` 里每个账号有自己的 `message`（消息文本）和 `time`（发送时间）；没写时间的账号回落到 `TASK_SCHEDULE_TIMES` 的全局时间。
+- **账号独立配置**：`TASKS` 里每个账号有自己的 `message`（消息文本）、`time`（发送时间）和 `enabled`（写 `false` 就停用：不再自动发，好友、时间、指纹、cookie 全留着）；没写时间的账号回落到 `TASK_SCHEDULE_TIMES` 的全局时间。
 - **5 分钟敲门派发器**：定时器不判断「今天发没发」，只负责敲门；`core/schedule.py` 决定谁到点、谁今天已经发过、谁要再试。当天没发出去的账号，下一个门铃会再试；试到上限（`SCHEDULE_SKIP_RETRY_MAX`）就停下等第二天。
 - **会话被踢不再烧名额**：发送接口回 `{"decision": "KICK"}` 时立刻停手 —— 不重试、不白等回执超时、不占当天名额；账号标「账号阻断」并提示重新扫码，重扫成功后当天自动补发。
 - **掉登录不再静默丢一天**：运行期发现登录失效，这一轮记成 `error`（而不是「今天已完成」）；重新扫码后当天自动补发，不用等到明天。
@@ -83,7 +83,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 
 | 键 | 说明 |
 | --- | --- |
-| `TASKS` | 账号与目标名单（JSON）：每个账号的 `unique_id`、`message`、`time`、目标列表 |
+| `TASKS` | 账号与目标名单（JSON）：每个账号的 `unique_id`、`message`、`time`、`enabled`、目标列表 |
 | `COOKIES_<抖音号>` | 该账号的登录 cookie（面板扫码后自动写入） |
 | `TASK_SCHEDULE_TIMES` | 全局发送时间表，第一项是没单独配时间的账号的默认时间 |
 | `SCHEDULE_JITTER_MINUTES` | 每个账号在基准时间前后各随机偏移多少分钟（对称，不是只往后推） |

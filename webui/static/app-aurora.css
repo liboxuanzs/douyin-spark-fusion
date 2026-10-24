@@ -1762,6 +1762,15 @@ html[data-theme="light"] .logs-code {
 .account-card[data-account-state="attention"] { border-color: rgba(251, 113, 133, 0.3); }
 .account-card[data-account-state="blocked"] { border-color: rgba(251, 191, 36, 0.28); }
 
+/* 停用账号（TASKS[].enabled=false）：不是故障，别用报警色。状态点转灰、边线变虚线，
+   一眼看出"这张卡是关着的"，而不是"它今天出错了"（错误另有 issues 里的红字）。 */
+.account-card[data-account-state="stopped"]::before {
+  background: var(--text-4);
+  box-shadow: none;
+}
+.account-card[data-account-state="stopped"] { border-style: dashed; }
+.account-card[data-account-state="stopped"] .account-stats { opacity: 0.78; }
+
 .account-card-head {
   display: flex;
   align-items: center;

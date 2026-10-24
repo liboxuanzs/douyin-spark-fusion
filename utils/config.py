@@ -452,6 +452,42 @@ def drift_report(drift, limit=160) -> str:
     return "；".join(parts)
 
 
+#: `TASKS[].enabled` 里算"停用"的写法。留这么多同义写法不是为了宽容：这一项
+#: 经常被**手写**进 `.env`（面板只是其中一条路径），把 false 写成 0/off/no 太正常了，
+#: 把它们当"没写"处理会静默变成"启用"，等于停用失效。
+_TASK_DISABLED = {"false", "0", "no", "off", "disabled", "stop", "stopped", "停用", "暂停"}
+_TASK_ENABLED = {"true", "1", "yes", "on", "enabled", "enable", "启用", "恢复"}
+
+
+def task_enabled(task):
+    """`TASKS` 里这一项现在启用没有（`enabled` 缺键 = 启用，向后兼容）。
+
+    ★ 缺键必须是启用：老 `.env` 里根本没有这一项，按"停用"处理等于升级当天
+      所有账号静默停发（定时器照敲、日志照写"没有账号到点"），最难查的一类故障。
+    ★ 认不出的值也按启用 + 告警：宁可多发一天，也不要因为一处拼写写错让账号
+      整天静默 —— 停用本来就是"人想少发"，错了立刻会有人发现。
+    """
+    if not isinstance(task, dict):
+        return True
+    raw = task.get("enabled")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    text = str(raw).strip().lower()
+    if not text or text in _TASK_ENABLED:
+        return True
+    if text in _TASK_DISABLED:
+        return False
+    logger.warning(
+        f"TASKS 里 {task.get('unique_id') or task.get('username') or '?'} 的 "
+        f"enabled 值看不懂（{raw!r}），按启用处理"
+    )
+    return True
+
+
 def get_userData():
     """
     获取用户数据目录
@@ -549,6 +585,9 @@ def get_userData():
                 # 校验收敛在 webui/envfile.set_account_time 一处，
                 # 手写进 .env 的怪值由 schedule.parse_time 兜底当"没配"。
                 "time": "" if task.get("time") is None else str(task.get("time")),
+                # 停用开关（TASKS[].enabled）。缺键 = 启用，见 task_enabled()。
+                # 读取端只翻成布尔，语义（不自动派发）由 core/schedule.py 实现。
+                "enabled": task_enabled(task),
                 "cookies": sanitize_cookies(cookies),
                 # 目标列表保持原样（不在这里归一化）。
                 # 归一化统一由 tasks.py 在匹配前做 —— 读取端不做加工，

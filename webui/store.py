@@ -989,6 +989,10 @@ class AccountSnapshot:
     # 只出现在上一轮账本里、`TASKS` 里已经没有它了（用户删了账号，或临时改过 .env）。
     # 面板要把它和"配置里的账号"区分开：它不会被下一轮处理，也没有可移除的配置。
     orphan: bool = False
+    # `TASKS[].enabled=false` = 人把它**停用**了（缺键 = 启用）。停用的账号照样有
+    # 配置和 cookie，只是调度器不再自动发它 —— 面板要能一眼看出"这张卡是停着的"，
+    # 否则"今天怎么没发"会被当成故障去查（见 core/schedule.py 的 paused 那一堆）。
+    enabled: bool = True
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1014,6 +1018,7 @@ class AccountSnapshot:
             "status": self.status,
             "status_text": self.status_text,
             "orphan": self.orphan,
+            "enabled": self.enabled,
         }
 
 
@@ -1060,7 +1065,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
     snapshots: List[AccountSnapshot] = []
 
     def build(username: str, unique_id: str, fingerprint: str, targets: List[str],
-              message: str = "", send_time: str = "") -> AccountSnapshot:
+              message: str = "", send_time: str = "", enabled: bool = True) -> AccountSnapshot:
         if unique_id:
             cookies: Dict[str, Any] = cookie_status(unique_id)
         else:
@@ -1080,6 +1085,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
             cookie_message=_text(cookies.get("message")),
             message=_text(message),
             send_time=_text(send_time),
+            enabled=bool(enabled),
         )
         snapshot.ready = snapshot.cookie_configured > 0
         if not snapshot.cookie_message and not snapshot.ready:
@@ -1087,12 +1093,14 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
         return snapshot
 
     # 1) 配置里的账号（TASKS 是权威列表）
+    from core import schedule as schedule_mod       # noqa: PLC0415 函数内 import：避免 import 期耦合
     for item in tasks:
         unique_id = _text(item.get("unique_id"))
         username = display_name(item.get("username"), "未命名账号")
         targets = item.get("targets") if isinstance(item.get("targets"), list) else []
         snapshot = build(username, unique_id, _text(item.get("fingerprint")), targets,
-                         _text(item.get("message")), _text(item.get("time")))
+                         _text(item.get("message")), _text(item.get("time")),
+                         schedule_mod.user_enabled(item))
         snapshots.append(snapshot)
         if unique_id:
             seen.add(unique_id)

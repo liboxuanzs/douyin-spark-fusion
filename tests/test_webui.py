@@ -1732,6 +1732,113 @@ class AccountMessageWebUITestCase(WebUITestCase):
         self.assertIn("没单独配置，下一轮用全局模板", page.text)
 
 
+class AccountEnabledWebUITestCase(WebUITestCase):
+    """账号卡上的「停用 / 启用」（`POST /ops/account/enabled`）。
+
+    停用只写 `TASKS[].enabled=false`：好友、时间、指纹、`COOKIES_*` 一个都不能少
+    —— 这是它和「移除」的全部区别（移除之后想再发只能重新扫码）。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.env = self.tmp / ".env"
+        self.env.write_text(SAMPLE_FRIEND_ENV, encoding="utf-8")
+        self._saved_env_file = os.environ.get("ENV_FILE")
+        os.environ["ENV_FILE"] = str(self.env)
+        self.addCleanup(self._restore_env_file)
+
+    def _restore_env_file(self) -> None:
+        if self._saved_env_file is None:
+            os.environ.pop("ENV_FILE", None)
+        else:
+            os.environ["ENV_FILE"] = self._saved_env_file
+
+    def env_text(self) -> str:
+        return self.env.read_text(encoding="utf-8")
+
+    def task(self):
+        line = [l for l in self.env_text().splitlines() if l.startswith("TASKS=")][0]
+        return json.loads(line[len("TASKS="):])[0]
+
+    def _post(self, client, value: str, **kwargs):
+        return client.post(
+            "/ops/account/enabled",
+            headers={"Accept": "application/json"},
+            data={"unique_id": UID, "enabled": value},
+            **kwargs,
+        )
+
+    def test_停用会写进env并留着cookie(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            response = self._post(client, "0")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual(self.task()["enabled"], False)
+        self.assertEqual(self.task()["targets"], [FRIEND_MAIN], "好友不能被停用弄丢")
+        self.assertEqual(self.task()["fingerprint"], 12345, "指纹不能被停用弄丢")
+        self.assertIn("COOKIES_" + UID, self.env_text(), "cookie 不能被停用弄丢")
+        self.assertIn("# 这一行注释必须原样保留", self.env_text())
+
+    def test_启用会把键删掉(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            self._post(client, "0")
+            response = self._post(client, "1")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("enabled", self.task(), "启用 = 删键，不留 true")
+
+    def test_停用后页面上有说明和启用按钮(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            self._post(client, "0")
+            page = client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("data-account-stopped", page.text, "停用账号要有一段说明")
+        card = page.text.split('data-account-overview="' + UID + '"')[1].split("</article>")[0]
+        self.assertIn("/ops/account/enabled", card)
+        self.assertIn("启用", card)
+        self.assertNotIn('data-confirm-title="停用账号"', card, "已经停用了不该再给一个停用按钮")
+
+    def test_表单提交会跳回账号卡(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            response = client.post(
+                "/ops/account/enabled",
+                headers={"Accept": "text/html"},   # 浏览器表单：要的是跳转，不是 JSON
+                data={"unique_id": UID, "enabled": "0"},
+                follow_redirects=False,
+            )
+        self.assertIn(response.status_code, (302, 303))
+        self.assertIn("account-" + UID, response.headers["location"])
+
+    def test_跨站请求被拒绝且不动env(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        before = self.env_text()
+        with self.make_client() as client:
+            self.login(client)
+            response = client.post(
+                "/ops/account/enabled",
+                headers={"Accept": "application/json", "Origin": "http://evil.example"},
+                data={"unique_id": UID, "enabled": "0"},
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.env_text(), before, "被拒绝时一个字节都不该写")
+
+    def test_未登录不能改(self) -> None:
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        before = self.env_text()
+        with self.make_client() as client:
+            response = self._post(client, "0")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.env_text(), before)
+
+
+
 class _FakeQrSession:
     """替身：只实现面板真正用到的那几个成员（不碰浏览器）。"""
 

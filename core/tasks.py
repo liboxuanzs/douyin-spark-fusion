@@ -660,9 +660,15 @@ def _idle_line(run_id, result):
     """
     waiting = result.get("waiting") or []
     sent = result.get("sent") or []
+    paused = result.get("paused") or []
     soon = sorted(waiting, key=lambda pair: str(pair[1].get("due_text") or ""))[:3]
     parts = [f"⏳ 没有账号到点，本轮不发  run_id={run_id}"]
-    parts.append(f"等 {len(waiting)} 个、今天已发 {len(sent)} 个")
+    # 停用账号要单独报一句：不然"全部账号都停用了"看起来就像"程序没在跑"
+    # （日志一天 288 行都是"没有账号到点"，和没配好一模一样）。
+    parts.append(
+        f"等 {len(waiting)} 个、今天已发 {len(sent)} 个"
+        + (f"、已停用 {len(paused)} 个" if paused else "")
+    )
     if soon:
         parts.append("最近到点：" + "、".join(
             f"{p['username']}@{p['due_text']}" for _, p in soon))
@@ -716,6 +722,7 @@ def _schedule_brief(result=None, planned=None, marks=None):
         "due": items(result.get("due")),
         "waiting": items(result.get("waiting")),
         "sent": items(result.get("sent")),
+        "paused": items(result.get("paused")),
         "ran": [
             {
                 "unique_id": plan.get("unique_id"),
@@ -935,6 +942,16 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
                          + "、".join(f"{u.get('username')}/{u.get('unique_id')}"
                                      for u in userData) + "）")
             return _skip(rec, source, reason="no_such_account", only=wanted)
+        # ★ 点名 = 明确要求，停用的也照发。停用（TASKS[].enabled=false）挡的是
+        #   "每天自动发"，不是"人现在就要发它"；把 enabled 掀起来交给调度器，
+        #   后面所有分支就都按正常账号走（到没到点、今天发没发过仍照旧判断）。
+        stopped = [u for u in users if not schedule.user_enabled(u)]
+        if stopped:
+            logger.info(
+                "⏸️ 「" + "、".join(f"{u.get('username') or u.get('unique_id')}" for u in stopped)
+                + "」已经停用（TASKS[].enabled=false），但你这次点名要跑它，本轮照发"
+            )
+            users = [{**u, "enabled": True} for u in users]
 
     jitter = config.get("scheduleJitterMinutes")
     fallback = os.getenv("TASK_SCHEDULE_TIMES", "")
@@ -948,7 +965,20 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
         # 时间照样算出来：状态文件与账本里要能看到"这个账号今天其实是 08:07
         # 该发的，14:20 被人手动补掉了"。
         forced = schedule.select(users, when=started, fallback=fallback, jitter=jitter)
-        everything = [(u, forced["plans"][str(u.get("unique_id") or "")]) for u in users]
+        # 停用的账号连"手动补一轮"也不碰（人要点名它请用 --only）；它们仍在
+        # forced["plans"] 里（面板要显示"它本来该几点发"），只是不进候选集。
+        everything = [
+            (u, forced["plans"][str(u.get("unique_id") or "")])
+            for u in users
+            if schedule.user_enabled(u)
+        ]
+        stopped = [u for u in users if not schedule.user_enabled(u)]
+        if stopped:
+            logger.info(
+                f"⏸️ 另有 {len(stopped)} 个账号已停用"
+                f"（{'、'.join(str(u.get('username') or u.get('unique_id')) for u in stopped)}），"
+                f"本轮不碰；要发它请点「启用」或用 --only 点名"
+            )
         if force == "all":
             planned = everything
         else:
@@ -965,6 +995,15 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             }
             planned = [pair for pair in everything if str(pair[1]["unique_id"]) not in done]
             if not planned and users:
+                if not everything:
+                    # 候选账号**全都停用**了（TASKS[].enabled=false）：这跟"今天已经发过"
+                    # 是两件事。照原样报"这 0 个账号今天都已经发过了"，用户会以为账记错了、
+                    # 或者程序坏了 —— 说清楚该去哪里把它打开。
+                    logger.info(
+                        "⏸️ 本轮是强制发送，但候选账号都已停用（TASKS[].enabled=false）；"
+                        "要发它请点账号卡上的「启用」，或用 --only 点名"
+                    )
+                    return _skip(rec, source, reason="account_stopped", stopped=len(stopped))
                 # 说清楚，别让面板报"运行成功、0 个账号"——用户会以为程序坏了。
                 logger.info(
                     f"⏭️ 本轮是强制发送，但这 {len(done)} 个账号今天都已经发过了；"
@@ -989,6 +1028,8 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             + "、".join(f"{p['username']}@{p['due_text']}" for _, p in planned)
             + f"）；另有 {len(plan_result['waiting'])} 个没到点、"
             f"{len(plan_result['sent'])} 个今天已经发过"
+            + (f"、{len(plan_result.get('paused') or [])} 个已停用"
+               if plan_result.get("paused") else "")
         )
 
     # 同一轮里同一个账号被排两次 = 好友收到两条一样的火花（本项目最刺眼的线上事故）。

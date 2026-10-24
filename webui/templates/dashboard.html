@@ -368,6 +368,36 @@
               <i data-lucide="send"></i><span>补发今天</span>
             </button>
           </form>
+          {# 停用 ≠ 移除：停用只写 TASKS[].enabled=false，昵称、好友、时间、指纹、cookie
+             全部留着，点「启用」就恢复；移除会把 cookie 一起删掉，想再发得重新扫码。
+             停下去这件事必须回头能看见，所以卡片本身还有一条"已停用"的说明。 #}
+          <form method="post" action="/ops/account/enabled">
+            <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+            {% if account.enabled %}
+            <input type="hidden" name="enabled" value="0">
+            <button
+              class="button button-quiet"
+              type="submit"
+              data-disable-while-running
+              {% if view.task.running %}disabled{% endif %}
+              data-confirm-title="停用账号"
+              data-confirm="「{{ account.username }}」将不再自动发送（配置、好友、cookie 全都留着，随时可以启用）。确认停用吗？"
+              data-confirm-accept="确认停用"
+            >
+              <i data-lucide="pause"></i><span>停用</span>
+            </button>
+            {% else %}
+            <input type="hidden" name="enabled" value="1">
+            <button
+              class="button button-soft"
+              type="submit"
+              data-disable-while-running
+              {% if view.task.running %}disabled{% endif %}
+            >
+              <i data-lucide="play"></i><span>启用</span>
+            </button>
+            {% endif %}
+          </form>
           <form method="post" action="/ops/account/remove">
             <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
             <button
@@ -389,6 +419,14 @@
       {# 服务端先把这一行渲染出来（首屏就得说清"这一轮没有轮到它"）；轮询要不要补上/撤掉
          由上面的母版负责，两处是同一段宏，改一处就够。 #}
       {% if account.run_missing %}{{ run_missing_block(account) }}{% endif %}
+
+      {% if not account.enabled and not account.orphan %}
+      <p class="notice-inline" data-account-stopped>
+        <i data-lucide="pause-circle"></i>
+        <span>这个账号已停用：到点不会自动发送（好友、内容、发送时间、cookie 都还留着）。
+          想让它照常发，点上面的「启用」—— 今天还没发过的话，下一次门铃就会补上。</span>
+      </p>
+      {% endif %}
 
       {% if account.orphan %}
       <p class="notice-inline" data-account-orphan>

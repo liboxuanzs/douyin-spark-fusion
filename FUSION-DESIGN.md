@@ -805,3 +805,31 @@ CSS 过渡会停在 `startTime: null` 的 pending 状态 —— 看起来像「�
 
 **回滚**：`NOTIFY_WEBHOOK_URL` 清空即完全关闭，代码不用动；`NOTIFY_LEVEL` 设 `off` 也能
 只关推送而留着地址。
+## 2026-10-24 账号停用开关（`TASKS[].enabled`）
+
+**问题**：想把某个账号停几天，当时只有「移除」——它连 `COOKIES_<抖音号>` 一起删，
+恢复时得重新扫码登录。多数停用只是"这阵子先别发"，代价不该是重新登录。
+
+**做法**：`TASKS` 每项可以写 `"enabled": false`。
+
+- **缺键 = 启用**。老 `.env` 里没有这一项，升级后照旧发；反过来（缺键当停用）
+  会让所有人升级当晚静默停发，这是绝不能接受的默认值。
+- 认不出的值（`"maybe"`、对象、数组）按**启用**处理并 warning：宁可多发一天，
+  也别让账号整天不发却没人知道 —— 后者是最难查的故障。
+- 停用挡的是"每天自动发"：`core/schedule.select()` 把这类账号收进新的第四堆
+  `paused`（不进 `due`/`waiting`/`sent`），因此不派发、不写时间表、不进账本。
+- **面板「立即运行」（`force`）不碰停用账号**，并明确报 `account_stopped` ——
+  原样报"这 0 个账号今天都已经发过了"会让人以为账记错了。
+- **`--only <抖音号/昵称>` 点名时照发**：那是人现在就要发它，不是"忘了它已停用"，
+  但要留一行日志说明。
+- 面板：账号卡显示「已停用」（`state=stopped`，压过运行态，但上一轮的问题仍在
+  `issues` 里），卡片上有「启用」按钮；概览的"今天要发多少个"**不计**停用账号的
+  目标（否则"未尝试 N"永远归不了零），但仍然单独报一句"另有 N 个账号已停用"。
+- `webui.envfile.upsert_account(enabled=...)`：`False` 写 `"enabled": false`，
+  `True` **删键**（与 message/time 写空即删键同一语感），`None` 不动 ——
+  改内容/时间不会顺手把停用状态抹掉。
+
+**验证**：`tests/test_schedule.py::EnabledAccountTests`、`tests/test_tasks_fusion.py::EnabledAccountTests`、
+`tests/test_envfile.py::AccountEnabledTests`、`tests/test_viewmodel.py::StoppedAccountViewTests`、
+`tests/test_webui.py::AccountEnabledWebUITestCase`（含"停用后 cookie/好友/指纹/注释都还在"、
+"启用后键被删掉"、"跨站请求被拒且不动 .env"）。
