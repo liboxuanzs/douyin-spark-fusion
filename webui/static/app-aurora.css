@@ -3510,3 +3510,34 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb { background: rgba(21, 28, 56
   .dashboard-stack > .dashboard-section { animation: none; opacity: 1; }
   body::after { display: none; }
 }
+
+/* -- 23.9 回修：第一轮截图后，背景仍是一片紫雾 ------------------------- */
+/* 光斑是 62vmax 的巨圆，1512 宽的屏上整块都落在它的核心里：opacity 0.3 已经
+   够把近黑的底抬成灰紫。这里把亮度再压一半、模糊拉大，并在暗角中心也加一层
+   很淡的压暗 —— 目标是「几乎黑，只在角落留一点冷光」。 */
+
+.aurora-scene::before {
+  background:
+    radial-gradient(122% 88% at 6% -8%, rgba(30, 54, 124, 0.26) 0%, rgba(30, 54, 124, 0) 56%),
+    radial-gradient(104% 76% at 94% 2%, rgba(80, 26, 112, 0.22) 0%, rgba(80, 26, 112, 0) 52%),
+    radial-gradient(130% 100% at 50% 120%, rgba(14, 70, 98, 0.18) 0%, rgba(14, 70, 98, 0) 58%),
+    linear-gradient(180deg, #03040a 0%, #05060d 54%, #02030a 100%);
+}
+.aurora-blob { opacity: 0.16; filter: blur(120px) saturate(0.85); }
+.aurora-vignette {
+  background: radial-gradient(132% 112% at 50% 40%, rgba(0, 0, 0, 0.1) 30%, rgba(0, 0, 0, 0.72) 100%);
+}
+
+/* 横幅的语义色只要「一点点」：原来 .14 的整条渐变在深色底上会变成一整块荧光 */
+.status-banner.success { background: linear-gradient(96deg, rgba(52, 211, 153, 0.09), var(--glass) 58%); }
+.status-banner.warning { background: linear-gradient(96deg, rgba(251, 191, 36, 0.08), var(--glass) 58%); }
+.status-banner.danger  { background: linear-gradient(96deg, rgba(251, 113, 133, 0.09), var(--glass) 58%); }
+.status-banner.info    { background: linear-gradient(96deg, rgba(96, 165, 250, 0.08), var(--glass) 58%); }
+
+/* 登录页：整块内容在 940 高的屏上刚好顶到卡片底边，收一点上下呼吸 */
+@media (min-width: 1081px) {
+  .login-page { padding: 62px 32px 54px; gap: 30px; }
+  .login-brand-panel { gap: 22px; }
+  .login-features { margin-top: 18px; }
+  .login-card { padding: 32px 32px 26px; }
+}

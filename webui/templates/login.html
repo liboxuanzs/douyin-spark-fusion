@@ -110,8 +110,8 @@
           口令存在服务器 <code>.env</code> 的 <code>WEBUI_PASSWORD</code>（明文）或
           <code>WEBUI_PASSWORD_HASH</code>（哈希，优先）里。
           <strong>登录后在首页「访问口令」一栏可以自己改</strong>，不需要动服务器文件；
-          万一忘了口令，在服务器上跑 <code>python -m webui.hash_password</code>
-          （或 <code>bash netinv/reset_webui_password.sh</code>）重置。
+          万一忘了口令，在服务器上跑 <code>python -m webui.reset_password</code>
+          （它会写回 <code>.env</code> 并重启面板；只想算哈希可以用 <code>python -m webui.hash_password</code>）。
           认证页面不会展示任何凭据或登录态数据。
         </div>
       </section>
