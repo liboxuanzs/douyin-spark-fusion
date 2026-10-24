@@ -1254,6 +1254,22 @@ class WebUITestCase(unittest.TestCase):
         for banned in ("/ops/env", "/ops/settings"):
             self.assertNotIn(banned, page.text)
 
+    def test_节奏类配置在面板上都能改(self) -> None:
+        """B（节奏人性化）的五个键都要出现在「运行配置」里 —— 回滚不该需要 SSH。
+
+        2026-10-24：TYPING_CHUNK_* 一开始只进了 .env.example 没进面板，而
+        FUSION-DESIGN §13 写的回滚办法是"几个键全部设 0"，人得先去服务器改 .env。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        with self.make_client() as client:
+            self.login(client)
+            page = client.get("/")
+        for key in ("RUN_START_JITTER_SECONDS", "SEND_INTERVAL_LONG_PAUSE_SECONDS",
+                    "TYPING_CHUNK_CHARS", "TYPING_CHUNK_DELAY_MS",
+                    "WARMUP_BROWSE_SECONDS"):
+            with self.subTest(key=key):
+                self.assertIn(key, page.text)
+
     def test_下次定时来自配置(self) -> None:
         os.environ["WEBUI_PASSWORD"] = PASSWORD
         with self.make_client() as client:

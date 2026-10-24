@@ -104,7 +104,8 @@ SETTINGS: Tuple[Setting, ...] = (
         maximum=600,
         default="20",
         hint="秒；必须 ≥ 下限",
-    ),    Setting(
+    ),
+    Setting(
         "RUN_START_JITTER_SECONDS",
         "开跑前随机延迟",
         KIND_INT,
@@ -133,6 +134,26 @@ SETTINGS: Tuple[Setting, ...] = (
         default="0",
         hint="秒；门禁通过后先在会话列表里滚 N 秒再发（只滚不点，失败不影响发送）；"
              "0 = 关闭（默认）",
+    ),
+    Setting(
+        "TYPING_CHUNK_CHARS",
+        "分段输入字数",
+        KIND_INT,
+        minimum=0,
+        maximum=200,
+        default="6",
+        hint="字；消息按这么多字一块、一块一块地键入编辑器（块间有停顿），"
+             "比整段一次性出现更像手打；0 = 整段一次输入",
+    ),
+    Setting(
+        "TYPING_CHUNK_DELAY_MS",
+        "分块间隔",
+        KIND_INT,
+        minimum=0,
+        maximum=2000,
+        default="110",
+        hint="毫秒；块与块之间的停顿（实际在 0.6~1.4 倍之间随机）；"
+             "0 = 不停顿，分段输入效果等同整段输入",
     ),
     Setting(
         "LIMIT_GUARD_ENABLED",
