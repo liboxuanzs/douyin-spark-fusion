@@ -305,7 +305,7 @@ fi
 
 if has '^\.env\.example$'; then
   say ""
-  warn "`.env.example` 变了：可能有新配置键，看一眼并按需补进 $env_file（本脚本不会改 .env）"
+  warn "「.env.example」变了：可能有新配置键，看一眼并按需补进 $env_file（本脚本不会改 .env）"
 fi
 
 report_unpushed

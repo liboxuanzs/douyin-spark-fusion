@@ -58,6 +58,15 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertIn("needs_restart=0", text)
         self.assertIn("webui|core|utils|main", text)
 
+    def test_no_backtick_in_code(self):
+        """反引号落在双引号里就是命令替换 —— 一行提示会把 `.env.example` 当命令跑。
+
+        2026-10-24 实测：升级后打印 "行 308: .env.example: 未找到命令"，提示文字整条
+        消失（其余输出正常，所以很容易一直看不见）。要强调用「」，别用反引号。
+        """
+        offenders = [ln for ln in _code_lines(_read()) if "`" in ln]
+        self.assertEqual(offenders, [])
+
     @unittest.skipUnless(shutil.which("bash"), "没有 bash，跳过语法检查")
     def test_syntax_is_valid(self):
         done = subprocess.run([shutil.which("bash"), "-n", SCRIPT], capture_output=True, text=True)
