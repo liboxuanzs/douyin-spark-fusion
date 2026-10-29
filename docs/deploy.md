@@ -161,6 +161,25 @@ cd /opt/douyin-spark-fusion
 
 面板首页「运行配置」最下面也有一个**发送测试通知**按钮，走同一条路。
 
+### 静默体检（`main.py doctor`）
+
+通知只在「真发完一轮」之后推。可定时器被 `systemctl disable`、派发器每 5 分钟照常敲门却
+没账号到点（按设计不写账本）、TASKS 里唯一账号掉登录 —— 这三种故障**一轮都不会产生**，
+面板和通知全都安静。所以另有一个只读体检：
+
+```bash
+cd /opt/douyin-spark-fusion
+.venv/bin/python main.py doctor              # 人话四行；有事退出码 1
+.venv/bin/python main.py doctor --json       # 同上，机器可读
+.venv/bin/python main.py doctor --no-notify  # 只检查，不推送
+```
+
+判据是「账本最后一条记录距今多少小时」（`NOTIFY_SILENCE_HOURS`，默认 30；0 关闭）
++「定时器还在不在」+「账号是不是全停用」。**全停用不算故障** —— 那是你自己关的。
+`deploy/install.sh` 会装一个 `douyin-spark-fusion-doctor.timer`（每天 09:00）并自动启用；
+它只读、不发消息，所以和必须人点头的 `daily.timer` 不同。不想跑就
+`systemctl disable --now douyin-spark-fusion-doctor.timer`。
+
 几点要知道的：
 
 - **HTTP 200 不代表推送成功**：这几家都是 200 + JSON 里的错误码（token 过期、被移出群、

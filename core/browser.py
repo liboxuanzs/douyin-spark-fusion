@@ -305,16 +305,19 @@ def _looks_like_playwright(target) -> bool:
         return False
 
 
-def get_browser(fingerprint=None):
+def get_browser(fingerprint=None, proxy=None):
     """
     启动浏览器实例。
 
     后端由 `BROWSER_BACKEND` 决定：`auto`（默认，cloakbrowser 失败则回落 Playwright）、
     `cloakbrowser`、`playwright`。失败时抛 RuntimeError（**不再 sys.exit**：
     库函数杀掉进程会让整轮任务的错误处理失效，调用方需要拿到异常写进账本）。
+
+    `proxy`（issue #18）：`None` = 没指定，用全局 `PROXY_ADDRESS`；空串 = 明确直连
+    （账号里配了 proxy 但被清空时不该回落到全局）；其余按传入地址走。
     """
     cfg = get_config()
-    proxyAddress = cfg.get("proxyAddress") or ""
+    proxyAddress = (cfg.get("proxyAddress") or "") if proxy is None else str(proxy or "")
     headless = not DEBUG
     args = chrome_args(fingerprint)
     backend = (os.environ.get("BROWSER_BACKEND") or "auto").strip().lower()

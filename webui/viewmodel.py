@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from webui import store
-from core import maintenance, schedule
+from core import maintenance, msg_preview, proxy as proxy_mod, schedule, streak as streak_core
 
 __all__ = [
     "DRY_RUN_LEVELS",
@@ -105,6 +105,8 @@ BANNER_ICONS: Dict[str, str] = {
     "lock": "lock",
     "skipped": "circle-slash",
     "blocked": "octagon-alert",
+    # 火花断签（issue #15）：这是唯一一条"已经发生、且不会自己恢复"的提醒。
+    "streak": "flame",
 }
 
 #: 判定原因码（``core.strict_verify`` 的 ``R_*`` 与回执判定的码）说人话。
@@ -789,6 +791,9 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         "ready": ready,
         "orphan": orphan,
         "enabled": enabled,
+        # 这个账号的出口原文（TASKS[].proxy，issue #18）。只给 _attach_proxy 算遮掩版
+        # 与"改回全局"按钮用；模板与轮询只准读 proxy_text / proxy_mask。
+        "proxy": _text(data.get("proxy")),
         "gate": gate,
         "gate_text": _text(data.get("gate_text"), store.gate_label(gate)),
         "status": status,
@@ -876,6 +881,65 @@ def account_cards(
             card["own_run_text"] = _text(_get(own, "started_text")) or _text(_get(own, "run_id"))
         cards.append(card)
     return cards
+
+
+# ---------------------------------------------------------------- 连续天数（issue #15）
+
+
+def _attach_proxy(cards: List[Dict[str, Any]], cfg: Any, state: Any) -> int:
+    """给每张账号卡挂上"这个号走哪个出口"（issue #18），返回共用直连的账号数。
+
+    卡上只放遮掩后的形态：`proxy_text` 是 host:port（或「直连」），`proxy_mask` 是带
+    `***` 的完整地址（只用作输入框的 placeholder）—— 出口地址里通常带口令，页面上
+    不能出现第二份明文。`card["proxy"]` 是原文，只给保存/自检链路用，模板不许渲染它。
+    """
+    global_raw = proxy_mod.normalize(_get(cfg, "proxyAddress"))
+    shared = 0
+    for card in cards:
+        own = proxy_mod.normalize(card.get("proxy"))
+        effective = own or global_raw
+        card["proxy_text"] = proxy_mod.describe(effective)
+        card["proxy_mask"] = proxy_mod.mask(own)
+        card["proxy_source"] = proxy_mod.source_text(own, global_raw)
+        record = proxy_mod.state_for(card.get("unique_id"), state)
+        ip = _text(record.get("ip"))
+        at = _text(record.get("at"))
+        card["proxy_check_ip"] = ip
+        card["proxy_check_text"] = (
+            f"上次自检 {ip}（{at}）" if ip else "还没自检过：点「自检」看这个出口现在是什么 IP"
+        )
+        if not card.get("orphan") and card.get("enabled", True) and not effective:
+            shared += 1
+    return shared
+def _attach_streak(cards: Sequence[Dict[str, Any]], data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把 core.streak 的结果贴到账号卡上（一张卡一份）。
+
+    连续天数只能从账本算，而账本是「这个账号自己最近一轮」之外的另一条数据源 ——
+    所以它不参与 build_account（那里只讲一轮的成败），单独挂一个 streak 子树。
+    core.streak 返回的 item 只有结构化字段，这里补一个现成的一句话 text：
+    模板与 10 秒轮询（/api/ops/overview 的 streakTargets[].text）必须用同一句话，
+    否则首屏写「断签 2 天（上次 10-21）」、轮询后变成另一种写法，用户会以为数据变了。
+    """
+    accounts = (data or {}).get("accounts") or {}
+    for card in cards:
+        info = accounts.get(_text(card.get("unique_id"))) or {}
+        targets: List[Dict[str, Any]] = []
+        for item in info.get("targets") or ():
+            row = dict(item)
+            row["text"] = streak_core.streak_text(row)
+            targets.append(row)
+        card["streak"] = {
+            # has=False：这个账号在账本里一次成功都没有（新扫的号就是这种）
+            "has": bool(info),
+            "targets": targets,
+            "current": _int(info.get("current")),
+            "longest": _int(info.get("longest")),
+            "broken": _int(info.get("broken")),
+            "broken_labels": [_text(name) for name in (info.get("broken_labels") or [])],
+            "unknown": _int(info.get("unknown")),
+            "text": _text(info.get("text")),
+        }
+    return list(cards)
 
 
 # ---------------------------------------------------------------- 汇总
@@ -1243,6 +1307,8 @@ def _banners(
     blocked_reason: str,
     last_skip: str = "",
     last_skip_until: str = "",
+    streak_labels: Sequence[str] = (),
+    proxy_shared: int = 0,
 ) -> List[Dict[str, Any]]:
     """页面顶部的状态横幅（B 的 ``status-banner``）。顺序 = 紧急程度。"""
     banners: List[Dict[str, Any]] = []
@@ -1332,6 +1398,38 @@ def _banners(
                 "secondsLeft": 0,
             }
         )
+    if proxy_shared >= 2:
+        # 共用出口是**已知的风控面**（README/FAQ：掉登录头号起因是出口 IP 变了）。
+        # 单账号时直连反而最稳，所以只在两个以上账号都走同一个出口时才提醒。
+        banners.append(
+            {
+                "kind": "proxy_shared",
+                "level": "info",
+                "title": "多个账号共用一个出口",
+                "text": f"{proxy_shared} 个账号都是直连（同一个出口 IP）。这是已知的风控面；"
+                "要给某个账号单独走代理，在它的账号卡里填「出口」。",
+                "until": "",
+                "secondsLeft": 0,
+            }
+        )
+    if streak_labels:
+        # 断签是"已经发生的事"，不是"等一下会好的事"：它必须出现在首屏，
+        # 否则用户要先滚到某张账号卡才能发现自己漏了一天。
+        labels = [_text(item) for item in streak_labels if _text(item)]
+        shown = "、".join(labels[:4])
+        more = f" 等 {len(labels)} 个目标" if len(labels) > 4 else ""
+        banners.append(
+            {
+                "kind": "streak",
+                "level": "warning",
+                "title": "有目标断签了",
+                "text": f"{shown}{more} 上一次成功发送在前天以前（火花已经断了）。"
+                "到下面的账号卡点「补发今天」可以让门铃在剩下的时间里补一次；"
+                "连续天数不会因此恢复，但今天这一格能接上。",
+                "until": "",
+                "secondsLeft": 0,
+            }
+        )
     if blocked_reason and not banners:
         banners.append(
             {
@@ -1404,11 +1502,19 @@ def build(
     paths: Optional[Dict[str, str]] = None,
     selected: Any = None,
     per_account: bool = False,
+    streak: Optional[Dict[str, Any]] = None,
+    proxy_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """一次请求的完整视图模型（模板与 ``/api/ops/overview`` 共用）。
 
     ``per_account=True``：账号卡各取各的最近一轮（总览页 —— 每个账号有自己的发送
     时间）。运行记录页传 False，那边讲的是"选中的那一轮"。
+
+    streak：core.streak.compute() 的结果（火花连续天数，issue #15）。它是从**整份账本**
+    算出来的，与"这一轮"无关，所以由调用方算好传进来 —— 视图层不读文件。
+
+    proxy_state：core.proxy.read_state() 的原文（上一次出口自检的 IP，issue #18）。
+    同样由调用方读文件传进来。
     """
     records = list(records or [])
     if selected is None:
@@ -1417,6 +1523,18 @@ def build(
         selected = records[0]
 
     cards = account_cards(accounts, selected, records=records, per_account=per_account)
+    streak_view = streak if isinstance(streak, dict) else {}
+    cards = _attach_streak(cards, streak_view)
+    proxy_shared = _attach_proxy(cards, cfg, proxy_state if isinstance(proxy_state, dict) else {})
+    # 发送内容预览（issue #17）：每个好友真正会收到什么。没单独配内容的账号走全局模板，
+    # 所以预览必须按「这个账号这一轮用哪份模板」来算，而不是一律显示全局那一份。
+    global_template = _text(_get(cfg, "message_template"))
+    for card in cards:
+        own = _text(card.get("message"))
+        card["message_preview"] = msg_preview.preview(own or global_template)
+        card["message_preview_source"] = (
+            "这个账号单独配置" if card.get("has_message") else "全局模板 MESSAGE_TEMPLATE"
+        )
     finished = _text(_get(selected, "finished_at"))
     summary = summarize(cards, last_at=store.fmt_stamp(finished) if finished else "")
     # 这一版的数字来自哪一轮、那一轮是真发还是空跑 —— 直接写在 KPI 旁边，
@@ -1443,6 +1561,14 @@ def build(
             only = _text(next(iter(card_dry)), "off")
             summary["dry_run"] = only
             summary["dry_run_text"] = DRY_RUN_LABELS.get(only, only)
+
+    # 断签的目标点名说出来（横幅用）：光说"有 2 个目标断签"用户还得自己找是哪两个。
+    broken_labels: List[str] = []
+    for card in cards:
+        broken_labels.extend((card.get("streak") or {}).get("broken_labels") or [])
+    summary["streak_broken"] = len(broken_labels)
+    summary["streak_broken_labels"] = broken_labels
+    summary["streak_window_text"] = _text(streak_view.get("window_text"))
 
     rate = rate_limit
     cooldown = rate.as_dict() if hasattr(rate, "as_dict") else dict(rate or {})
@@ -1483,6 +1609,13 @@ def build(
     return {
         "accounts": cards,
         "summary": summary,
+        # 连续天数这块的窗口说明（模板要写"只统计最近 N 天"：账本只从尾部读 4 MB，
+        # 天数不是"从开天辟地以来"的连续，不写清楚就等于把窗口说成历史）。
+        "streak": {
+            "window_text": _text(streak_view.get("window_text")),
+            "window_days": _int(streak_view.get("window_days")),
+            "broken": len(broken_labels),
+        },
         "task": task,
         "schedule": schedule,
         "cooldown": cooldown,
@@ -1496,6 +1629,8 @@ def build(
             blocked_reason=blockers[0] if blockers else "",
             last_skip=_text(_get(selected, "skip_reason")),
             last_skip_until=_text(_get(selected, "skip_until")),
+            streak_labels=broken_labels,
+            proxy_shared=proxy_shared,
         ),
         "blockers": blockers,
         "can_run": not blockers,
@@ -1503,6 +1638,7 @@ def build(
         "message_template": template,
         "message_template_rendered": render_message(template),
         "message_template_lines": message_lines(template),
+        "message_template_preview": msg_preview.preview(template),
         "dry_run": {
             "levels": list(DRY_RUN_LEVELS),
             "labels": dict(DRY_RUN_LABELS),
@@ -1645,6 +1781,25 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
                 # 内容摘要（单独配了几行 / 用全局模板）。
                 "hasMessage": bool(card.get("has_message")),
                 "messageLines": _int(card.get("message_lines")),
+                # 出口（issue #18）：只发遮掩后的 host:port 与来源，口令永远不进 JSON。
+                "proxyText": _text(card.get("proxy_text")),
+                "proxySource": _text(card.get("proxy_source")),
+                "proxyCheckText": _text(card.get("proxy_check_text")),
+                # 火花连续天数（issue #15）：断签是**每天都会变**的事实（昨天没发，
+                # 今天这张卡就该变红），不给轮询发这份数据的话，页面会一直停在
+                # 首屏那次的"连续 5 天"，而实际上昨天已经断了。
+                "streakText": _text((card.get("streak") or {}).get("text")),
+                "streakBroken": _int((card.get("streak") or {}).get("broken")),
+                "streakTargets": [
+                    {
+                        "key": _text(item.get("key")),
+                        "label": _text(item.get("label")),
+                        "text": _text(item.get("text")),
+                        "broken": bool(item.get("broken")),
+                        "known": bool(item.get("known")),
+                    }
+                    for item in ((card.get("streak") or {}).get("targets") or ())
+                ],
             }
             for card in accounts
         ],

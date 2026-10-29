@@ -215,12 +215,29 @@ render_unit() {  # render_unit <模板文件> <目标文件>
 
 log "安装 systemd 单元"
 if [ "$DRY_RUN" = "1" ]; then
-  log "[dry-run] 跳过写 /etc/systemd/system/（web unit / daily unit / daily timer）"
+  log "[dry-run] 跳过写 /etc/systemd/system/（web unit / daily unit / daily timer / doctor unit / doctor timer）"
 else
-  render_unit "$APP_DIR/deploy/douyin-spark-fusion-web.service"   /etc/systemd/system/douyin-spark-fusion-web.service
-  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.service" /etc/systemd/system/douyin-spark-fusion-daily.service
-  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.timer"   /etc/systemd/system/douyin-spark-fusion-daily.timer
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-web.service"    /etc/systemd/system/douyin-spark-fusion-web.service
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.service"  /etc/systemd/system/douyin-spark-fusion-daily.service
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-daily.timer"    /etc/systemd/system/douyin-spark-fusion-daily.timer
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-doctor.service" /etc/systemd/system/douyin-spark-fusion-doctor.service
+  render_unit "$APP_DIR/deploy/douyin-spark-fusion-doctor.timer"   /etc/systemd/system/douyin-spark-fusion-doctor.timer
   systemctl daemon-reload
+fi
+
+# 体检定时器**可以**自动开：它只读账本、只读 systemctl，不发任何消息。
+# 这和 daily.timer 的处理刻意不同 —— 那个一 enable 就会真的发消息，必须人点头。
+# 已经开着的不要重启（升级场景下重启会把"明天 09:00"推开一天，没必要）。
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] 跳过 systemctl enable --now douyin-spark-fusion-doctor.timer"
+elif command -v systemctl >/dev/null 2>&1; then
+  if systemctl is-enabled --quiet douyin-spark-fusion-doctor.timer 2>/dev/null; then
+    log "体检定时器已在运行（每天 09:00 一次，只读）"
+  elif systemctl enable --now douyin-spark-fusion-doctor.timer 2>/dev/null; then
+    log "体检定时器已启用：每天 09:00 只读自检，有事才推通知（每天最多一条）"
+  else
+    warn "体检定时器启用失败，可手动：systemctl enable --now douyin-spark-fusion-doctor.timer"
+  fi
 fi
 
 # 日志轮转（F8）：两个单元都往同一个文件追加，整轮发送的每一步都落盘，
@@ -283,4 +300,8 @@ cat <<'EOF'
   4) 确认无误后再开定时发送：
        systemctl enable --now douyin-spark-fusion-daily.timer
        systemctl list-timers douyin-spark-fusion-daily.timer
+  5) 想看"最近还正常吗"（只读，不发消息）：
+       cd /opt/douyin-spark-fusion && .venv/bin/python main.py doctor
+       # 体检定时器（每天 09:00）已随安装启用；不想让它跑：
+       #   systemctl disable --now douyin-spark-fusion-doctor.timer
 EOF

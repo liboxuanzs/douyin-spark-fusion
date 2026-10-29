@@ -1153,7 +1153,9 @@ def runTasks(dry_run=None, source="cli", force=False, only=""):
             )
             browser = None
             try:
-                browser = get_browser(fingerprint)
+                # 每账号出口（issue #18）：账号里配了 proxy 就用它的，没配才回落
+                # 全局 PROXY_ADDRESS（get_browser 的 proxy=None 表示"没指定"）。
+                browser = get_browser(fingerprint, proxy=user.get("proxy") or None)
                 res = do_user_task(
                     browser, username, cookies, targets,
                     unique_id=user.get("unique_id"), dry_run=level,

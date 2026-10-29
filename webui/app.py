@@ -47,6 +47,8 @@ from fastapi.templating import Jinja2Templates
 from webui import auth, config, envfile, logtail, password, settings, store, viewmodel
 from core import maintenance
 from core import notify as notify_mod
+from core import proxy as proxy_mod
+from core import streak as streak_mod
 
 __all__ = ["build_context", "create_app", "run_once", "start_run_thread"]
 
@@ -193,6 +195,27 @@ def build_context(
     if selected_run_id:
         selected = next((r for r in records if r.run_id == selected_run_id), None)
 
+    # 火花连续天数（issue #15）：从**整份账本**算，与"选中的那一轮"无关，所以在这里算一次、
+    # 传给视图模型。账本行要用归一化前的 record.raw —— store 归一化时会丢掉 entry 的
+    # conv_id（好友改名后还得靠它认出是同一个人），而连续天数正是按 conv_id 归天的。
+    try:
+        streak_view = streak_mod.compute(
+            [getattr(record, "raw", None) or {} for record in records],
+            targets_by_account={
+                str(getattr(item, "unique_id", "") or ""): list(getattr(item, "targets", []) or [])
+                for item in accounts
+                if str(getattr(item, "unique_id", "") or "")
+            },
+        )
+    except Exception:  # pragma: no cover - 连续天数算不出来不该让整页崩
+        streak_view = {}
+
+    # 出口自检的最近结果（issue #18）：读不到就当没自检过，绝不能因此让首页 500。
+    try:
+        proxy_state = proxy_mod.read_state()
+    except Exception:  # pragma: no cover - 只读小文件，坏成什么样都不该影响渲染
+        proxy_state = {}
+
     view = viewmodel.build(
         records=records,
         accounts=accounts,
@@ -208,6 +231,8 @@ def build_context(
         default_dry_run=default_dry_run,
         selected=selected,
         per_account=per_account_records,
+        streak=streak_view,
+        proxy_state=proxy_state,
         paths={
             "运行账本": str(ledger.file or config.ledger_file()),
             "运行锁": str(config.run_lock_file()),
@@ -2746,6 +2771,104 @@ def create_app() -> FastAPI:
                 )
             return redirect_with(request, path="/", error=result.get("error") or "操作失败")
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+    @app.post("/ops/account/proxy")
+    def ops_account_proxy(request: Request, unique_id: str = Form(""),
+                          proxy: str = Form(""), clear: str = Form("")) -> Response:
+        """保存这个账号的出口（issue #18）。
+
+        表单里 `proxy` 留空**不等于**清空：那多半是点错了按钮。要改回全局得勾
+        `clear=1`（卡片上的「改回全局」按钮），这样"手滑保存"不会把账号的出口悄悄
+        换回另一个 IP —— 出口一变，轻则掉登录，重则账号被风控盯上。
+        """
+        as_html = wants_html(request)
+        uid = str(unique_id or "").strip()
+        if current_user(request) is None:
+            if as_html:
+                return RedirectResponse(url="/login?next=/", status_code=303)
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            if as_html:
+                return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        wanted = "" if _form_flag(clear) else str(proxy or "").strip()
+        if not wanted and not _form_flag(clear):
+            result = {"ok": False, "error": "没填出口地址；要改回全局请点「改回全局」"}
+        else:
+            result = envfile.set_account_proxy(uid, wanted)
+        if result.get("ok"):
+            envfile.reload()
+            try:
+                store.refresh_env()
+            except Exception:  # noqa: BLE001
+                pass
+            _log(f"账号 {uid} 的出口已更新：{result.get('proxy_text') or '直连'}")
+        if as_html:
+            if result.get("ok"):
+                return redirect_with(request, path="/", anchor=f"account-{uid}",
+                                     saved=result.get("message") or "出口已保存")
+            return redirect_with(request, path="/", error=result.get("error") or "保存出口失败")
+        return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+    @app.post("/ops/account/proxy-check")
+    def ops_account_proxy_check(request: Request, unique_id: str = Form("")) -> Response:
+        """用这个账号的出口访问一次回显服务，顺便记下结果（issue #18）。
+
+        只在人点了按钮时联网一次：发送链路里绝不能多一次外网请求（那是每轮都要付的
+        风险与时间，还会把"发送失败"和"自检失败"混成一团）。
+
+        返回值里**没有出口地址原文**，只有遮掩后的 host:port 与 IP。
+        """
+        uid = str(unique_id or "").strip()
+        if current_user(request) is None:
+            return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
+        if not _csrf_ok(request):
+            return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
+
+        own = ""
+        try:
+            own = envfile.account_proxy(uid)
+        except Exception:  # noqa: BLE001 - 账号被删了也照常返回"失败"而不是 500
+            own = ""
+        try:
+            global_proxy = str(get_config().get("proxyAddress") or "")
+        except Exception:  # noqa: BLE001
+            global_proxy = ""
+        effective = own or global_proxy
+
+        result = proxy_mod.check(effective)
+        state = proxy_mod.read_state()
+        accounts = state.get("accounts") if isinstance(state.get("accounts"), dict) else {}
+        previous = accounts.get(uid) if isinstance(accounts.get(uid), dict) else {}
+        changed = bool(previous.get("ip")) and previous.get("ip") != result.get("ip")
+        at = iso(now())
+        accounts[uid] = {
+            "ip": result.get("ip") or "",
+            "at": at,
+            "via": result.get("via") or "",
+            "ok": bool(result.get("ok")),
+            "error": str(result.get("error") or "")[:200],
+        }
+        state["accounts"] = accounts
+        proxy_mod.write_state(state)
+
+        if result.get("ok"):
+            text = f"出口 {result.get('ip')}（{result.get('via')}）"
+            if changed:
+                text += f"；和上次的 {previous.get('ip')} 不一样 —— 出口 IP 变了是掉登录的头号起因"
+        else:
+            text = f"自检失败：{result.get('error') or '连不上'}"
+        _log(f"出口自检 {uid}：{text}")
+        return JSONResponse({
+            "ok": bool(result.get("ok")),
+            "ip": result.get("ip") or "",
+            "via": result.get("via") or "",
+            "changed": changed,
+            "previous": str(previous.get("ip") or ""),
+            "text": text,
+            "at": at,
+        }, status_code=200)
 
     @app.post("/ops/account/remove")
     def ops_account_remove(request: Request, unique_id: str = Form("")) -> Response:

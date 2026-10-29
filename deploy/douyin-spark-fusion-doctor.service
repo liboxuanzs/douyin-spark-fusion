@@ -1,0 +1,22 @@
+[Unit]
+Description=抖音续火花（融合版）体检：定时器还在跑吗、账本还新吗
+Documentation=file:/opt/douyin-spark-fusion/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/douyin-spark-fusion
+Environment=PYTHONUNBUFFERED=1
+# 与 daily.service 一样**故意不写** EnvironmentFile=：systemd 会按转义序列
+# 解析值，把消息模板里的字面 \n 吃成一个裸 n。.env 只由程序自己读。
+#
+# 体检只读：不发送、不占运行锁、不写时间表。退出码 1 = 有事，
+# 届时 core.doctor 已经按 NOTIFY_WEBHOOK_URL / NOTIFY_LEVEL 推过通知
+# （同一天只推一条）。所以这里不需要 Restart=，也不该让 systemd 反复重试。
+ExecStart=/opt/douyin-spark-fusion/.venv/bin/python main.py doctor
+# 正常几毫秒（读一次账本尾部 + 一次 systemctl show）；网络那块只有推通知时才用。
+TimeoutStartSec=120
+StandardOutput=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log
+StandardError=append:/opt/douyin-spark-fusion/logs/douyin-spark-fusion.log

@@ -34,6 +34,7 @@ except ImportError:                                      # Windows 没有 fcntl
     fcntl = None
 
 from core import cookie_utils
+from core import proxy as proxy_mod
 from core import schedule as schedule_mod
 from webui.password import hash_password, validate_new_password
 
@@ -733,8 +734,8 @@ def _fingerprint_from(value) -> int:
 
 @_serialized
 def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
-                   message=None, send_time=None, enabled=None, path=None,
-                   add_if_missing=True) -> dict:
+                   message=None, send_time=None, enabled=None, proxy=None,
+                   path=None, add_if_missing=True) -> dict:
     """把账号加进 TASKS（已在则就地更新），返回结果字典。
 
     只动给出的字段：`username` 为空就保留原值，`targets` 为 None 就保留原列表，
@@ -824,6 +825,19 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
         elif entry.get("enabled") is not False:
             entry["enabled"] = False
             changed = True
+    if proxy is not None:
+        # 每账号出口（issue #18）：写空 = 回落全局 PROXY_ADDRESS，所以**删键**，
+        # 与 message/time/enabled 同一语感。值只做归一（补协议），合法性由
+        # set_account_proxy 在入口处挡；这里再存一份原文是为了让"账号自己配过"
+        # 这件事在 .env 里一眼可辨。
+        wanted_proxy = proxy_mod.normalize(proxy)
+        if wanted_proxy:
+            if str(entry.get("proxy") or "") != wanted_proxy:
+                entry["proxy"] = wanted_proxy
+                changed = True
+        elif "proxy" in entry:
+            entry.pop("proxy", None)
+            changed = True
     # 指纹是"这个账号固定用哪台设备"的锚，一旦定下就不许漂。
     # 传进来的种子只在**账号还没有指纹**时生效；已有指纹时保留原值，
     # 免得面板/命令行顺手传一个值就把账号悄悄换成"另一台设备"。
@@ -842,6 +856,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
                   "fingerprint": entry.get("fingerprint"),
                   "time": str(entry.get("time") or ""),
                   "enabled": schedule_mod.user_enabled(entry),
+                  "proxy": proxy_mod.normalize(entry.get("proxy")),
                   "message": "TASKS 里已经是这个账号，没有改动"}
         if kept:
             result["fingerprint_kept"] = kept
@@ -874,6 +889,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
         "fingerprint": entry.get("fingerprint"),
         "time": str(entry.get("time") or ""),
         "enabled": schedule_mod.user_enabled(entry),
+        "proxy": proxy_mod.normalize(entry.get("proxy")),
         "message": "已加入 TASKS" if created else "已更新 TASKS",
     }
     if kept:
@@ -1108,6 +1124,51 @@ def set_account_enabled(unique_id, enabled, *, path=None) -> dict:
             "已启用：到点后照常自动发送（今天还没发过的话，下一次门铃就会补上）"
             if enabled else
             "已停用：不再自动发送；配置、cookie、好友都还留着，随时可以启用"
+        )
+    return result
+
+
+def account_proxy(unique_id, path=None) -> str:
+    """这个账号生效的出口原文（空串 = 回落全局 PROXY_ADDRESS）。
+
+    只读、不写盘：扫码登录与好友扫描启动浏览器前都要问一句"这个号走哪个出口"，
+    答错了会让账号在另一个 IP 上登录 —— 那正是掉登录最常见的起因。
+    """
+    task = task_for(unique_id, path)
+    if not isinstance(task, dict):
+        return ""
+    return proxy_mod.normalize(task.get("proxy"))
+
+
+@_serialized
+def set_account_proxy(unique_id, proxy, *, path=None) -> dict:
+    """只改这个账号的出口（issue #18）。
+
+    写空 = 改回全局 `PROXY_ADDRESS`（键整个删掉）。写错协议/缺端口**拒绝落盘**并
+    说清格式：出口写坏却当成直连，等于让这个号在另一个 IP 上发消息，事后极难发现。
+
+    返回里只放遮掩后的形态（`http://***@host:port`），口令绝不回显。
+    """
+    uid = str(unique_id or "").strip()
+    if not uid:
+        return {"ok": False, "error": "没读到抖音号"}
+    if task_for(uid, path) is None:
+        return {"ok": False, "error": f"{uid} 还不在 TASKS 里，先完成一次扫码登录"}
+
+    raw = "" if proxy is None else str(proxy).strip()
+    reason = proxy_mod.problem(raw)
+    if reason:
+        return {"ok": False, "error": reason}
+
+    result = upsert_account(uid, proxy=raw, path=path)
+    if result.get("ok"):
+        applied = proxy_mod.normalize(result.get("proxy"))
+        result["proxy_set"] = applied
+        result["proxy_text"] = proxy_mod.mask(applied) or "直连"
+        result["message"] = (
+            f"已单独配置出口：{result['proxy_text']}（扫码与发送都走它）"
+            if applied else
+            "已改回全局出口（PROXY_ADDRESS；那里也没配就是直连）"
         )
     return result
 

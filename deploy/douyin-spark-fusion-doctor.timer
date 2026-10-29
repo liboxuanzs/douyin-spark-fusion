@@ -1,0 +1,22 @@
+[Unit]
+Description=抖音续火花（融合版）每天体检一次
+Documentation=file:/opt/douyin-spark-fusion/docs/deploy.md
+
+[Timer]
+# 每天 09:00 体检：昨夜的发送是否落账、定时器是否还在跑、账号是否全停了。
+#
+# 为什么需要它（issue #16）：通知原先只挂在「跑完一轮」上，而最该报警的几种情形
+# 恰好不会产生一轮 —— 定时器被停、账号全掉了登录、账本被删。那种时候面板一片
+# 安静，人只能靠"好像好几天没收到消息"自己发现。
+#
+# 09:00 是刻意选的：夜里该发的都发完了（最晚 23:55），白天又还没到下一轮，
+# 此时的「多久没有运行记录」最能说明问题。体检自己只读，跑一次几毫秒。
+OnCalendar=*-*-* 09:00
+
+# 头一天关机了？开机后补一次，别让"没体检"和"体检过了没事"混在一起。
+Persistent=true
+AccuracySec=1m
+Unit=douyin-spark-fusion-doctor.service
+
+[Install]
+WantedBy=timers.target

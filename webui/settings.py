@@ -235,13 +235,29 @@ SETTINGS: Tuple[Setting, ...] = (
         hint="秒；推送在放锁之后才做，超时就放弃 —— 不影响这一轮发没发、记没记账",
     ),
     Setting(
+        "NOTIFY_SILENCE_HOURS",
+        "静默报警阈值",
+        KIND_FLOAT,
+        minimum=0,
+        maximum=720,
+        default="30",
+        hint=(
+            "小时；超过这么久没有任何运行记录就报警（体检 doctor 用，默认 30 —— "
+            "最短的账号间隔约 21 小时）。0 = 关掉这项判定；"
+            "账号全部停用时按设计不报警，那是你自己关的"
+        ),
+    ),
+    Setting(
         "PROXY_ADDRESS",
         "代理",
         KIND_TEXT,
         default="",
         allow_empty=True,
         masked=True,
-        hint="浏览器启动时传给 cloakbrowser/playwright；扫码登录与好友扫描也用它。留空 = 直连",
+        hint=(
+            "浏览器启动时传给 cloakbrowser/playwright；扫码登录与好友扫描也用它。留空 = 直连。"
+            "单个账号可以在它的账号卡里单独配出口（TASKS[].proxy），那里留空就回落这里"
+        ),
     ),
     Setting(
         "BROWSER_ACTION_TIMEOUT",

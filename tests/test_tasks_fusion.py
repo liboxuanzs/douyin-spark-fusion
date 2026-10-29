@@ -215,10 +215,14 @@ class _TasksCase(unittest.TestCase):
         _FakeIM.recheck = {"state": "EXPIRED"}
         _FakeIM.recheck_raises = None
         self.browsers = []
+        # 记下每个账号拿到的出口（issue #18）：get_browser 的第二个参数是"这台浏览器
+        # 走哪个代理"，漏了它就是所有账号共用一个出口。
+        self.browser_proxies = []
 
-        def _get_browser(fingerprint=None):
+        def _get_browser(fingerprint=None, proxy=None):
             b = _Browser()
             self.browsers.append(b)
+            self.browser_proxies.append(proxy)
             return b
 
         cfg = mock.patch.dict(tasks_mod.config, {
@@ -1576,6 +1580,26 @@ class SigtermAccountingTests(_TasksCase):
         self.assertNotIn("222", state["accounts"])
         # 锁也得放掉，否则下一次敲门会被 RunLocked 一直挡着。
         self.assertIsNone(ledger.lock_info())
+
+class EgressPerAccountTests(_TasksCase):
+    """每账号出口（issue #18）：TASKS[].proxy 要一路传到浏览器启动参数里。
+
+    ★ 这是"配了却没生效"最典型的形态：面板上写着这个号走代理，实际仍从原生 IP 出去。
+      所以断言的是**真正传给 get_browser 的那个值**，不是配置读到了没有。
+    """
+
+    def test_account_proxy_is_passed_to_the_browser(self):
+        user = dict(self.users[0], proxy="http://127.0.0.1:1080")
+        self._set_users([user, dict(self.users[0], unique_id="222", username="账号乙")])
+        tasks_mod.runTasks(dry_run="off", source="cli")
+        self.assertEqual(self.browser_proxies[0], "http://127.0.0.1:1080")
+        # 没配的账号必须是 None（= 回落全局 PROXY_ADDRESS），不能是空串（= 强制直连）
+        self.assertIsNone(self.browser_proxies[1])
+
+    def test_without_any_proxy_everything_stays_as_before(self):
+        self._set_users(self.users)
+        tasks_mod.runTasks(dry_run="off", source="cli")
+        self.assertEqual(self.browser_proxies, [None])
 
 
 if __name__ == "__main__":

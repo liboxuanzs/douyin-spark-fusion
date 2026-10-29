@@ -5438,5 +5438,127 @@ class LoginFailBudgetTests(unittest.TestCase):
                            "正常运维输错几次（手滑）不能被全局限流锁死")
 
 
+class StreakUiContractTests(unittest.TestCase):
+    """火花连续天数（issue #15）的前端契约：首屏与 10 秒轮询都必须画它。"""
+
+    def _read(self, *parts: str) -> str:
+        return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_账号卡上有连续天数的挂点(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        self.assertIn("account-streak", template)
+        self.assertIn("data-streak-list", template)
+        self.assertIn("data-streak-text", template)
+        self.assertIn("data-streak-days", template)
+        # 窗口说明是硬约束：账本只从尾部读，界面必须说清楚这是"最近 N 天"
+        self.assertIn("view.streak.window_text", template)
+
+    def test_轮询会重画每一行的连续天数(self) -> None:
+        script = self._read("webui", "static", "app.js")
+        self.assertIn("data-streak-list", script)
+        self.assertIn("data-streak-text", script)
+        self.assertIn("streakTargets", script)
+        # 好友昵称是用户数据：只能用 textContent 写，不能拼 HTML（XSS）
+        chunk = script.split("data-streak-list", 1)[-1].split("data-account-confirmed", 1)[0]
+        self.assertIn("textContent", chunk)
+        self.assertNotIn("innerHTML", chunk)
+
+    def test_两套皮肤都画得出断签(self) -> None:
+        for name in ("app-aurora.css", "app.css"):
+            css = self._read("webui", "static", name)
+            self.assertIn(".account-streak", css, name)
+            self.assertIn(".streak-item.is-broken", css, name)
+            self.assertIn(".streak-item.is-unknown", css, name)
+
+
+class MessagePreviewUiContractTests(unittest.TestCase):
+    """发送内容预览（issue #17）的前端契约：账号卡与全局模板各有一块预览。"""
+
+    def _read(self, *parts: str) -> str:
+        return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_账号卡上有预览块(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        self.assertIn("data-message-preview-block", template)
+        self.assertIn("account.message_preview.summary", template)
+        self.assertIn("account.message_preview_source", template)
+
+    def test_全局模板那份预览也在(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        self.assertIn("data-message-template-preview", template)
+        self.assertIn("view.message_template_preview.summary", template)
+
+    def test_示例一言必须被标出来(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        # 示例不能伪装成好友真的会收到的原话：模板里要有 is-sample 与"示例"二字
+        self.assertIn("is-sample", template)
+        self.assertIn("示例一言", template)
+
+    def test_两套皮肤都画得出预览与警告(self) -> None:
+        for name in ("app-aurora.css", "app.css"):
+            css = self._read("webui", "static", name)
+            self.assertIn(".message-preview", css, name)
+            self.assertIn(".message-preview-line.is-sample", css, name)
+            self.assertIn(".message-warn", css, name)
+
+    def test_预览渲染不需要联网(self) -> None:
+        viewmodel_source = self._read("webui", "viewmodel.py")
+        chunk = viewmodel_source.split("message_template_preview", 1)[0][-4000:]
+        self.assertNotIn("requests.", chunk)
+        self.assertNotIn("hitokoto.request", chunk)
+
+class ProxyUiContractTests(unittest.TestCase):
+    """每账号出口（issue #18）的前端契约：卡片能显示、能改、能自检，且永不回显口令。"""
+
+    def _read(self, *parts: str) -> str:
+        return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_账号卡上有出口那一块(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        self.assertIn('action="/ops/account/proxy"', template)
+        self.assertIn("data-proxy-check=", template)
+        self.assertIn("data-proxy-text", template)
+        self.assertIn("data-proxy-source", template)
+        self.assertIn("data-proxy-check-text", template)
+        # 改回全局走 clear=1：留空保存**不能**被当成清空（手滑一次就换了出口 IP）
+        self.assertIn('name="clear"', template)
+
+    def test_模板不渲染出口原文(self) -> None:
+        template = self._read("webui", "templates", "dashboard.html")
+        # 只许出现遮掩版（placeholder 用的 proxy_mask），原文（account.proxy）不许上页面
+        self.assertIn("account.proxy_mask", template)
+        self.assertNotIn("account.proxy }}", template)
+
+    def test_两条路由都注册了(self) -> None:
+        app = self._read("webui", "app.py")
+        self.assertIn('"/ops/account/proxy"', app)
+        self.assertIn('"/ops/account/proxy-check"', app)
+        # 自检只在点按钮时联网：发送链路（core/tasks.py）里不许出现 proxy_mod.check
+        tasks = self._read("core", "tasks.py")
+        self.assertNotIn("proxy.check(", tasks)
+
+    def test_轮询会更新出口文案(self) -> None:
+        script = self._read("webui", "static", "app.js")
+        self.assertIn("data-proxy-text", script)
+        self.assertIn("data-proxy-source", script)
+        self.assertIn("/ops/account/proxy-check", script)
+        # 文案是服务端给的，前端只写 textContent（出口地址里可能被人塞进奇怪字符）
+        chunk = script.split("/ops/account/proxy-check", 1)[0].split("data-proxy-text", 1)[-1]
+        self.assertNotIn("innerHTML", chunk)
+
+    def test_两套皮肤都画得出出口那一块(self) -> None:
+        for name in ("app-aurora.css", "app.css"):
+            css = self._read("webui", "static", name)
+            self.assertIn(".proxy-editor", css, name)
+            self.assertIn(".proxy-input", css, name)
+            self.assertIn(".proxy-check", css, name)
+
+    def test_configTool_重建_TASKS_时不会丢出口(self) -> None:
+        # configTool 的 to_task() 是整条 TASKS 重建：漏了 proxy 就把出口换回另一个 IP
+        models = self._read("configTool", "models.py")
+        self.assertIn('proxy: str = ""', models)
+        self.assertIn('task["proxy"] = proxy', models)
+
+
 if __name__ == "__main__":
     unittest.main()

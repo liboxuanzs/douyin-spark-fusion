@@ -243,7 +243,10 @@ def mask_proxy(value: Any) -> str:
     text = _text(value).strip()
     if not text:
         return ""
-    return _URL_CRED_RE.sub(r"://\1:***@", text)
+    text = _URL_CRED_RE.sub(r"://\1:***@", text)
+    # 只写了用户名、没写密码的形态（http://user@host:port）同样要遮：
+    # 出口口令通常就是这一串，露一半等于没遮。
+    return re.sub(r"://([^:/@\s]+)@", "://***@", text)
 
 
 def mask_webhook_url(value: Any) -> str:
@@ -993,6 +996,10 @@ class AccountSnapshot:
     # 配置和 cookie，只是调度器不再自动发它 —— 面板要能一眼看出"这张卡是停着的"，
     # 否则"今天怎么没发"会被当成故障去查（见 core/schedule.py 的 paused 那一堆）。
     enabled: bool = True
+    # 这个账号专属的出口（`TASKS[].proxy`，issue #18）。空串 = 回落全局
+    # `PROXY_ADDRESS`。**原文带口令**，只给发送/扫码链路用；展示一律走
+    # `core.proxy.mask/describe`，别把它直接塞进模板。
+    proxy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1019,6 +1026,7 @@ class AccountSnapshot:
             "status_text": self.status_text,
             "orphan": self.orphan,
             "enabled": self.enabled,
+            "proxy": self.proxy,
         }
 
 
@@ -1065,7 +1073,8 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
     snapshots: List[AccountSnapshot] = []
 
     def build(username: str, unique_id: str, fingerprint: str, targets: List[str],
-              message: str = "", send_time: str = "", enabled: bool = True) -> AccountSnapshot:
+              message: str = "", send_time: str = "", enabled: bool = True,
+              proxy: str = "") -> AccountSnapshot:
         if unique_id:
             cookies: Dict[str, Any] = cookie_status(unique_id)
         else:
@@ -1086,6 +1095,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
             message=_text(message),
             send_time=_text(send_time),
             enabled=bool(enabled),
+            proxy=_text(proxy),
         )
         snapshot.ready = snapshot.cookie_configured > 0
         if not snapshot.cookie_message and not snapshot.ready:
@@ -1100,7 +1110,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
         targets = item.get("targets") if isinstance(item.get("targets"), list) else []
         snapshot = build(username, unique_id, _text(item.get("fingerprint")), targets,
                          _text(item.get("message")), _text(item.get("time")),
-                         schedule_mod.user_enabled(item))
+                         schedule_mod.user_enabled(item), _text(item.get("proxy")))
         snapshots.append(snapshot)
         if unique_id:
             seen.add(unique_id)

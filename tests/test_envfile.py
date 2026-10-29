@@ -645,6 +645,62 @@ class AccountEnabledTests(EnvFileTestCase):
         self.assertEqual(task["message"], "停用期间改的内容")
 
 
+class AccountProxyTests(EnvFileTestCase):
+    """每账号出口（`TASKS[].proxy`，issue #18）：写值、留空删键、非法拒绝。
+
+    ★ 出口和「移除」也是两件事：这里只动 TASKS 里那一个键，别的字段一个字节都不碰。
+    """
+
+    def proxy_of(self, uid=UID):
+        for task in json.loads(self.value_of("TASKS")):
+            if str(task.get("unique_id")) == uid:
+                return task.get("proxy")
+        return None
+
+    def test_set_and_read_back(self):
+        result = envfile.set_account_proxy(UID, "http://user:secret@127.0.0.1:1080")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["proxy_set"], "http://user:secret@127.0.0.1:1080")
+        # 返回给人看的那份必须是遮掩过的：结果会被写进面板日志
+        self.assertNotIn("secret", result["proxy_text"])
+        self.assertIn("127.0.0.1:1080", result["proxy_text"])
+        self.assertEqual(envfile.account_proxy(UID), "http://user:secret@127.0.0.1:1080")
+        self.assertEqual(self.proxy_of(), "http://user:secret@127.0.0.1:1080")
+        self.assertIn("# 续火花配置（这份注释必须活下来）", self.text())
+
+    def test_bare_host_port_gets_http(self):
+        self.assertTrue(envfile.set_account_proxy(UID, "127.0.0.1:1080")["ok"])
+        self.assertEqual(self.proxy_of(), "http://127.0.0.1:1080", "裸地址要补协议")
+
+    def test_clear_removes_the_key(self):
+        envfile.set_account_proxy(UID, "http://127.0.0.1:1080")
+        result = envfile.set_account_proxy(UID, "")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["proxy_set"], "")
+        self.assertIn("全局", result["message"])
+        self.assertIsNone(self.proxy_of(), "改回全局 = 删键，不留空串")
+
+    def test_bad_address_is_refused_without_touching_the_file(self):
+        before = self.text()
+        for raw in ("ftp://127.0.0.1:21", "http://127.0.0.1", "http://[::1"):
+            result = envfile.set_account_proxy(UID, raw)
+            self.assertFalse(result["ok"], raw)
+            self.assertTrue(result["error"], raw)
+        self.assertEqual(self.text(), before, "被拒绝的地址不该写盘")
+
+    def test_unknown_account_is_refused(self):
+        result = envfile.set_account_proxy(UID2, "http://127.0.0.1:1080")
+        self.assertFalse(result["ok"])
+        self.assertNotIn(UID2, self.text())
+
+    def test_other_edits_keep_the_proxy(self):
+        """改内容/时间/停用都不能把出口弄丢 —— 它们都是整条 TASKS 重建。"""
+        envfile.set_account_proxy(UID, "http://127.0.0.1:1080")
+        self.assertTrue(envfile.set_account_message(UID, "改写一下")["ok"])
+        self.assertTrue(envfile.set_account_time(UID, "08:00")["ok"])
+        self.assertTrue(envfile.set_account_enabled(UID, False)["ok"])
+        self.assertEqual(self.proxy_of(), "http://127.0.0.1:1080")
+
 
 class RemoveAccountTests(EnvFileTestCase):
     def test_removes_account_and_cookie(self):

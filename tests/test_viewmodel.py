@@ -21,7 +21,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from core import schedule  # noqa: E402
+from core import msg_preview, schedule, streak as streak_core  # noqa: E402
 from webui import viewmodel  # noqa: E402
 
 
@@ -1940,6 +1940,343 @@ class MaintenanceViewTests(unittest.TestCase):
         self.assertFalse(view["ok"])
         self.assertIn("没动任何文件", view["headline"])
         self.assertEqual(view["removed"], [])
+
+
+class StreakViewTests(unittest.TestCase):
+    """火花连续天数（issue #15）：账本算出来的天数要贴到账号卡、首屏横幅和 10 秒轮询上。
+
+    这份数据不是"这一轮的成败"，而是"这条火花连着多少天"—— 所以它从 core.streak
+    进来、挂在卡片的 streak 子树里，并且必须同时出现在 overview_payload：断签是每天
+    都会变的事实，只靠首屏渲染的话，页面开着不动就永远停在昨天的那句话上。
+    """
+
+    def _streak(self, uid="10001", item=None, **kwargs):
+        row = {
+            "key": "98530253833",
+            "label": "好友甲",
+            "current": 5,
+            "longest": 9,
+            "known": True,
+            "last": "2026-10-28",
+            "last_text": "10-28",
+            "idle_days": 0,
+            "broken": False,
+            "days_in_window": 5,
+        }
+        row.update(item or {})
+        info = {
+            "targets": [row],
+            "current": 5,
+            "longest": 9,
+            "broken": 0,
+            "broken_labels": [],
+            "unknown": 0,
+            "text": "连续 5 天 · 最长 9 天",
+        }
+        info.update(kwargs)
+        return {
+            "accounts": {uid: info},
+            "window_days": 30,
+            "window_start": "2026-09-29",
+            "window_text": "只统计最近 30 天",
+            "today": "2026-10-28",
+        }
+
+    def _view(self, streak, snapshot=None):
+        return viewmodel.build(
+            records=[],
+            accounts=[snapshot or _snapshot(targets=["好友甲"], target_count=1)],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            next_run=datetime.now(timezone.utc) + timedelta(hours=1),
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True, "state": "enabled"},
+            default_dry_run="off",
+            streak=streak,
+        )
+
+    def test_账号卡上带着连续天数(self):
+        view = self._view(self._streak())
+        streak = view["accounts"][0]["streak"]
+        self.assertTrue(streak["has"], "账本里有这个账号，has 必须为真")
+        self.assertEqual(streak["text"], "连续 5 天 · 最长 9 天")
+        self.assertEqual(len(streak["targets"]), 1)
+        # 每行的那句话由 streak_text 统一生成，模板与轮询都读它，不各写一套
+        self.assertEqual(
+            streak["targets"][0]["text"],
+            streak_core.streak_text(streak["targets"][0]),
+        )
+        self.assertEqual(streak["targets"][0]["text"], "连续 5 天")
+        self.assertEqual(view["streak"]["window_text"], "只统计最近 30 天")
+
+    def test_断签会进首屏横幅并计数(self):
+        streak = self._streak(
+            item={"broken": True, "idle_days": 3, "last_text": "10-25", "current": 0},
+            broken=1, broken_labels=["好友甲"], text="连续 0 天 · 最长 9 天",
+        )
+        view = self._view(streak)
+        self.assertEqual(view["summary"]["streak_broken"], 1)
+        self.assertEqual(view["summary"]["streak_broken_labels"], ["好友甲"])
+        banners = [item for item in view["banners"] if item["kind"] == "streak"]
+        self.assertEqual(len(banners), 1, "断签必须在首屏看得见，不能只藏在账号卡里")
+        self.assertEqual(banners[0]["level"], "warning")
+        self.assertIn("好友甲", banners[0]["text"])
+        self.assertIn("补发今天", banners[0]["text"])
+
+    def test_没有断签就没有横幅(self):
+        view = self._view(self._streak())
+        self.assertEqual([item for item in view["banners"] if item["kind"] == "streak"], [])
+        self.assertEqual(view["summary"]["streak_broken"], 0)
+
+    def test_轮询也带着连续天数(self):
+        view = self._view(self._streak())
+        row = viewmodel.overview_payload(view)["accounts"][0]
+        self.assertEqual(row["streakText"], "连续 5 天 · 最长 9 天")
+        self.assertEqual(row["streakBroken"], 0)
+        self.assertEqual(len(row["streakTargets"]), 1)
+        self.assertEqual(row["streakTargets"][0]["text"], "连续 5 天")
+        self.assertEqual(row["streakTargets"][0]["label"], "好友甲")
+        self.assertTrue(row["streakTargets"][0]["known"])
+
+    def test_账本里没有这个账号时不画连续天数(self):
+        view = self._view({"accounts": {}, "window_days": 1, "window_start": "",
+                           "window_text": "", "today": "2026-10-28"})
+        streak = view["accounts"][0]["streak"]
+        self.assertFalse(streak["has"])
+        self.assertEqual(streak["targets"], [])
+        self.assertEqual(view["streak"]["window_text"], "")
+        self.assertEqual([item for item in view["banners"] if item["kind"] == "streak"], [])
+
+    def test_不用传streak也不会炸(self):
+        view = viewmodel.build(
+            records=[],
+            accounts=[_snapshot(targets=["好友甲"], target_count=1)],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            next_run=datetime.now(timezone.utc) + timedelta(hours=1),
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={},
+            default_dry_run="off",
+        )
+        self.assertFalse(view["accounts"][0]["streak"]["has"])
+        self.assertEqual(view["summary"]["streak_broken"], 0)
+
+    def _ledger(self, days):
+        rows = []
+        for day in days:
+            rows.append({
+                "run_id": "202610%02d-120000" % day,
+                "finished_at": "2026-10-%02dT12:00:00+08:00" % day,
+                "dry_run": "off",
+                "accounts": [{
+                    "unique_id": "10001",
+                    "entries": [{
+                        "target": "好友甲",
+                        "conv_id": "98530253833",
+                        "ok": True,
+                        "level": "strong",
+                        "dry_run": "off",
+                        "at": "2026-10-%02dT12:00:00+08:00" % day,
+                    }],
+                }],
+            })
+        return rows
+
+    def test_真账本算出来的天数会贴到卡上(self):
+        today = datetime(2026, 10, 28, 20, 0)
+        computed = streak_core.compute(self._ledger([26, 27, 28]), today=today)
+        view = self._view(computed)
+        item = view["accounts"][0]["streak"]["targets"][0]
+        self.assertEqual(item["key"], "98530253833")
+        self.assertEqual(item["current"], 3)
+        self.assertEqual(item["text"], "连续 3 天")
+        self.assertFalse(item["broken"])
+
+    def test_昨天没发才算断签(self):
+        today = datetime(2026, 10, 28, 20, 0)
+        # 27 号发过、今天还没发：这是凌晨打开面板的常态，不能报断签
+        fine = streak_core.compute(self._ledger([25, 26, 27]), today=today)
+        self.assertFalse(fine["accounts"]["10001"]["targets"][0]["broken"])
+        # 25 号以后就没发过：断签
+        broken = streak_core.compute(self._ledger([23, 24, 25]), today=today)
+        item = broken["accounts"]["10001"]["targets"][0]
+        self.assertTrue(item["broken"])
+        # core.streak 只给结构化字段，那句话由 streak_text 生成（模板与轮询共用）
+        self.assertEqual(streak_core.streak_text(item), "断签 3 天（上次 10-25）")
+
+
+class MessagePreviewViewTests(unittest.TestCase):
+    """发送内容预览（issue #17）：账号卡与全局模板各给一份"好友会收到什么"。
+
+    这条链最容易错的地方是"用哪份模板"：账号单独配了内容就用它的，没配才回落
+    全局 MESSAGE_TEMPLATE。预览显示错了，用户会照着改错的那一份。
+    """
+
+    GLOBAL = "[盖瑞]今日火花[加一]\\n[API]"
+
+    def _view(self, *, message="", snapshot=None, cfg=None):
+        snap = snapshot or _snapshot(targets=["好友甲"], target_count=1, message=message)
+        return viewmodel.build(
+            records=[],
+            accounts=[snap],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg=cfg or {"message_template": self.GLOBAL, "schedule_text": "12:30"},
+            next_run=datetime.now(timezone.utc) + timedelta(hours=1),
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True, "state": "enabled"},
+            default_dry_run="off",
+        )
+
+    def test_没单独配内容就用全局模板(self):
+        card = self._view()["accounts"][0]
+        preview = card["message_preview"]
+        self.assertEqual(preview["line_count"], 2)
+        self.assertTrue(preview["has_api"])
+        self.assertEqual(card["message_preview_source"], "全局模板 MESSAGE_TEMPLATE")
+
+    def test_单独配了内容就用它(self):
+        card = self._view(message="只有这一句")["accounts"][0]
+        self.assertEqual(card["message_preview"]["line_count"], 1)
+        self.assertFalse(card["message_preview"]["has_api"])
+        self.assertEqual(card["message_preview_source"], "这个账号单独配置")
+
+    def test_预览里的示例一言不是真实内容(self):
+        line = self._view()["accounts"][0]["message_preview"]["lines"][1]
+        self.assertEqual(line["text"], msg_preview.SAMPLE_LINE)
+        self.assertTrue(line["sample"])
+
+    def test_写错大小写的占位符会警告(self):
+        card = self._view(message="[api]")["accounts"][0]
+        codes = [warn["code"] for warn in card["message_preview"]["warnings"]]
+        self.assertIn("api_case", codes)
+
+    def test_空模板预览为不可发(self):
+        card = self._view(cfg={"message_template": "", "schedule_text": "12:30"})["accounts"][0]
+        self.assertFalse(card["message_preview"]["ok"])
+        self.assertEqual(card["message_preview"]["summary"], "0 行 · 没有内容")
+
+    def test_全局模板预览也挂在视图上(self):
+        view = self._view()
+        self.assertEqual(view["message_template_preview"]["line_count"], 2)
+        self.assertIn("含示例一言", view["message_template_preview"]["summary"])
+
+    def test_轮询不带预览字段(self):
+        # 预览只在首屏渲染：它依赖配置，10 秒轮询的 payload 不带，免得前端拿旧值覆盖。
+        payload = viewmodel.overview_payload(self._view())
+        self.assertNotIn("messagePreview", payload["accounts"][0])
+
+class ProxyViewTests(unittest.TestCase):
+    """每账号出口（issue #18）：卡片要说清"这个号从哪个 IP 出去"，但绝不能出现口令。
+
+    这组测试守的是三件事：①没配代理时行为与从前一模一样（直连）；②账号自己的出口
+    优先于全局；③口令只以 `***` 形态出现在卡片与 /api/ops/overview 里 —— 出口地址是
+    手填的，一旦漏进页面，看得到面板的人就都拿到了代理口令。
+    """
+
+    def _view(self, snapshots, *, cfg=None, proxy_state=None):
+        base_cfg = {"message_template": "你好", "schedule_text": "12:30"}
+        base_cfg.update(cfg or {})
+        return viewmodel.build(
+            records=[],
+            accounts=snapshots,
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg=base_cfg,
+            next_run=datetime.now(timezone.utc) + timedelta(hours=1),
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            timer={"name": "x.timer", "installed": True, "enabled": True, "state": "enabled"},
+            default_dry_run="off",
+            proxy_state=proxy_state,
+        )
+
+    def _card(self, snapshot, **kwargs):
+        return self._view([snapshot], **kwargs)["accounts"][0]
+
+    def test_没配代理时就是直连(self):
+        card = self._card(_snapshot())
+        self.assertEqual(card["proxy_text"], "直连")
+        self.assertEqual(card["proxy_source"], "没有配置代理（直连）")
+        self.assertEqual(card["proxy_mask"], "")
+
+    def test_全局代理会被继承并说明来源(self):
+        card = self._card(_snapshot(), cfg={"proxyAddress": "http://g:2"})
+        self.assertEqual(card["proxy_text"], "g:2")
+        self.assertEqual(card["proxy_source"], "全局 PROXY_ADDRESS")
+
+    def test_账号自己的出口优先于全局(self):
+        card = self._card(
+            _snapshot(proxy="http://u:secret@h:1234"),
+            cfg={"proxyAddress": "http://g:2"},
+        )
+        self.assertEqual(card["proxy_text"], "h:1234")
+        self.assertEqual(card["proxy_source"], "这个账号单独配置")
+
+    def test_口令只以星号形态出现在卡片上(self):
+        card = self._card(_snapshot(proxy="http://u:secret@h:1234"))
+        self.assertNotIn("secret", card["proxy_text"])
+        self.assertEqual(card["proxy_mask"], "http://u:***@h:1234")
+        # 肩上看得到的字段一律不许带口令（原文只留在 card["proxy"]，给保存/自检链路用）
+        for key, value in card.items():
+            if key == "proxy":
+                continue
+            self.assertNotIn("secret", json.dumps(value, ensure_ascii=False, default=str), key)
+
+    def test_轮询载荷里也没有口令(self):
+        view = self._view([_snapshot(proxy="http://u:secret@h:1234")])
+        payload = viewmodel.overview_payload(view)
+        dumped = json.dumps(payload, ensure_ascii=False, default=str)
+        self.assertNotIn("secret", dumped)
+        account = payload["accounts"][0]
+        self.assertEqual(account["proxyText"], "h:1234")
+        self.assertEqual(account["proxySource"], "这个账号单独配置")
+        self.assertIn("还没自检过", account["proxyCheckText"])
+
+    def test_两个账号都直连时提醒共用一个出口(self):
+        view = self._view([
+            _snapshot(unique_id="10001"),
+            _snapshot(username="账号乙", unique_id="10002"),
+        ])
+        banners = [item for item in view["banners"] if item["kind"] == "proxy_shared"]
+        self.assertEqual(len(banners), 1, "两个号共用出口是已知风控面，首屏要说得出来")
+        self.assertEqual(banners[0]["level"], "info")
+        self.assertIn("2 个账号", banners[0]["text"])
+
+    def test_配了代理就不提醒(self):
+        view = self._view(
+            [_snapshot(unique_id="10001", proxy="http://h:1"), _snapshot(unique_id="10002")],
+            cfg={"proxyAddress": "http://g:2"},
+        )
+        self.assertEqual(
+            [item for item in view["banners"] if item["kind"] == "proxy_shared"], []
+        )
+
+    def test_停用的账号不算共用出口(self):
+        view = self._view([
+            _snapshot(unique_id="10001"),
+            _snapshot(unique_id="10002", enabled=False),
+        ])
+        self.assertEqual(
+            [item for item in view["banners"] if item["kind"] == "proxy_shared"], []
+        )
+
+    def test_自检过的账号显示上次的_IP(self):
+        card = self._card(
+            _snapshot(unique_id="10001"),
+            proxy_state={"accounts": {"10001": {"ip": "203.0.113.7", "at": "2026-10-29T21:00:00+08:00"}}},
+        )
+        self.assertEqual(card["proxy_check_ip"], "203.0.113.7")
+        self.assertIn("203.0.113.7", card["proxy_check_text"])
 
 
 if __name__ == "__main__":

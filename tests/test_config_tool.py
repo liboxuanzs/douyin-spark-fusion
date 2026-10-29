@@ -989,6 +989,35 @@ class DocsGeneratorParityTests(unittest.TestCase):
         html = (self.ROOT / "docs/generator/index.html").read_text(encoding="utf-8")
         self.assertIn("换号重扫不要改它", html)
 
+class ProxyRoundTripTests(unittest.TestCase):
+    """每账号出口（TASKS[].proxy）经 configTool 开一次再存，不能丢。
+
+    configTool 保存时整条 TASKS 重建，模型里没有的字段一律消失。出口是 2026-10-29
+    面板新增的键（issue #18），本工具不显示也不编辑它 —— 但必须原样写回：丢一次
+    就等于把这个账号的出口换回另一个 IP，而出口 IP 变了正是掉登录的头号起因。
+    """
+
+    def _saved_task(self, task: dict) -> dict:
+        cfg = models.Config.from_env_map({
+            "TASKS": models.json.dumps([task], ensure_ascii=False),
+        })
+        return models.json.loads(cfg.to_env_map()["TASKS"])[0]
+
+    def test_proxy_survives_an_edit(self):
+        task = {"unique_id": "111", "targets": ["甲"], "proxy": "http://user:pw@10.0.0.2:1080"}
+        cfg = models.Config.from_env_map({"TASKS": models.json.dumps([task], ensure_ascii=False)})
+        self.assertEqual(cfg.accounts[0].proxy, "http://user:pw@10.0.0.2:1080")
+        self.assertEqual(self._saved_task(task)["proxy"], "http://user:pw@10.0.0.2:1080")
+
+    def test_no_proxy_writes_no_key(self):
+        for task in ({"unique_id": "111"}, {"unique_id": "111", "proxy": ""},
+                     {"unique_id": "111", "proxy": None}, {"unique_id": "111", "proxy": "   "}):
+            with self.subTest(task=task):
+                self.assertNotIn("proxy", self._saved_task(task))
+
+    def test_default_account_has_no_proxy(self):
+        self.assertEqual(models.Account(unique_id="111").proxy, "")
+
 
 if __name__ == "__main__":
     unittest.main()

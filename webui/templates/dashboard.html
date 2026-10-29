@@ -449,6 +449,28 @@
         </div>
       </div>
 
+      {# 火花连续天数（issue #15）：只用账本算，空跑与失败都不计。断签单独上色 ——
+         连续天数断了不会自己恢复，这是这张卡里最该一眼看见的一行。 #}
+      {% if account.streak %}
+      <div class="account-streak" data-account-streak>
+        <div class="streak-head">
+          <span class="streak-title">火花连续</span>
+          <strong class="streak-total" data-streak-text>{{ account.streak.text or "还没有成功记录" }}</strong>
+          {% if view.streak.window_text %}<span class="streak-window">{{ view.streak.window_text }}</span>{% endif %}
+        </div>
+        {% if account.streak.targets %}
+        <ul class="streak-list" data-streak-list>
+          {% for item in account.streak.targets %}
+          <li class="streak-item {{ 'is-broken' if item.broken else ('is-unknown' if not item.known else 'is-ok') }}" data-streak-item="{{ item.key }}">
+            <span class="streak-name">{{ item.label }}</span>
+            <span class="streak-days" data-streak-days>{{ item.text }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endif %}
+
       {% if account.issues %}
       {% set box = 'danger-box' if account.state == 'blocked' else 'warning-box' %}
       <div class="{{ 'warning-box' if account.orphan else box }}">
@@ -514,7 +536,64 @@
             留空 = 用全局模板 <code>MESSAGE_TEMPLATE</code>。<code>[API]</code> 照样换成每日一言，
             而且是<strong>每个好友各取一次</strong>；换行照原样发出。保存前自动备份 <code>.env</code>。
           </small>
+          {# issue #17：预览按「这个账号这一轮用哪份模板」算，一言位置用示例顶着、不联网 #}
+          <div class="message-preview" data-message-preview-block>
+            <div class="message-preview-head">
+              <strong>预览</strong>
+              <small class="muted">{{ account.message_preview_source }} · {{ account.message_preview.summary }}</small>
+            </div>
+            {% if account.message_preview.lines %}
+            <ol class="message-preview-lines">
+              {% for line in account.message_preview.lines %}
+              <li class="message-preview-line{% if line.sample %} is-sample{% endif %}"{% if line.sample %} title="示例一言，实际每个好友各取一条"{% endif %}>{{ line.text }}</li>
+              {% endfor %}
+            </ol>
+            {% endif %}
+            {% for warn in account.message_preview.warnings %}
+            <p class="message-warn message-warn-{{ warn.level }}" data-preview-warn="{{ warn.code }}">{{ warn.text }}</p>
+            {% endfor %}
+          </div>
         </form>
+      </div>
+
+      {# issue #18：出口 —— 这个账号从哪个 IP 出去。口令永不回显，输入框留空、placeholder 用遮掩后的地址 #}
+      <div class="proxy-editor" data-proxy-editor data-proxy-account="{{ account.unique_id }}">
+        <div class="proxy-editor-head">
+          <div class="proxy-editor-lead">
+            <strong>出口</strong>
+            <small class="muted">
+              <span class="proxy-value" data-proxy-text>{{ account.proxy_text }}</span>
+              <span class="proxy-source" data-proxy-source>{{ account.proxy_source }}</span>
+            </small>
+          </div>
+          <div class="proxy-editor-tools">
+            <button class="button button-soft" type="button" data-proxy-check="{{ account.unique_id }}">
+              <i data-lucide="globe"></i><span>自检</span>
+            </button>
+            {% if account.proxy_mask %}
+            <form method="post" action="/ops/account/proxy"
+                  data-confirm-title="改回全局出口"
+                  data-confirm="「{{ account.username }}」会改用全局 PROXY_ADDRESS（那里没配就是直接连）。出口 IP 一变，下次发送有可能要重新扫码。确认改回吗？"
+                  data-confirm-accept="确认改回">
+              <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+              <input type="hidden" name="clear" value="1">
+              <button class="button button-quiet" type="submit"><i data-lucide="undo-2"></i><span>改回全局</span></button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+        <form method="post" action="/ops/account/proxy" class="proxy-form" data-proxy-form>
+          <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
+          <input class="proxy-input" type="text" name="proxy" value="" autocomplete="off" spellcheck="false"
+                 placeholder="{{ account.proxy_mask or 'user:pass@host:port（留空 = 跟全局）' }}"
+                 aria-label="这个账号的出口代理地址">
+          <button class="button button-soft" type="submit"><i data-lucide="save"></i><span>保存出口</span></button>
+        </form>
+        <small class="muted">
+          只影响这个账号（发送与扫码都走它）；留空 = 跟全局 <code>PROXY_ADDRESS</code>。
+          地址里可以带口令，页面和日志一律只显示 host:port。
+          <span class="proxy-check" data-proxy-check-text>{{ account.proxy_check_text }}</span>
+        </small>
       </div>
 
       <div class="friend-picker" data-friend-picker data-friend-account="{{ account.unique_id }}">
@@ -979,21 +1058,29 @@
           </table>
         </div>
 
-        {% if view.message_template_rendered %}
+        {# issue #17：全局模板也给出同一份预览 —— [API] 用示例顶着，绝不联网 #}
         <details class="collapsible-section">
           <summary>
             <span class="summary-copy">
               <i data-lucide="message-square-text"></i>
-              <span><strong>消息模板预览</strong><small>实际发出去的样子（{{ view.message_template_lines }} 行）</small></span>
+              <span><strong>消息模板预览</strong><small>好友会收到的样子：{{ view.message_template_preview.summary }}</small></span>
             </span>
             <i class="summary-chevron" data-lucide="chevron-down"></i>
           </summary>
           <div class="collapsible-body">
-            <pre class="logs-code" data-message-preview>{{ view.message_template_rendered }}</pre>
-            <small class="muted">.env 里的原文：<code data-message-raw>{{ view.message_template }}</code></small>
+            <div class="message-preview" data-message-template-preview>
+              <ol class="message-preview-lines">
+                {% for line in view.message_template_preview.lines %}
+                <li class="message-preview-line{% if line.sample %} is-sample{% endif %}"{% if line.sample %} title="示例一言，实际每个好友各取一条"{% endif %}>{{ line.text }}</li>
+                {% endfor %}
+              </ol>
+              {% for warn in view.message_template_preview.warnings %}
+              <p class="message-warn message-warn-{{ warn.level }}" data-preview-warn="{{ warn.code }}">{{ warn.text }}</p>
+              {% endfor %}
+            </div>
+            <small class="muted">.env 里的原文（<code>\n</code> 是换行）：<code data-message-raw>{{ view.message_template }}</code></small>
           </div>
         </details>
-        {% endif %}
       </div>
     </details>
   </section>

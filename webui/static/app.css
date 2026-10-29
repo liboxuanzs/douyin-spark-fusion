@@ -3467,3 +3467,256 @@ html.dsf-page-enter .mobile-topbar {
   html.dsf-page-enter .app-shell,
   html.dsf-page-enter .mobile-topbar { animation: none !important; }
 }
+
+/* == 火花连续天数（issue #15）：经典皮肤只补一套同结构的样式 --------------- */
+
+.account-streak {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 11px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.streak-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 10px;
+}
+
+.streak-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.streak-total {
+  font-size: 14px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.streak-window {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.streak-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.streak-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.streak-name {
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 560;
+  color: var(--text);
+}
+
+.streak-days {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.streak-item.is-ok .streak-days {
+  color: var(--success);
+}
+
+.streak-item.is-broken {
+  border-color: var(--danger);
+}
+
+.streak-item.is-broken .streak-days {
+  font-weight: 640;
+  color: var(--danger);
+}
+
+.streak-item.is-unknown {
+  border-style: dashed;
+}
+
+/* == 发送内容预览（issue #17）：经典皮肤同结构 ------------------------------ */
+
+.message-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 13px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.message-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.message-preview-head strong {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.message-preview-lines {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.message-preview-line {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+
+.message-preview-line.is-sample {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.message-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.message-warn-warn {
+  color: var(--warning);
+}
+
+/* ==========================================================================
+   33. 账号出口（issue #18）
+   ========================================================================== */
+.proxy-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  min-width: 0;
+}
+
+.proxy-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.proxy-editor-lead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.proxy-editor-lead strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.proxy-editor-lead small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 9px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.proxy-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.proxy-source {
+  color: var(--text-3);
+}
+
+.proxy-editor-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.proxy-editor-tools form {
+  margin: 0;
+}
+
+.proxy-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.proxy-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+
+.proxy-check[data-proxy-check-state="ok"] {
+  color: var(--success);
+}
+
+.proxy-check[data-proxy-check-state="changed"] {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.proxy-check[data-proxy-check-state="fail"] {
+  color: var(--danger);
+}
+
+@media (max-width: 720px) {
+  .proxy-editor-head { flex-direction: column; align-items: stretch; }
+  .proxy-editor-tools { margin-left: 0; }
+  .proxy-input { flex: 1 1 100%; }
+}
+

@@ -18,6 +18,11 @@
                                 --older-than 只删闲置超过 N 天的孤儿目录。
     python main.py notify-test  推一条测试通知（确认 webhook 地址通不通），
                                 不发送任何消息、不碰运行锁。
+    python main.py doctor       体检：账本还新吗、定时器还在跑吗、账号是不是全停用了。
+                                只读（不发送、不占运行锁、不写时间表）；有事退 1，
+                                并按 NOTIFY_* 推一条通知（每天最多一条）。
+    python main.py doctor --json
+                                机器可读的同一份体检结果。
     python main.py fc           云函数模式（上游保留；本融合版仓库没有 fc_server.py，
                                 这条分支不可用）。
 
@@ -44,6 +49,11 @@ _ROOT = Path(__file__).resolve().parent
 #: `python main.py prune` 自己的开关（`_parse_maintenance` 解析，`_parse_flags`
 #: 只负责别把它们当成"认不出来的开关"）。
 MAINTENANCE_SWITCHES = ("--apply", "--caches", "--json")
+
+#: `python main.py doctor` 自己的开关。放在 `_parse_flags` 的白名单里，
+#: 否则 `doctor --json` 会被判成「认不出来的开关」（`--json` 恰好也是 prune 的），
+#: 而 `--no-notify` 必然中招。
+DOCTOR_SWITCHES = ("--json", "--no-notify")
 
 
 def _load_env():
@@ -128,7 +138,8 @@ def _parse_flags(args):
             force = True
         elif item == "--force-all":
             force_all = True
-        elif item in MAINTENANCE_SWITCHES or item.startswith("--older-than="):
+        elif (item in MAINTENANCE_SWITCHES or item in DOCTOR_SWITCHES
+              or item.startswith("--older-than=")):
             # `prune` 子命令自己的开关（见 `_parse_maintenance`）。放在这里只是
             # 为了让它们**不落进**下面那条"以 - 开头就报错"的分支：否则
             # `python main.py prune --apply` 会被判成"认不出来的开关：--apply"。
@@ -332,6 +343,20 @@ def _notify_test():
     return 0 if ok else 1
 
 
+def _doctor(argv=None):
+    """体检并返回退出码（0=没事，1=有事，2=开关写错）。
+
+    `argv` 默认取 `sys.argv[1:]`（**不是** `_ARGS`）：`_parse_flags` 会把
+    `--json` / `--no-notify` 丢掉（理由同 `_prune`），拿 `_ARGS` 解析等于
+    「开关全被吞掉」—— `doctor --json` 会静默变成人话版。传 `argv` 只为测试留缝。
+    """
+    from core import doctor
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    rest = [item for item in args if item.strip().lower() not in ("doctor", "health")]
+    return doctor.main(rest)
+
+
 def _run(dry_run, source=None, force=None, only=None):
     from core.run_ledger import SOURCE_TIMER, run_source
     from core.tasks import runTasks
@@ -412,10 +437,19 @@ def main():
         # 只是"这条地址通不通"：不发送、不占运行锁、不写时间表。
         sys.exit(_notify_test())
 
+    if MODE in {"doctor", "health"}:
+        # 体检（issue #16）：通知只挂在「跑完一轮」上，而定时器停了、账号全挂了、
+        # 账本被删了这些真正该报警的情形都不会产生一轮。这里独立看一眼。
+        sys.exit(_doctor())
+
     if MODE in {"task", "run", "cli", ""}:
         sys.exit(_run(None))
 
-    print(f"未知启动模式: {MODE}（可选：task / dry-run / prune / fc）", file=sys.stderr)
+    print(
+        f"未知启动模式: {MODE}"
+        "（可选：task / dry-run / prune / notify-test / doctor / fc）",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 

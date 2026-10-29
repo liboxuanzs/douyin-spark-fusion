@@ -263,6 +263,11 @@ class Account:
                     不显示也不编辑它，但**必须原样写回** —— 与 message/time 同一个
                     道理：to_task() 是整条 TASKS 的重建，漏了就等于把用户在面板上
                     停用的账号静默重新启用（2026-10-24 发现的缺陷）。
+    proxy           这个账号专属的出口（TASKS[].proxy，空串 = 跟全局 PROXY_ADDRESS）。
+                    本工具界面上不显示也不编辑（本工具自己的抓 cookie 代理是另一处
+                    配置，见 tunnel.py），但**必须原样写回**：漏一次就等于把账号的
+                    出口悄悄换回另一个 IP —— 出口一变，抖音那边就是要重新扫码
+                    （2026-10-29 issue #18）。
     """
 
     username: str = ""
@@ -279,6 +284,8 @@ class Account:
     time: str = ""
     # 缺键/看不懂 = 启用（见 task_enabled）；写回时只在 False 时落 `"enabled": false`。
     enabled: bool = True
+    # TASKS[].proxy：空串 = 跟全局；写回时只在非空时落这个键（见 to_task）。
+    proxy: str = ""
 
     @property
     def display_name(self) -> str:
@@ -372,6 +379,11 @@ class Account:
         # 少一个键，手改 .env 时也少一处要看。
         if not self.enabled:
             task["enabled"] = False
+        # 账号专属出口（TASKS[].proxy）同理：空串 = 跟全局，不落键；有值就必须带上 ——
+        # 这个工具不编辑它，可 to_task() 是整条重建，漏了就是把出口换回另一个 IP。
+        proxy = str(self.proxy or "").strip()
+        if proxy:
+            task["proxy"] = proxy
         return task
 
 
@@ -583,6 +595,9 @@ class Config:
                     # 面板上的停用开关（TASKS[].enabled，缺键 = 启用）。同样不显示、
                     # 不编辑，但重建 TASKS 时必须原样带回去（见 to_task）。
                     enabled=task_enabled(task),
+                    # 账号专属出口（TASKS[].proxy，issue #18）。同样不显示、不编辑，
+                    # 但重建 TASKS 时必须原样带回去（见 to_task）。
+                    proxy=str(task.get("proxy", "") or "").strip(),
                 )
             )
 

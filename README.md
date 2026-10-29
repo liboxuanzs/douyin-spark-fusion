@@ -73,6 +73,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 | `main.py dry-run [select\|full]` | 空跑一轮 |
 | `main.py prune [--apply] [--caches] [--older-than N] [--json]` | 盘点 / 清理磁盘（默认只预演，不动任何文件） |
 | `main.py notify-test` | 按当前通知配置推一条测试消息（地址配错时立刻能看出是哪一步不行） |
+| `main.py doctor [--json] [--no-notify]` | 体检：账本多久没动、定时器还在不在、账号是不是全停用了。有事退出码 1，并按 `NOTIFY_*` 推一条（每天最多一条） |
 | `python -m webui` | 起网页控制台 |
 
 退出码：`0` 整轮跑完（「没有账号到点」也算跑完）、`1` 整轮被跳过或账号全部出错、`2` 参数错误。
@@ -107,7 +108,7 @@ cp .env.example .env       # 填 COOKIES_<抖音号> / TASKS / WEBUI_PASSWORD
 ## 目录结构
 
 ```
-main.py              入口：task / dry-run / prune 三种模式
+main.py              入口：task / dry-run / prune / notify-test / doctor
 core/                业务核心
   schedule.py        5 分钟敲门派发器：谁到点、谁发过、谁要再试
   tasks.py           一轮的编排：逐账号、逐目标、空跑、写账本

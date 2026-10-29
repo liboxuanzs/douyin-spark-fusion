@@ -3749,3 +3749,287 @@ html[data-theme="light"] .segmented-control.has-thumb .segment-button.active:hov
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 42%, transparent); }
   55% { opacity: 0.62; box-shadow: 0 0 0 4px color-mix(in oklab, currentColor 0%, transparent); }
 }
+
+/* == 23.10 发送内容预览（issue #17） ------------------------------------- */
+
+.message-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 13px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, .025);
+}
+
+.message-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.message-preview-head strong {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.message-preview-lines {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.message-preview-line {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+
+/* 示例一言：用户不能把它当成好友真的会收到的原话 */
+.message-preview-line.is-sample {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.message-preview-line.is-sample::after {
+  content: "示例";
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px dashed var(--line-2);
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: .04em;
+  color: var(--text-4);
+}
+
+.message-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+
+.message-warn-warn {
+  color: var(--warning);
+}
+
+
+/* == 23.9 火花连续天数（issue #15） --------------------------------------
+   连续天数是这张卡里唯一「已经发生、且不会自己恢复」的事实：断签那一行必须一眼
+   看见，所以只有它用 --danger；未知（从没成功过）用虚线而不是红色 —— 那不是断，
+   是还没开始。 */
+
+.account-streak {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 11px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--glass);
+}
+
+.streak-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 10px;
+}
+
+.streak-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.streak-total {
+  font-size: 14px;
+  font-weight: 620;
+  letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.streak-window {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-4);
+}
+
+.streak-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.streak-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .03);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.streak-name {
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 560;
+  color: var(--text);
+}
+
+.streak-days {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.streak-item.is-ok {
+  border-color: color-mix(in oklab, var(--success) 30%, transparent);
+}
+
+.streak-item.is-ok .streak-days {
+  color: var(--success);
+}
+
+.streak-item.is-broken {
+  border-color: color-mix(in oklab, var(--danger) 44%, transparent);
+  background: color-mix(in oklab, var(--danger) 11%, transparent);
+}
+
+.streak-item.is-broken .streak-days {
+  font-weight: 640;
+  color: var(--danger);
+}
+
+.streak-item.is-unknown {
+  border-style: dashed;
+}
+
+.streak-item.is-unknown .streak-days {
+  color: var(--text-4);
+}
+
+/* == 23.11 账号出口（issue #18） ----------------------------------------- */
+
+/* 口令永远不出现在这里：卡上只有 host:port 与「来自哪里」，输入框留空、用 placeholder
+   显示现有地址的遮掩版 —— 页面上没有第二份明文，也就不存在被截图/swagger 带走的可能。 */
+.proxy-editor {
+  display: grid;
+  gap: 12px;
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--accent-soft-2);
+}
+
+.proxy-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.proxy-editor-lead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.proxy-editor-lead strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.proxy-editor-lead small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 9px;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+.proxy-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.proxy-source {
+  color: var(--text-4);
+}
+
+.proxy-editor-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.proxy-editor-tools form {
+  margin: 0;
+}
+
+.proxy-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.proxy-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* 自检结论是当场点出来的一个"事实"，颜色跟着它自己的状态走（成功/变了/失败） */
+.proxy-check {
+  font-variant-numeric: tabular-nums;
+}
+
+.proxy-check[data-proxy-check-state="ok"] {
+  color: var(--success);
+}
+
+.proxy-check[data-proxy-check-state="changed"] {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.proxy-check[data-proxy-check-state="fail"] {
+  color: var(--danger);
+}
+
+@media (max-width: 720px) {
+  .proxy-editor-head { flex-direction: column; align-items: stretch; }
+  .proxy-editor-tools { margin-left: 0; }
+  .proxy-input { flex: 1 1 100%; }
+}
+

@@ -867,3 +867,133 @@ skip_reason_text（原始码保留供排查），runs 页与 _banners() 共用�
 **验证**：tests/test_config_tool.py::EnabledRoundTripTests（8 条：往返、启用不落键、
 同义值、认不出按启用、与主程序逐项一致）、tests/test_viewmodel.py::StoppedAccountViewTests
 新增页头文案与轮询字段两条。
+---
+
+## 2026-10-29 GitHub issue #16：静默也是在故障（`main.py doctor`）
+
+背景：通知只在「真发完一轮」之后推（`core/notify.py` 的定位就是那样），可这三种故障
+**一轮都不会产生** —— 面板、账本、通知全都安静：
+
+1. 定时器被人 `systemctl disable` 了（`install.sh` 故意不自动 enable，装完要人点头）；
+2. 派发器每 5 分钟照常敲门，但账号都已经发过 / 都停用了 / 时间没到（按设计早退不写账本，
+   否则一天 288 条"什么都没做"会淹掉记录）；
+3. TASKS 里唯一的账号掉登录或被人停用。
+
+所以 issue 要的不是"更大声的通知"，而是**体检**：只读地检查"最后一次真的跑起来是什么
+时候"，发现不对才说。
+
+**实现**（`core/doctor.py`，`python main.py doctor`）：
+
+- 判据：账本最后一条带时间戳的记录距今多少小时（`NOTIFY_SILENCE_HOURS`，默认 30 ——
+  两个账号最短间隔约 21 小时，留 9 小时余量；0 关闭）；`systemctl show` 读定时器的
+  `ActiveState`/`UnitFileState`/`LastTriggerUSec`；TASKS 里启用/停用各几个。
+- 全停用**不算静默**：那是人的决定，报警只会训练用户忽略报警。
+- 只读：不碰浏览器、不占运行锁、不写时间表；读不到就明说读不到（`systemctl` 不可用、
+  账本不存在、TASKS 解析失败各自一句人话），绝不猜一个"正常"出来。
+- 推送复用 `core/notify.py` 的 `build_payload`/`post`，每天最多一条（`logs/doctor_state.json`
+  记日期）—— 静默会持续好几天，一天一条够了。
+- 退出码非 0 = 有事，方便 cron / 外部监控直接接。
+- 新增 `douyin-spark-fusion-doctor.timer`（每天 09:00：夜里该发的已经发完、白天还没到下一轮，
+  这个时刻的"没有运行记录"最可疑）；`install.sh` 会自动 `enable --now` —— 它只读不发消息，
+  与必须人点头的 `daily.timer` 不同。
+
+**验证**：`tests/test_doctor.py` 41 条（账本尾读与坏行、最近一条按时间戳而非文件顺序、
+定时器状态四态、全停用跳过、推送同日去重、CLI 退出码、deploy 产物齐全）。
+---
+
+## 2026-10-29 GitHub issue #15：火花连续天数
+
+面板原来只报「今天发了几条」，而用户真正怕的是**这条火花断了** —— 抖音的连续天数断掉
+不会自己恢复，等"好几天没收到消息"才发现已经晚了。
+
+**数据只从账本算**（`core/streak.py`）：每条 entry 有 `target`/`conv_id`/`ok`/`level`/
+`dry_run`/`at`，按 `(unique_id, conv_id)` 归一天就有连续天数。不新增状态文件 —— 多一个
+`streak.json` 只是多一处能跟账本对不上的地方。
+
+四条口径，每条都对应一个真实的显示陷阱：
+
+1. **只认真实发送**：`dry_run` 不是 `off` 的那一轮、或 entry 自己标了 dry_run 的一律跳过，
+   空跑绝不能把连续天数续上。
+2. **今天还没发不算断**：凌晨打开面板时今天的发送还没到点，显示「连续 N 天」（昨天为止），
+   而不是红着脸说断签。断签 = 最后一次成功在前天或更早，文案带「上次 10-25」。
+3. **窗口有限就说清楚**：账本只从尾部读 4 MB，能算多长由账本自己决定，所以返回
+   `window_days`，界面固定显示「只统计最近 N 天」（线上当前是 29 天）。
+4. **只算还在配置里的好友**：账本是全部历史，被移掉的好友还躺在里面，它们的"上次成功"
+   停在很久以前 —— 不按 `targets_by_account` 过一遍，首屏会永远挂一条"有目标断签了"
+   （线上真实数据里就有 3 个早就删除的旧好友在报断签，复查时才发现）。
+
+**界面**：账号卡加一块「火花连续」—— 标题行「连续 19 天 · 最长 19 天」+ 每个好友一个
+药丸「连续 29 天」/ 红底「断签 3 天（上次 10-25）」/ 虚线「还没有成功记录」；断签同时进
+首屏横幅（最多点名 4 个），文案说清楚「补发今天能接上今天这一格，但连续天数不会恢复」。
+数字进 `/api/ops/overview` 的 `streakText`/`streakBroken`/`streakTargets`，跟着 10 秒轮询
+重画 —— 断签是每天都会变的事实，只靠首屏渲染的话页面开着不动就永远停在昨天那句话上。
+
+**验证**：`tests/test_streak.py` 19 条（连续/断签/空跑/改名/移掉的好友/窗口起点）、
+`tests/test_viewmodel.py::StreakViewTests` 8 条（卡片、横幅、轮询字段、没有数据不画）、
+`tests/test_webui.py::StreakUiContractTests` 3 条（挂点、只许 textContent、两套皮肤都有样式）。
+---
+
+## 2026-10-29 GitHub issue #17：发出去之前，先看见那句话
+
+面板从来到不了"真正发出去的那段文字"：账号卡的输入框里放的是**原始模板**（字面 `\n`、
+`[API]` 原样），存完只说一句"单独配了内容（3 行）"。而真正发出去的时候：`[API]` 每个好友
+各取一次一言（内容不一样），取不到时整行被删掉（issue #5 的修复），所以"3 行"实际可能
+只发 2 行；只有空白/零宽字符的行会被静默吃掉；`[api]` 这种大小写错误不会被替换，原样发给
+对方。这些都是**发出去了才知道**的事。
+
+**实现**（`core/msg_preview.py`，纯函数、不出网）：
+
+- 同一套清洗口径：字面 `\n`/真换行归一 → 删零宽字符（`ZERO_WIDTH_CHARS` 与
+  `core/douyin_im.py` 逐字一致）→ 丢空行；与 `split_message_lines` 的差别是这里**保留**
+  行内空格，因为要报告"这行只有空格"。
+- `[API]` 用固定示例一言替换并标 `sample=True`，界面上灰斜体写「示例一言」—— 离线预览，
+  不为了看一眼去请求一言接口（那样每次刷面板都会消耗一次 API、还会因为网络卡住首屏）。
+- 字数分行统计：「3 行 · 42 字（不含一言）· 约 55 字（含示例一言）」；单行 200 字、整条 500 字
+  给提醒（抖音聊天的现实长度）。
+- 警告分级只有 info/warn：会被吃掉的输入（空行、行尾空格、零宽字符）、`[api]`/`【API】`
+  大小写写错、只有 `[API]` 时"一言取不到整条会空、整条不发"、空模板。
+- 复用：账号卡用自己的 `message`（没有就用全局模板并标来源）、「运行配置」的全局模板旁
+  各放一块，保存后刷新即跟着变。
+
+**踩到的坑**：这个模块自己的测试抓出一个真 bug —— 原判断 `raw_line.strip() != stripped`
+对普通空格**永假**（strip 之后两边当然相等），于是"行尾多了个空格"这条警告从来没触发过。
+改成先删零宽字符得到 `visible` 再比：`visible != stripped` 才算空格问题，同一行不会再报两条。
+
+**验证**：`tests/test_message_preview.py` 29 条（归一、拆行、占位符四种写法、警告等级、
+字数口径、与发送端的零宽字符/占位符逐字一致、模块源码不出现 requests/httpx/urllib）、
+`tests/test_viewmodel.py::MessagePreviewViewTests` 7 条、`tests/test_webui.py::MessagePreviewUiContractTests` 5 条。
+
+---
+
+## 2026-10-29 GitHub issue #18：每个账号自己的出口 IP
+
+两个账号一直是同一个出口。面板从不显示谁走哪个出口；抓 cookie 用的代理和服务器 `.env` 里的
+`PROXY_ADDRESS` 是两处配置，没人检查它们是否一致 —— 而 FAQ 里写着：掉登录十有八九就是出口
+IP 变了。这条信息在界面上**根本不存在**。
+
+**实现**：
+
+- `TASKS[]` 新增可选 `"proxy"`（写成 `http://user:pass@host:port`，裸 `host:port` 自动补
+  `http://`），留空 = 跟全局，全局也空 = 直连。`core/tasks.py` 起浏览器时传它：
+  `get_browser(fingerprint, proxy=user.get("proxy") or None)` —— `None` 是"没指定，回落全局"，
+  空串是"明确直连"，两者语义不同，别合并。扫码登录（`webui/app.py::start_login_session`）
+  也走同一个值，否则"扫码时的 IP"和"发送时的 IP"又会不一致。
+- 面板账号卡加一块「出口」：显示 `host:port`（**永不显示口令**）+ 来源（直连 / 跟全局 /
+  这个账号单独配置）+ 「自检」按钮 + 「改回全局」。地址框里可以带口令，页面、日志、账本一律
+  只出现 `mask()` 之后的形态；`proxy_text` 走的是遮掩值，只有保存链路碰原文。
+- 「自检」：`POST /ops/account/proxy-check`，用这个账号**真实生效的出口**访问回显服务，
+  返回出口 IP 并记进 `logs/proxy_state.json`；下一次自检发现 IP 变了就警告「出口 IP 变了是
+  掉登录的头号起因」。只在点按钮时出一次网，不轮询（谁也不想面板每 10 秒打一次外网）。
+- 首页横幅：≥2 个启用中的账号、且都没有自己的出口时提醒「多个账号共用一个出口」。这是已知
+  风控面，但**不是错误** —— 所以是 info 级、说清楚怎么改，而不是红色警报。
+- configTool 不显示也不编辑这个键，但必须原样写回（`Account.proxy`）：它保存时整条 TASKS 重建，
+  漏一个字段就等于把用户辛苦配的出口悄悄换回另一个 IP。
+
+**加固**：`core/proxy.py` 的 `mask()` 在 URL 写坏（如 `http://[::1`）时必须返回 `"***"` 而
+不能退回原文 —— 原文可能带口令，而调用它的正是渲染首页的那条路径；`urlsplit` 对坏 URL 抛
+`ValueError`，不兜住就是面板 500。
+
+**验证**：`tests/test_proxy.py` 28 条、`tests/test_viewmodel.py::ProxyViewTests` 9 条（含
+卡片与 `/api/ops/overview` 全文不含口令）、`tests/test_webui.py::ProxyUiContractTests` 6 条、
+`tests/test_envfile.py::AccountProxyTests` 6 条、`tests/test_config_tool.py::ProxyRoundTripTests` 3 条、
+`tests/test_tasks_fusion.py::EgressPerAccountTests` 2 条（断言真的传给了 `get_browser`）。

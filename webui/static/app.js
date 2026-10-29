@@ -642,6 +642,47 @@
             ? `这个账号单独配了内容（${account.messageLines || 0} 行），下一轮就发它`
             : "没单独配置，下一轮用全局模板";
         });
+        // 出口（issue #18）：只写服务端给的遮掩文案（host:port），页面上永远不出现口令。
+        // 自检结果那行**不**跟着轮询重画 —— 那是人点出来的结论，10 秒后自己消失等于没说。
+        row.querySelectorAll("[data-proxy-text]").forEach((node) => {
+          if (account.proxyText) {
+            node.textContent = account.proxyText;
+          }
+        });
+        row.querySelectorAll("[data-proxy-source]").forEach((node) => {
+          if (account.proxySource) {
+            node.textContent = account.proxySource;
+          }
+        });
+        // 火花连续天数（issue #15）：断签每天都会变（昨天没发，今天这一行就该变红），
+        // 不跟着轮询重画就会停在首屏那次的"连续 5 天"。文案全部来自服务端
+        // （streakText 与 streakTargets[].text），前端不许自己拼一句 —— 两处各算一次，
+        // 首屏和 10 秒后迟早各说各话。
+        row.querySelectorAll("[data-streak-text]").forEach((node) => {
+          if (account.streakText) {
+            node.textContent = account.streakText;
+          }
+        });
+        const streakList = row.querySelector("[data-streak-list]");
+        if (streakList && Array.isArray(account.streakTargets)) {
+          const items = account.streakTargets.map((item) => {
+            const li = document.createElement("li");
+            li.className =
+              "streak-item" +
+              (item.broken ? " is-broken" : item.known ? " is-ok" : " is-unknown");
+            li.dataset.streakItem = item.key || "";
+            const name = document.createElement("span");
+            name.className = "streak-name";
+            name.textContent = item.label || "";
+            const days = document.createElement("span");
+            days.className = "streak-days";
+            days.dataset.streakDays = "";
+            days.textContent = item.text || "";
+            li.append(name, days);
+            return li;
+          });
+          streakList.replaceChildren(...items);
+        }
         row.querySelectorAll("[data-account-confirmed]").forEach((node) => {
           node.textContent = account.confirmed;
         });
@@ -1784,4 +1825,64 @@ window.addEventListener("DOMContentLoaded", renderIcons);
     }
   };
   initScrollReveal();
+})();
+
+// issue #18：出口自检。只在人点按钮时联网一次 —— 发送链路里绝不额外发外网请求（那会
+// 变成每轮都要付的时间与风险，还会把"发送失败"和"自检失败"混成一团）。
+// 结果写回这张卡的 [data-proxy-check-text]，文案由服务端给（只有它知道"和上次不一样"）。
+(() => {
+  const run = async (button) => {
+    const uid = button.dataset.proxyCheck || "";
+    if (!uid) {
+      return;
+    }
+    const card = button.closest("[data-proxy-editor]");
+    const out = card ? card.querySelector("[data-proxy-check-text]") : null;
+    const label = button.querySelector("span");
+    const restore = label ? label.textContent : "";
+    button.disabled = true;
+    if (label) {
+      label.textContent = "自检中…";
+    }
+    if (out) {
+      out.textContent = "正在通过这个出口访问回显服务…";
+      delete out.dataset.proxyCheckState;
+    }
+    try {
+      const body = new URLSearchParams();
+      body.set("unique_id", uid);
+      const resp = await fetch("/ops/account/proxy-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        credentials: "same-origin",
+      });
+      const data = await resp.json().catch(() => null);
+      if (out) {
+        out.textContent =
+          (data && (data.text || data.error)) || "自检没走通（响应不是预期的 JSON）";
+        out.dataset.proxyCheckState = data && data.ok ? (data.changed ? "changed" : "ok") : "fail";
+      }
+    } catch (err) {
+      if (out) {
+        out.textContent = "自检没走通：" + (err && err.message ? err.message : String(err));
+        out.dataset.proxyCheckState = "fail";
+      }
+    } finally {
+      button.disabled = false;
+      if (label) {
+        label.textContent = restore || "自检";
+      }
+    }
+  };
+
+  // 按钮由服务端渲染（账号卡随首屏一起出来），用委托就不用管轮询重画。
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest ? event.target.closest("[data-proxy-check]") : null;
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    run(button);
+  });
 })();

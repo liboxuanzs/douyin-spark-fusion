@@ -459,6 +459,20 @@ _TASK_DISABLED = {"false", "0", "no", "off", "disabled", "stop", "stopped", "停
 _TASK_ENABLED = {"true", "1", "yes", "on", "enabled", "enable", "启用", "恢复"}
 
 
+def proxy_address(raw):
+    """把 TASKS[].proxy 归一成 `scheme://...` 形态（issue #18）；空串 = 用全局。
+
+    这里只补协议、不做校验：校验与口令遮掩都在 core/proxy.py。之所以放在 utils
+    而不是 import core，是因为这一层按约定不依赖 core（core 反过来依赖它）。
+    """
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    return text
+
+
 def task_enabled(task):
     """`TASKS` 里这一项现在启用没有（`enabled` 缺键 = 启用，向后兼容）。
 
@@ -588,6 +602,10 @@ def get_userData():
                 # 停用开关（TASKS[].enabled）。缺键 = 启用，见 task_enabled()。
                 # 读取端只翻成布尔，语义（不自动派发）由 core/schedule.py 实现。
                 "enabled": task_enabled(task),
+                # 这个账号专属的出口（TASKS[].proxy，issue #18）。空串 = 用全局
+                # PROXY_ADDRESS；读取端只做归一（补协议），校验与遮掩都在
+                # core/proxy.py —— 口令绝不能顺着这里漏进日志。
+                "proxy": proxy_address(task.get("proxy")),
                 "cookies": sanitize_cookies(cookies),
                 # 目标列表保持原样（不在这里归一化）。
                 # 归一化统一由 tasks.py 在匹配前做 —— 读取端不做加工，
