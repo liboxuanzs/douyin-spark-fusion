@@ -164,8 +164,11 @@ def build_context(
     运行记录页不要 —— 那一页讲的就是"选中的那一轮"，必须所有账号共用同一条记录。
     """
     tz = config.load_timezone()
-    ledger = store.read_ledger()
-    records = [store.normalize_run(raw, tz) for raw in ledger.records]
+    # 账本读**整段尾部**（默认只留最近 20 轮给页面），因为火花连续天数必须看到更早的日子：
+    # 只拿最近 20 轮算出来的"连续 10 天"其实是"账本只给到 10 天前"—— 数字偏小，断签还可能
+    # 整个落在窗口外看不见。归一化仍然只做最近 MAX_RECORDS 条（记录页只显示这些）。
+    ledger = store.read_ledger(limit=0)
+    records = [store.normalize_run(raw, tz) for raw in ledger.records[: store.MAX_RECORDS]]
     accounts = store.account_snapshots(records)
     lock = store.read_lock()
     rate_limit = store.read_rate_limit()
@@ -199,8 +202,10 @@ def build_context(
     # 传给视图模型。账本行要用归一化前的 record.raw —— store 归一化时会丢掉 entry 的
     # conv_id（好友改名后还得靠它认出是同一个人），而连续天数正是按 conv_id 归天的。
     try:
+        # 用**未经 MAX_RECORDS 裁剪**的原始行：归一化后的 records 只有最近 20 轮，
+        # 拿它算连续天数会把"账本只给到 10 天前"当成"连续 10 天"。
         streak_view = streak_mod.compute(
-            [getattr(record, "raw", None) or {} for record in records],
+            [raw for raw in ledger.records if isinstance(raw, dict)],
             targets_by_account={
                 str(getattr(item, "unique_id", "") or ""): list(getattr(item, "targets", []) or [])
                 for item in accounts

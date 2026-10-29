@@ -2309,6 +2309,54 @@ class GhostAccountWebUITestCase(WebUITestCase):
             self.env.read_text(encoding="utf-8").count("TASKS="), 1, ".env 不该被改动"
         )
 
+class StreakLedgerDepthTests(WebUITestCase):
+    """火花连续天数必须看到整段账本，不能被"记录页只留最近 20 轮"截断。
+
+    真实事故：账本里有 29 天，页面却写「连续 10 天 · 只统计最近 10 天」—— 因为
+    build_context() 拿的是归一化后的 20 条记录（两个账号一天两轮，正好 10 天）。
+    数字偏小还只是难看；断签落在窗口外就是**看不见**，等发现时火花已经断了。
+    """
+
+    def test_streak_sees_more_than_the_runs_list(self):
+        self.utils_config.userData = [
+            {
+                "unique_id": UID,
+                "username": ACCOUNT_NAME,
+                "fingerprint": "12345",
+                "cookies": [{"name": "sessionid", "value": "x"}],
+                "targets": [FRIEND_MAIN],
+            }
+        ]
+        rows = []
+        now = datetime.now().astimezone()
+        for back in range(30):
+            when = (now - timedelta(days=29 - back)).replace(
+                hour=20, minute=40, second=0, microsecond=0
+            )
+            rows.append(self.sample_run(
+                run_id=when.strftime("%Y%m%d-204000"),
+                started=when,
+                accounts=[self.sample_account(entries=[{
+                    "target": FRIEND_MAIN,
+                    "conv_id": "conv-1",
+                    "ok": True,
+                    "level": "strong",
+                    "via": "http",
+                    "message_id": "mid-1",
+                    "dry_run": "off",
+                    "at": _iso(when),
+                }])],
+            ))
+        self.write_ledger(rows)
+
+        view = webui_app.build_context()["view"]
+        self.assertEqual(view["streak"]["window_days"], 30, "窗口该覆盖整段账本")
+        card = view["account_cards"][0]
+        self.assertEqual(card["streak"]["current"], 30)
+        self.assertEqual(card["streak"]["longest"], 30)
+        # 记录页仍然只列最近 20 轮 —— 这次修复不该顺手把页面变重
+        self.assertEqual(len(view["runs"]), store.MAX_RECORDS)
+
 
 class StaticAssetWebUITestCase(WebUITestCase):
     """静态资源的缓存：以前版本串写死，浏览器拿旧 CSS 配新 HTML = 页面错位。"""

@@ -931,6 +931,22 @@ skip_reason_text（原始码保留供排查），runs 页与 _banners() 共用�
 **验证**：`tests/test_streak.py` 19 条（连续/断签/空跑/改名/移掉的好友/窗口起点）、
 `tests/test_viewmodel.py::StreakViewTests` 8 条（卡片、横幅、轮询字段、没有数据不画）、
 `tests/test_webui.py::StreakUiContractTests` 3 条（挂点、只许 textContent、两套皮肤都有样式）。
+
+### 补记（同日，上线后肉眼复查抓到）
+
+部署完看真实账号卡：**「连续 10 天 · 只统计最近 10 天」**，而账本里明明有 29 天。
+原因不在 `core/streak.py`，在 `webui/app.py::build_context`：它拿的是
+`store.read_ledger()`（默认 `limit=store.MAX_RECORDS=20`）归一化后的 `records`，
+两个账号一天两轮，20 条正好只够 10 天 —— 算得没错，**输入的窗口被页面口径裁掉了**。
+
+更隐蔽的后果不是数字小，是**断签藏在窗口外就看不见**：连续 30 天的人如果第 20 天前断过，
+窗口内的 10 天全是成功的，面板会一路绿着说「连续 10 天」。
+
+改法：`ledger = store.read_ledger(limit=0)` 读整段尾部（4 MB 上限本来就在 `read_ledger` 里），
+归一化时仍只取 `ledger.records[: store.MAX_RECORDS]`（记录页只列 20 轮，不跟着变重），
+streak 改成吃**原始行** `[raw for raw in ledger.records if isinstance(raw, dict)]`。
+`tests/test_webui.py::StreakLedgerDepthTests` 写 30 天账本，断言 `window_days == 30`、
+卡片 `current == longest == 30`，同时钉住 `len(view["runs"]) == store.MAX_RECORDS`（页面没变重）。
 ---
 
 ## 2026-10-29 GitHub issue #17：发出去之前，先看见那句话
