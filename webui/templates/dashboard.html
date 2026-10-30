@@ -362,7 +362,7 @@
               data-disable-while-running
               {% if view.task.running %}disabled{% endif %}
               data-confirm-title="补发今天"
-              data-confirm="会撤掉「{{ account.username }}」今天的记账，让门铃在今天剩下的时间里补发一次。今天已经成功发过的话不会撤（避免一天发两遍）。确认继续吗？"
+              data-confirm="会先花十几秒确认这个账号的登录还活着，然后撤掉「{{ account.username }}」今天的记账，让门铃在今天剩下的时间里补发一次。今天已经成功发过的话不会撤（避免一天发两遍）；登录已经失效的话也不撤 —— 那会白跑一轮，请去「扫码登录」重登。确认继续吗？"
               data-confirm-accept="撤回并补发"
             >
               <i data-lucide="send"></i><span>补发今天</span>

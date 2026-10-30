@@ -1013,3 +1013,45 @@ IP 变了。这条信息在界面上**根本不存在**。
 卡片与 `/api/ops/overview` 全文不含口令）、`tests/test_webui.py::ProxyUiContractTests` 6 条、
 `tests/test_envfile.py::AccountProxyTests` 6 条、`tests/test_config_tool.py::ProxyRoundTripTests` 3 条、
 `tests/test_tasks_fusion.py::EgressPerAccountTests` 2 条（断言真的传给了 `get_browser`）。
+
+## 2026-10-30 撤账之前，先问一句"登录还活着吗"
+
+**事故**：wheat（10050yi）17:15 发送时回执 `{"decision": "KICK"}` —— 会话被别处顶掉，
+本轮止损，账本记 `error / session_kicked`。人 21:42 在面板点了「补发今天」，判定照旧
+通过（今天一条都没发出去 → 撤账），被撤成 `skipped` 墓碑。21:45 门铃重选它 →
+`[LOGIN] ⛔ 未登录` → 复检 `EXPIRED` → 账本又记一条 `login_dead`，当天彻底不再重试。
+**那次"补发"从来没登录过**：当天 `[QR]` 日志 0 条、`login-profile/10050yi` 的最后改动
+还停在 10-22。撤账这个动作本身没错，错的是**在不知道登录死没死的情况下撤**。
+
+**判定顺序**（`webui/app.py::ops_account_requeue`，三段）：
+
+1. `_requeue_after_relogin(uid, dry_run=True)` —— 零成本预检。`already-sent` /
+   `no-run-today` 在这里就顶回去，**绝不为一个必然被拒的请求起浏览器**（否则用户先等
+   十几秒，最后才被告知"不用补发"）。`core/schedule.requeue_after_relogin` 因此多了一个
+   `dry_run` 参数：同一套判定，只回答"撤得动吗"、一个字节都不写。
+2. `_probe_login_before_requeue(uid)` —— 一个浏览器上下文，`attach` + `goto(/chat)` +
+   `check_login`，约 5~15 秒。`EXPIRED` / `NOT_LOGGED_IN` → **不撤账**，303 回首页
+   `#login-panel`（JSON 走 400 + `probe`），话术直接说"现在撤了也发不出去，只会白跑一轮"。
+3. 登录着（或没结论）→ 真撤账，回执里写明 `（已确认登录有效：…）` /
+   `（登录态没能确认：…）`。
+
+**三条不肯让步的口径**：
+
+- **探不了 ≠ 登录死了**。`blocked=True`（派发器正在发它、面板正在给它扫码、缺依赖、
+  浏览器起不来）一律按"没结论"放行 —— 拿探测失败当拒绝理由，等于在浏览器坏了的时候
+  连撤账都做不了。
+- **不复用 `DouyinIM`**：它的 `__init__` 无条件跑 `_run_preflight`（等好友列表就绪，
+  `IM_READY_TIMEOUT` 级），探一句话要赔上一整轮的准备时间。探测只借用
+  `core/douyin_im.attach/check_login/CHAT_URL` 三个只读件。
+- **不抢 `RunLock`**：抢了会让同一刻到点的门铃记一条 `locked` 跳过（那是真的少发一次）。
+  互斥改用面板现成的两道闸：`_dispatcher_blocks()`（派发器正在发这个账号）与
+  `_profile_in_use(login_profile_dir(uid))`（资料目录被扫码/好友读取占着）。
+
+**只读**：探测自己开上下文、自己关（`close_context`），**不写** `browser-state` 快照、
+不碰 `.env`、不碰账本 —— 一个"看一眼"的动作没有资格改变任何持久状态。
+
+**验证**：`tests/test_login_probe.py` 13 条（三态、UNKNOWN 重试、账号不存在、无凭据不起
+浏览器、浏览器失败=blocked 非 dead、导航报错仍出结论、上下文关而外部浏览器不关、不写快照、
+指纹与出口透传）、`tests/test_schedule.py::RequeueAfterReloginTests` 新增 2 条（dry_run 不落盘、
+预检与真跑同 verdict）、`tests/test_webui.py::RequeueRouteTests` 新增 5 条（EXPIRED 拒、
+NOT_LOGGED_IN 拒、blocked 放行、already-sent 不探测、页面提交 303 带 flash 回登录面板）。

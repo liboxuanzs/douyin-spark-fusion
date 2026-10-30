@@ -5256,6 +5256,17 @@ class RequeueRouteTests(unittest.TestCase):
         self._log_patcher = mock.patch.object(webui_app, "_log")
         self._log_patcher.start()
 
+        # 2026-10-30 起撤账前会真起一个浏览器去探登录态。单元测试里不能真起
+        # Chromium（慢、要显示环境、还会去连抖音），所以默认打桩成"登录着"，
+        # 需要别的结论的用例自己改这个桩的返回值。
+        self._probe_patcher = mock.patch.object(
+            webui_app, "_probe_login_before_requeue",
+            return_value={"state": "LOGGED_IN", "detail": "页面已登录（测试桩）",
+                          "blocked": False, "elapsed": 0.2},
+        )
+        self.probe = self._probe_patcher.start()
+        self.addCleanup(self._probe_patcher.stop)
+
         from core import schedule
         self.schedule = schedule
         state = schedule.load_state(self.schedule_file)
@@ -5312,6 +5323,65 @@ class RequeueRouteTests(unittest.TestCase):
         response = self._post(TestClient(webui_app.create_app()))
         self.assertEqual(response.status_code, 401)
         self.assertFalse(self._clear_for_retry(), "没登录时根本不该动到记账")
+
+    # -- 2026-10-30 起：撤账之前先探一次登录态 ---------------------------------
+
+    def test_登录已失效就不撤账并把人引到扫码(self) -> None:
+        """那天真正的错法：撤了账才发现登录早死了 —— 白跑一轮、账本多一条 login_dead。"""
+        self.probe.return_value = {"state": "EXPIRED", "detail": "有 sessionid 但判未登录",
+                                   "blocked": False, "elapsed": 6.1}
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 400, response.text)
+        error = response.json()["error"]
+        self.assertIn("先不撤账", error)
+        self.assertIn("扫码登录", error)
+        self.assertIn("有 sessionid 但判未登录", error, "要把探测读到的原话转给用户")
+        self.assertEqual(response.json()["state"], "EXPIRED")
+        self.assertFalse(self._clear_for_retry(), "登录已经死了，撤账只会让它白跑一轮")
+        self.probe.assert_called_once_with(UID)
+
+    def test_从没登录过的账号也拒绝(self) -> None:
+        self.probe.return_value = {"state": "NOT_LOGGED_IN", "detail": "没有登录",
+                                   "blocked": False, "elapsed": 4.0}
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("先不撤账", response.json()["error"])
+        self.assertFalse(self._clear_for_retry())
+
+    def test_探测没结论时照旧撤账(self) -> None:
+        """`blocked=True` = 探不了（派发器正忙、浏览器起不来），**不是**登录死了。"""
+        self.probe.return_value = {"state": "UNKNOWN", "detail": "派发器正在跑这个账号",
+                                   "blocked": True, "elapsed": 0.0}
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertIn("登录态没能确认", response.json()["message"])
+        self.assertTrue(self._clear_for_retry(), "探不了不能把人卡住")
+
+    def test_今天已经发过就不去探登录态(self) -> None:
+        """预检能顶回去的拒绝，不该先花十几秒起浏览器。"""
+        state = self.schedule.load_state(self.schedule_file)
+        self.schedule.mark_sent(state, UID, when=self.schedule.now(),
+                                status=self.schedule.STATUS_OK, note="test")
+        self.schedule.save_state(state, self.schedule_file)
+        response = self._post(self._client())
+        self.assertEqual(response.status_code, 400, response.text)
+        self.probe.assert_not_called()
+
+    def test_页面点补发被拒时带着提示回登录面板(self) -> None:
+        """面板上是表单提交：拒绝要 303 回去 + 一条 flash，不能给一屏 JSON。"""
+        self.probe.return_value = {"state": "EXPIRED", "detail": "登录已失效",
+                                   "blocked": False, "elapsed": 5.5}
+        client = self._client()
+        response = client.post("/ops/account/requeue", data={"unique_id": UID},
+                               headers={"Accept": "text/html"},
+                               follow_redirects=False)
+        self.assertEqual(response.status_code, 303, response.text)
+        location = response.headers["location"]
+        self.assertTrue(location.startswith("/?"), location)
+        self.assertIn("warn=", location, location)
+        self.assertTrue(location.endswith("#login-panel"), location)
+        self.assertFalse(self._clear_for_retry())
 
 class StartSlotTests(unittest.TestCase):
     """开启窗口的占位：忙检查与"占位登记"必须在同一把锁里完成。

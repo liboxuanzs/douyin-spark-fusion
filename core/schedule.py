@@ -629,7 +629,8 @@ def retract_mark(state, unique_id, *, when=None, note=""):
     return True
 
 
-def requeue_after_relogin(unique_id, *, when=None, state=None, runs=None):
+def requeue_after_relogin(unique_id, *, when=None, state=None, runs=None,
+                           dry_run=False):
     """登录成功之后，把"今天已经办过"的记账撤掉 —— **前提是今天一条都没发出去**。
 
     ★ 为什么这件事只能有一份实现：当天掉登录之后重新登录的入口有**两条**，
@@ -649,6 +650,10 @@ def requeue_after_relogin(unique_id, *, when=None, state=None, runs=None):
     `state` / `runs` 只是给测试注入用的；不传就现读（账本 + 状态文件**两个都看**：
     收尾时先写状态、后追加账本，中间被打断就成了"状态里有今天、账本里没有"，
     只看账本会误判成 `no-run-today` 而既不撤账也不补发）。
+
+    `dry_run` 只回答"撤得动吗"、不碰任何文件（`saved` 恒为 False）：面板用它先把
+    拒绝的话说完，再决定要不要花十几秒去探登录态 —— 否则用户点一下，先等十秒起
+    浏览器，最后才被告知"今天已经成功发过"，纯属白等（2026-10-30）。
 
     返回 `{"requeued": bool, "saved": bool, "reason": str}`。任何异常都翻成 `reason`，
     绝不往外抛 —— 调用它的是"登录刚成功"的那一刻，补发判断失败不能让登录本身失败。
@@ -704,6 +709,12 @@ def requeue_after_relogin(unique_id, *, when=None, state=None, runs=None):
         return {"requeued": False, "saved": False, "reason": "already-sent"}
     if not seen_today:
         return {"requeued": False, "saved": False, "reason": "no-run-today"}
+    if dry_run:
+        # 走到这里说明"今天跑过、但一条都没成功"：只要今天这条记录还在，retract_mark
+        # 就撤得动；记录不见了（刚被别处撤过）才是 no-mark。不读也不写状态文件。
+        ok = isinstance(mark, dict)
+        return {"requeued": ok, "saved": False,
+                "reason": "" if ok else "no-mark", "dry_run": True}
     try:
         # 这里是**跨进程**改状态文件：不能整体覆盖。sender 可能正跑着这一轮，
         # 它手里那份快照是几分钟前读的，收尾时会合并写一遍 —— 所以撤账要写成

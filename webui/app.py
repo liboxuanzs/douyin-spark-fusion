@@ -1492,18 +1492,77 @@ def login_view() -> Dict[str, Any]:
     }
 
 
-def _requeue_after_relogin(unique_id: str) -> Dict[str, Any]:
+def _requeue_after_relogin(unique_id: str, *, dry_run: bool = False) -> Dict[str, Any]:
     """重新登录成功后，把"今天已经办过"的记账撤掉 —— **前提是今天一条都没发出去**。
 
     判定逻辑已经搬到 `core/schedule.py::requeue_after_relogin`：这是**两条**登录路径
     （面板扫码 + configTool）共用的同一件事，写在面板里就注定只会有一半生效
     （2026-10-18 issue #12）。这里只负责把它翻成面板的调用口径，不再自己判一遍。
+
+    `dry_run=True` 只问"撤得动吗"、不改文件（见那里的注释）。
     """
     try:
         from core import schedule
     except Exception as exc:  # noqa: BLE001 —— 补发判断失败不能让扫码登录本身失败
         return {"requeued": False, "saved": False, "reason": f"import-failed: {type(exc).__name__}"}
-    return dict(schedule.requeue_after_relogin(unique_id))
+    return dict(schedule.requeue_after_relogin(unique_id, dry_run=dry_run))
+
+
+def _probe_login_before_requeue(unique_id: str) -> Dict[str, Any]:
+    """撤账之前先探一次登录态（2026-10-30 wheat 事故）。
+
+    那天 21:42 面板上的「补发」把记账撤了，21:45 门铃开浏览器才发现登录早已失效 ——
+    白跑一轮、账本多一条 `login_dead`，人还在等补发。**撤账前先问一句**才治本：
+    `EXPIRED` / `NOT_LOGGED_IN` 就不撤，直接把人引到「扫码登录」。
+
+    两个前置拦截（都属于"这个账号现在不能开浏览器"）：
+    * 派发器正在跑它（同一个账号不能开两只浏览器）；
+    * 面板正在给它扫码登录 / 读好友列表（同一个资料目录不能开两个 Chromium）。
+
+    返回 `{"state", "detail", "blocked", "elapsed"}`；`blocked=True` 表示**没探成**，
+    调用方只能当"没结论"处理 —— 探不了不等于登录死了。
+    """
+    uid = str(unique_id or "").strip()
+    if not uid:
+        return {"state": "UNKNOWN", "detail": "没有账号", "blocked": True, "elapsed": 0.0}
+    busy = _dispatcher_blocks(uid) or _profile_in_use(login_profile_dir(uid))
+    if busy:
+        return {"state": "UNKNOWN", "detail": busy, "blocked": True, "elapsed": 0.0}
+    try:
+        from core import login_probe
+    except Exception as exc:  # noqa: BLE001 —— 缺依赖也不能让"补发"整条路由 500
+        return {"state": "UNKNOWN",
+                "detail": f"探测模块不可用（{type(exc).__name__}: {exc}）",
+                "blocked": True, "elapsed": 0.0}
+    try:
+        return dict(login_probe.probe(uid))
+    except Exception as exc:  # noqa: BLE001 —— 同上：探测失败不能变成路由失败
+        return {"state": "UNKNOWN",
+                "detail": f"探测出错（{type(exc).__name__}: {exc}）",
+                "blocked": True, "elapsed": 0.0}
+
+
+#: 「补发」被拒绝时给用户的原话（判定结果在 `core/schedule.requeue_after_relogin`）。
+REQUEUE_REFUSALS = {
+    "already-sent": "今天已经成功发过这个账号了，不撤账、不补发（避免一天发两遍）。",
+    "no-run-today": "今天还没有跑过这个账号，门铃本来就会发它，不需要补发。",
+    "no-mark": "今天没有可撤回的记账（可能刚刚已经被撤过）。",
+}
+
+
+def _requeue_deny(request: Request, message: str, *, as_html: bool,
+                  anchor: str = "", payload: Optional[Dict[str, Any]] = None) -> Response:
+    """「补发」被拒绝时的统一出口：HTML 给一条 flash，JSON 给 400 + 原话 + 判定结果。
+
+    被拒绝就是 400：调它的脚本/curl 要看得出"这一下没生效"，不能像成功那样只给
+    一个 200（同一条路线上的 `/ops/account/remove` 也是这个口径）。
+    """
+    level = "error" if message.startswith("补发失败") else "warn"
+    if as_html:
+        return redirect_with(request, path="/", anchor=anchor, **{level: message})
+    body: Dict[str, Any] = {"ok": False, "error": message}
+    body.update(payload or {})
+    return JSONResponse(body, status_code=400)
 
 
 def start_login_session(
@@ -2912,6 +2971,12 @@ def create_app() -> FastAPI:
 
         安全性靠判定本身：**今天已经成功发过的账号会被拒绝**（`already-sent`），
         所以这个按钮造不出"一天发两遍"。
+
+        ★ 2026-10-30 起，撤账之前**先探一次登录态**（`core/login_probe.py`）：那天
+        21:42 点了这个按钮、记账被撤，21:45 门铃开浏览器才发现登录早已被踢 ——
+        白跑一轮、账本多一条 `login_dead`，人还在等补发。现在登录已死就**不撤账**，
+        直接把话说完并把人引到「扫码登录」；探不出来（浏览器起不来、派发器正忙）
+        只当"没结论"，照旧撤 —— 探不了不等于登录死了，不能因此把人卡住。
         """
         as_html = wants_html(request)
         if current_user(request) is None:
@@ -2923,28 +2988,41 @@ def create_app() -> FastAPI:
                 return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
             return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
 
+        # ① 先做不花钱的判定（dry_run 不碰文件）：今天已经发过 / 今天没跑过这两种
+        #    根本不该起浏览器 —— 否则用户点一下，先等十几秒，最后才被告知"不用补发"。
+        precheck = _requeue_after_relogin(unique_id, dry_run=True)
+        reason = str(precheck.get("reason") or "")
+        if not precheck.get("requeued"):
+            message = REQUEUE_REFUSALS.get(reason) or f"补发失败：{reason or '未知原因'}"
+            return _requeue_deny(request, message, as_html=as_html, payload=precheck)
+
+        # ② 撤得动 → 先问一句"登录还活着吗"（一个浏览器上下文，约 5~15 秒）
+        probe = _probe_login_before_requeue(unique_id)
+        state = str(probe.get("state") or "UNKNOWN")
+        if state in ("EXPIRED", "NOT_LOGGED_IN"):
+            detail = str(probe.get("detail") or state)
+            _log(f"补发被拒：账号 {unique_id} 的登录态 = {state}（{detail}），不撤账")
+            message = (f"先不撤账：{detail}。现在撤了也发不出去，只会白跑一轮 —— "
+                       "到「扫码登录」重新登录它，登录成功会自动补发今天。")
+            return _requeue_deny(request, message, as_html=as_html,
+                                 anchor="login-panel", payload=probe)
+
+        # ③ 登录着（或没探出结论）→ 真的撤账
         result = _requeue_after_relogin(unique_id)
         reason = str(result.get("reason") or "")
         if result.get("requeued"):
             message = ("已撤回今天的记账 —— 下一次门铃（≤5 分钟）会补发；"
                        "想马上发就点「立即运行」。")
+            if state == "LOGGED_IN":
+                message += f"（已确认登录有效：{probe.get('detail') or '页面已登录'}）"
+            else:
+                message += f"（登录态没能确认：{probe.get('detail') or state}）"
+            _log(f"补发：账号 {unique_id} 的记账已撤回（登录态 = {state}）")
             if as_html:
                 return redirect_with(request, path="/", warn=message)
-            return JSONResponse({"ok": True, "message": message, **result})
-        if reason == "already-sent":
-            message = "今天已经成功发过这个账号了，不撤账、不补发（避免一天发两遍）。"
-        elif reason == "no-run-today":
-            message = "今天还没有跑过这个账号，门铃本来就会发它，不需要补发。"
-        elif reason == "no-mark":
-            message = "今天没有可撤回的记账（可能刚刚已经被撤过）。"
-        else:
-            message = f"补发失败：{reason or '未知原因'}"
-        # 被拒绝就是 400：调它的脚本/curl 要看得出"这一下没生效"，
-        # 不能像成功那样只给一个 200（同一条路线上的 /ops/account/remove 也是这个口径）。
-        if as_html:
-            level = "error" if message.startswith("补发失败") else "warn"
-            return redirect_with(request, path="/", **{level: message})
-        return JSONResponse({"ok": False, "error": message, **result}, status_code=400)
+            return JSONResponse({"ok": True, "message": message, "probe": probe, **result})
+        message = REQUEUE_REFUSALS.get(reason) or f"补发失败：{reason or '未知原因'}"
+        return _requeue_deny(request, message, as_html=as_html, payload=result)
 
     @app.post("/ops/config/save")
     async def ops_config_save(request: Request) -> Response:

@@ -1172,6 +1172,48 @@ class RequeueAfterReloginTests(_StateCase):
         self.assertFalse(out["requeued"])
         self.assertEqual(out["reason"], "no-uid")
 
+    # -- dry_run：面板先问一句"撤得掉吗"，再决定要不要花十几秒去探登录态 ------
+
+    def test_dry_run_says_yes_without_touching_the_mark(self):
+        """`dry_run=True` 只回答"撤得掉吗"，磁盘上的记账一个字节都不能动。
+
+        面板上的「补发」现在是"先预检 → 探登录态 → 真撤账"：预检要零成本地把
+        already-sent / no-run-today 顶回去，不能让用户先等十几秒才被告知不用补发。
+        """
+        self._mark_today(schedule.STATUS_ERROR)
+        self._write_ledger([])
+        with open(self.path, "rb") as handle:
+            before = handle.read()
+
+        out = schedule.requeue_after_relogin(self.UID, dry_run=True)
+
+        self.assertTrue(out["requeued"], out)
+        self.assertFalse(out["saved"], "dry_run 不该写盘，更不该说写过了")
+        self.assertTrue(out["dry_run"], out)
+        with open(self.path, "rb") as handle:
+            self.assertEqual(handle.read(), before, "预检动了记账文件")
+        self.assertEqual(self._mark_of_today()["status"], schedule.STATUS_ERROR)
+
+    def test_dry_run_gives_the_same_verdict_as_a_real_run(self):
+        """预检与真撤账必须同一套判定，否则就是"预检说能撤、真撤不让"。"""
+        cases = [
+            (schedule.STATUS_OK, [], False, "already-sent"),
+            (schedule.STATUS_ERROR, [self._run(sent_ok=3)], False, "already-sent"),
+            (None, [], False, "no-run-today"),
+            (schedule.STATUS_ERROR, [], True, ""),
+        ]
+        for status, ledger, expected, reason in cases:
+            with self.subTest(status=status, reason=reason):
+                state = schedule.load_state(self.path)
+                state["accounts"].pop(self.UID, None)
+                schedule.save_state(state, self.path)
+                self._write_ledger(ledger)
+                if status is not None:
+                    self._mark_today(status)
+                out = schedule.requeue_after_relogin(self.UID, dry_run=True)
+                self.assertIs(bool(out["requeued"]), expected, out)
+                self.assertEqual(out["reason"], reason, out)
+
 
 class StateLockTests(_StateCase):
     """锁坏了也不能把记账带崩 —— `save_state` 的"不抛"契约在锁这一层同样成立。
