@@ -1094,3 +1094,29 @@ NOT_LOGGED_IN 拒、blocked 放行、already-sent 不探测、页面提交 303 �
 
 **回滚**：改回一个判据即可 —— `_stall_verdict` 里删掉 `has_qr`/确认话术两档，剩 `now - last_qr_at > 90 → reload`。
 
+## 2026-10-30 复检：二次验证那一屏，看门狗不许碰
+
+**缘起**：上一条修完之后，用户追问「风控账号扫码后要输验证码的二级界面还正常吗」。
+
+**链路复检（都在，没被上一轮改动碰坏）**：
+
+1. 扫码循环里 `_detect_code_page(page)` 认出「身份验证」页 → `need_code = True` 跳出循环；
+2. `_solve_code()` 选「接收短信验证码」（`CODE_RECEIVE_TEXTS`，明确避开「发指定短信到指定号码」）→ 面板 `need_code` 亮灯；
+3. 面板 `dashboard.html` 的 `.code-box` 由 `data-login-code-wrap` 控制显隐，`app.js` 只写 `codeWrap.hidden = !session.need_code`；
+4. 用户提交 → `POST /ops/login/code` → `submit_login_code()` → `session.submit_code()`，非 `waiting_code` 状态一律回 409 带一句人话；
+5. 线程侧 `_wait_for_code()` 等码（`CODE_WAIT_SECONDS` 300s，与二维码 TTL 无关）→ `_fill_code()`（原生 setter + input 事件，React 认）→ `_submit_code()`（严格模式点按钮，找不到才回车）→ `_await_login()` 认「cookie 换了一份新的」或被服务端旁路确认；
+6. 三次不过 → `code_rejected` 终态；没等到码 → `code_timeout`。
+
+**查出的次序漏洞**：code 探测原本排在停摆看门狗**之后**。身份验证页上没有二维码，看门狗看到的只是「码没了」——
+`_stall_verdict` 在 25 秒（`QR_GONE_REOPEN_SECONDS`）后判 `reopen` 去点一次「登录」（验证页上可能正好有「登录」提交按钮），
+180 秒后判 `reload` 把整页重开，用户正在填的那一屏验证码当场作废；连续处置 3 次还认不出来就 `qr_stalled` 直接放弃。
+修复前是「90 秒必 reload」，所以这**不是**上一轮引入的回归，但同属「看门狗误杀」，一并堵掉。
+
+**改法**：把 `(self._scanned or now - last_qr_at > CODE_DETECT_SECONDS) and self._detect_code_page(page)` 这一块
+从循环尾搬到 `_stall_verdict` 之前 —— 认出验证码页就立刻交棒，页面一个字节都不动；认不出时行为与原来完全一致。
+
+**验证**：`tests/test_qr_login.py` 103 条 OK（新增 `test_code_page_is_recognised_before_the_stall_watchdog`，
+用源码次序钉住「探测 < 判决」）；线上 `POST /ops/login/code` 无会话时回 409 + 人话，`GET /` 的 `.code-box` 默认带 `hidden`。
+
+**回滚**：把这块搬回 `page.wait_for_timeout(POLL_INTERVAL_MS)` 之前即可，其余不动。
+

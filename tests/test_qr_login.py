@@ -893,6 +893,21 @@ class CodeVerifyTests(unittest.TestCase):
         self.assertIn("and not self._scanned", source,
                       "扫上码之后别再让停摆看门狗把验证码页重开掉")
 
+    def test_code_page_is_recognised_before_the_stall_watchdog(self):
+        """身份验证页必须比停摆看门狗先被认出来。
+
+        真现场（2026-10-30 复检二次验证那条路时发现的次序漏洞）：风控账号扫完码，
+        抖音把二维码换成「身份验证」那一屏。看门狗此时看到的只是「码没了」——25 秒后
+        去点「登录」、180 秒后整页重载，用户正填着的验证码页就被撕掉。
+        把探测挪到判决之前：认出验证码页就立刻交棒，页面一个字节都不动。
+        """
+        source = pathlib.Path(qr_login.__file__).read_text(encoding="utf-8")
+        loop = source.split("# ③ 等扫码")[1].split("# ③.5")[0]
+        self.assertIn("self._detect_code_page(page)", loop)
+        self.assertLess(loop.index("self._detect_code_page(page)"),
+                        loop.index("_stall_verdict("),
+                        "验证码页要在停摆看门狗之前认出来")
+
     def test_main_loop_never_confirms_login_on_the_qr_page(self):
         """扫码循环里只能用**旁路**确认登录态。
 

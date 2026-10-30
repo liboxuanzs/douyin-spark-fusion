@@ -802,7 +802,7 @@ class QrLoginSession(threading.Thread):
             qr_gone_at = 0.0            # 码从页面上消失的时刻（0 = 码还在）
             recoveries = 0
             last_diag = 0.0             # 上一次打诊断日志的时刻
-            need_code = False           # 探测到「身份验证」页就置位（见循环尾）
+            need_code = False           # 探测到「身份验证」页就置位（见循环中段）
             while time.time() < deadline:
                 if self._cancel.is_set():
                     return self._cancel_now("已取消")
@@ -855,6 +855,14 @@ class QrLoginSession(threading.Thread):
                             logger.info("[QR] 旁路确认：服务端认了这份登录态，去收尾")
                             break
                         logger.info("[QR] 浏览器里有登录 cookie，但服务端还没认 —— 继续等扫码")
+                # 风控账号扫完码之后，抖音可能甩出一道「身份验证」（要短信验证码）。
+                # ★ 这一条必须排在停摆看门狗**前面**：身份验证页上没有二维码，看门狗
+                #   会把它当成「码消失了」，25 秒后去点「登录」、180 秒后整页重载 ——
+                #   用户正在填的那一屏验证码就被撕掉了。认出它、立刻交棒，页面不动。
+                if (self._scanned or time.time() - last_qr_at > CODE_DETECT_SECONDS) \
+                        and self._detect_code_page(page):
+                    need_code = True
+                    break
                 # ---- 停摆看门狗 --------------------------------------------------
                 # 判据统一交给 _stall_verdict：码没换 ≠ 页面死了。三档：
                 #   wait   —— 有确认类话术 / 已扫过 / 还在正常范围内
@@ -925,12 +933,6 @@ class QrLoginSession(threading.Thread):
                     else:
                         logger.warning("[QR] 自愈后仍没拿到二维码，继续等下一轮")
                     continue
-                # 扫完码之后抖音可能甩出一道「身份验证」（风控账号）。探测到就
-                # 跳出扫码循环，交给 `_solve_code` 去收短信验证码。
-                if (self._scanned or time.time() - last_qr_at > CODE_DETECT_SECONDS) \
-                        and self._detect_code_page(page):
-                    need_code = True
-                    break
                 page.wait_for_timeout(POLL_INTERVAL_MS)
             else:
                 self._set(STATE_ERROR,
