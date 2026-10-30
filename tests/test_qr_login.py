@@ -230,6 +230,121 @@ class ConstantsTests(unittest.TestCase):
                 self.assertIn(name, params)
 
 
+class StallVerdictTests(unittest.TestCase):
+    """看门狗判据：二维码没换新，到底该不该动页面。
+
+    钉的是 2026-10-30 的真事故 —— 用户扫上码、手机上还没点确认时，码本来就不换；
+    旧判据 90 秒就整页重载，把那张正在确认的码换掉，用户点的那一下落到一张没有
+    页面在轮询的旧码上，面板从此一直「等待扫码」直到 300 秒超时。
+    """
+
+    def test_confirming_wording_stops_everything(self):
+        confirming = qr_login.CONFIRMING_HINTS[0]
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 0.0, has_qr=True, hint=confirming),
+            "wait", "手机上正在确认，页面一动不动是正常的")
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 0.0, has_qr=False, qr_gone_at=0.1,
+                                    hint=confirming),
+            "wait", "连码都没了、话术又在那儿，更不能动")
+
+    def test_already_scanned_never_triggers_anything(self):
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 0.0, has_qr=True, scanned=True),
+            "wait")
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 0.0, has_qr=False, qr_gone_at=0.0,
+                                    scanned=True),
+            "wait")
+
+    def test_a_qr_that_just_left_the_page_is_not_touched(self):
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 900.0, has_qr=False, qr_gone_at=997.0),
+            "wait", "码刚消失，先当它在等手机确认")
+
+    def test_a_qr_that_stays_gone_reopens_the_panel_instead_of_reloading(self):
+        verdict = qr_login._stall_verdict(
+            1000.0, 700.0, has_qr=False,
+            qr_gone_at=1000.0 - qr_login.QR_GONE_REOPEN_SECONDS - 1)
+        self.assertEqual(verdict, "reopen", "消失久了先点一次登录，不撕页面")
+
+    def test_a_qr_that_never_repaints_waits_for_the_long_window(self):
+        span = qr_login.QR_STALL_RELOAD_SECONDS
+        self.assertEqual(qr_login._stall_verdict(1000.0, 1000.0 - span + 10,
+                                                 has_qr=True), "wait")
+        self.assertEqual(qr_login._stall_verdict(1000.0, 1000.0 - span - 1,
+                                                 has_qr=True), "reload")
+
+    def test_the_old_ninety_second_trigger_is_gone(self):
+        """90 秒这个数只剩「开始怀疑」的意思，不许再触发重载。"""
+        self.assertLess(qr_login.QR_STALL_SECONDS, qr_login.QR_STALL_RELOAD_SECONDS)
+        self.assertEqual(
+            qr_login._stall_verdict(1000.0, 1000.0 - qr_login.QR_STALL_SECONDS - 1,
+                                    has_qr=True),
+            "wait")
+
+    def test_unknown_page_state_is_not_taken_for_a_missing_qr(self):
+        """读不到页面（evaluate 抛了 / 正在跳转）时 has_qr 是 None，不能当没码。"""
+        self.assertEqual(qr_login._stall_verdict(1000.0, 990.0, has_qr=None), "wait")
+        self.assertEqual(qr_login._stall_verdict(1000.0, 1000.0 - 999,
+                                                 has_qr=None), "reload")
+
+
+class PanelProbeTests(unittest.TestCase):
+    """把页面读数翻译成面板话术 / 结构化的探测结果。"""
+
+    class _Page:
+        def __init__(self, got):
+            self.got = got
+
+        def evaluate(self, _script):
+            if isinstance(self.got, Exception):
+                raise self.got
+            return self.got
+
+    class _Session:
+        """只带这两个方法的壳：真 QrLoginSession 会去开浏览器，这里只想验翻译。"""
+
+        _panel_probe = qr_login.QrLoginSession._panel_probe
+        _panel_hint = qr_login.QrLoginSession._panel_hint
+
+    def test_hint_comes_from_the_marker_table(self):
+        hint = qr_login._hint_of(["请在手机上确认"])
+        self.assertEqual(hint, "已扫码，请在手机上点一下确认")
+
+    def test_the_first_matching_mark_wins(self):
+        self.assertEqual(qr_login._hint_of(["二维码已失效", "已扫码"]),
+                         "二维码已过期，正在刷新")
+
+    def test_no_mark_means_no_hint(self):
+        self.assertEqual(qr_login._hint_of([]), "")
+        self.assertEqual(qr_login._hint_of(None), "")
+
+    def test_probe_reads_the_rich_shape(self):
+        page = self._Page({"marks": ["已扫码"], "hasQr": False,
+                           "url": "https://www.douyin.com/jingxuan"})
+        got = self._Session()._panel_probe(page)
+        self.assertEqual(got["has_qr"], False)
+        self.assertEqual(got["hint"], "已扫码，请在手机上点一下确认")
+        self.assertIn("douyin.com", got["url"])
+
+    def test_probe_still_accepts_the_old_array_shape(self):
+        page = self._Page(["请在手机上确认"])
+        got = self._Session()._panel_probe(page)
+        self.assertIsNone(got["has_qr"], "老脚本不报 hasQr，只能算不知道")
+        self.assertEqual(got["hint"], "已扫码，请在手机上点一下确认")
+
+    def test_probe_failure_is_unknown_not_missing(self):
+        page = self._Page(RuntimeError("page is navigating"))
+        got = self._Session()._panel_probe(page)
+        self.assertIsNone(got["has_qr"])
+        self.assertEqual(got["hint"], "")
+
+    def test_panel_hint_stays_a_thin_wrapper(self):
+        page = self._Page({"marks": ["二维码已失效"], "hasQr": True, "url": ""})
+        self.assertEqual(self._Session()._panel_hint(page), "二维码已过期，正在刷新")
+
+
 class AdoptProfileTests(unittest.TestCase):
     """登录成功后把资料目录搬到账号名下（`default/` → `<抖音号>/`）。
 

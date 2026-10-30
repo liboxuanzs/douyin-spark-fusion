@@ -1055,3 +1055,42 @@ IP 变了。这条信息在界面上**根本不存在**。
 指纹与出口透传）、`tests/test_schedule.py::RequeueAfterReloginTests` 新增 2 条（dry_run 不落盘、
 预检与真跑同 verdict）、`tests/test_webui.py::RequeueRouteTests` 新增 5 条（EXPIRED 拒、
 NOT_LOGGED_IN 拒、blocked 放行、already-sent 不探测、页面提交 303 带 flash 回登录面板）。
+
+## 2026-10-30 二维码没换新，不等于页面死了
+
+**现场**（用户当晚的报障）：22:10:40 面板出新码 → 用户扫上、手机上还没点 →
+22:12:10 日志 `[QR] 二维码 90 秒没刷新（自愈 1/3）：qr_seq=1 url=https://www.douyin.com/jingxuan evaluate 失败 0 次，重新载入登录页` →
+整页重载换出第 2 张码 → 用户随后在手机上点的「登录」落在一张已经没有页面轮询的旧码上 →
+面板一直「等待扫码」，直到 300 秒 `error=timeout`。全程没有一条 `手机上已确认扫码`。
+
+**根因**：停摆看门狗的判据只有一个 ——「`qr_seq` 90 秒没自增就当页面死了」。可用户扫上码之后，
+抖音正是把二维码停在那儿等手机确认，码本来就不换。看门狗于是亲手撕掉了用户正在确认的那一次登录。
+旁证：那一轮 `evaluate 失败 0 次`，页面完全健康。
+
+**改法**：判据拆成三档，抽成纯函数 `core/qr_login.py::_stall_verdict(now, last_qr_at, *, has_qr, qr_gone_at, hint, scanned) -> "wait"|"reopen"|"reload"`：
+
+| 现场 | 结论 | 动作 |
+|---|---|---|
+| `hint` 是确认类话术，或本会话已判过扫码 | `wait` | 什么都不做 |
+| 码从页面上消失了（`has_qr is False`）且不到 25 秒 | `wait` | 当成"正在等手机确认" |
+| 同上，超过 `QR_GONE_REOPEN_SECONDS`（25s） | `reopen` | 只点一次「登录」唤出面板，**不动页面上下文** |
+| 码还在页面上、只是不换新，超过 `QR_STALL_RELOAD_SECONDS`（180s） | `reload` | 整页重开 |
+| 消失了 180 秒还没回来 | `reload` | 兜底重开 |
+
+配套：
+
+- `QR_STALL_SECONDS`（90s）**降级为"开始怀疑"**，只驱动诊断日志与面板提示，不再直接触发重载。
+- `has_qr` 是**三值**：`True`/`False` 是页面给的答案，`None` 表示这次没读到（正在跳转 / `evaluate` 抛了）。
+  `None` 绝不能当"没码"用 —— 那样页面一卡顿就会被误判成"用户扫上了"，一路等到 TTL。
+- `PANEL_HINT_JS` 现在递归遍历 `shadowRoot.textContent`：`innerText` 不穿透 Web Component，
+  抖音一旦把登录弹窗挪进 shadow DOM，「已扫码」这类话术就读不到，读不到就谈不上放过。
+  同时返回 `{marks, hasQr, url}`，由 `_panel_probe()` 解析（老脚本只回数组，仍兼容）。
+- 每 `QR_DIAG_INTERVAL_SECONDS`（15s）打一条 `[QR] 扫码轮询：qr_seq=… has_qr=… 距上次换码…s url=… marks=…`。
+- 换码时面板文案改成「二维码已换新（第 N 张），请扫这一张」—— 换码必须让人看见。
+
+**验证**：`tests/test_qr_login.py::StallVerdictTests`（确认话术放过、已扫过放过、刚消失不动、消失久了只 reopen、
+不换新要等够 180s、90s 不再触发、`has_qr=None` 不算没码）+ `PanelProbeTests`（话术翻译优先级、富结构/老数组/
+抛异常三种读数、`_panel_hint` 仍是薄包装）。
+
+**回滚**：改回一个判据即可 —— `_stall_verdict` 里删掉 `has_qr`/确认话术两档，剩 `now - last_qr_at > 90 → reload`。
+

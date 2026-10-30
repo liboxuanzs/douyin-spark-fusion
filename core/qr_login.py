@@ -72,12 +72,29 @@ PROFILE_GRACE_SECONDS = 6.0
 # 都落在这个目录下，只给本用户。单元文件是 User=root，同机其它用户没有任何理由读得到它。
 PROFILE_DIR_MODE = 0o700
 
-# 二维码多久没换新就判定「页面停摆」（秒）。
+# 二维码多久没换新就「开始怀疑页面停摆了」（秒）。
 # 抖音的登录码实测 ~60 秒就过期换新（qr_seq 每 60 秒左右自增一次，换出来的
-# 短链每次都不一样）。所以只要超过这个时间一格没动，就说明页面的取码轮询
-# 已经不转了 —— 面板上那张码早就作废，用户扫它不可能有反应，
-# 继续干等到 TTL 只会白等一场。
+# 短链每次都不一样）。
+#
+# ★ 但「码没换新」**不足以**判定页面死了：用户扫上码之后，抖音会把二维码
+#   停在原地等手机上点确认 —— 那段时间码本来就不换。2026-10-30 的真现场：
+#   22:10:40 出码，用户扫上、手机上还在犹豫，22:12:10 看门狗把这 90 秒当成
+#   停摆，整页重开换了一张新码；用户随后在手机上点的那一下，落在一张已经
+#   没有页面在轮询的旧码上 —— 面板从此一直「等待扫码」，直到 300 秒报超时。
+#   所以这个值只用来**开始怀疑**（面板提示 + 诊断日志），不再直接触发重载。
 QR_STALL_SECONDS = 90.0
+
+#: 真的要整页重载，得「码一动不动」这么久（秒）。给用户留够扫码 + 手机上确认
+#: 的时间：宁可让一次真卡死的页面多等几十秒，也不能把用户正在确认的码换掉。
+QR_STALL_RELOAD_SECONDS = 180.0
+
+#: 二维码从页面上消失多久之后，回去点一次「登录」把面板重新叫出来（秒）。
+#: 码消失通常是页面已经走进「已扫码，等确认」—— 那种情况**绝不能**整页重载，
+#: 只能等；等久了还没动静，才去点一下登录按钮（这个动作不动页面上下文）。
+QR_GONE_REOPEN_SECONDS = 25.0
+
+#: 扫码轮询的诊断日志间隔（秒）。出问题时这几行就是唯一的现场证据。
+QR_DIAG_INTERVAL_SECONDS = 15.0
 
 # 一次会话里最多自愈几次（重新载入登录页、重新取码）。自愈成功就重新计时。
 QR_MAX_RECOVERIES = 3
@@ -150,6 +167,55 @@ SCAN_MARKERS = (
 # 又刷不出新码，恰恰就是页面停摆的现场，看门狗这时候最该出手。
 # （所以判据不能简单写成「hint 非空」，那会把这个案子整个漏掉。）
 CONFIRMING_HINTS = ("已扫码，请在手机上点一下确认",)
+
+
+def _hint_of(marks) -> str:
+    """把页面上抓到的关键词（乱序）翻成一句给用户看的话。"""
+    for marker in marks or []:
+        for key, text in SCAN_MARKERS:
+            if key in marker:
+                return text
+    return ""
+
+
+def _stall_verdict(now, last_qr_at, *, has_qr, qr_gone_at=0.0, hint="",
+                   scanned=False) -> str:
+    """看门狗判据：二维码没换新，到底该不该动页面？返回 wait / reopen / reload。
+
+    为什么要分三档（2026-10-30 的真现场）：用户扫上码之后，抖音会把二维码
+    停在那儿等手机上点确认 —— 这时**码本来就不换**。旧判据只看「90 秒没换码」，
+    于是把这张正在确认的码整页刷掉，用户随后点的那一下落到一张没人轮询的旧码上，
+    面板就永远「等待扫码」。所以：
+
+    - 页面上有「已扫码」这类话术，或这个会话已经判过扫码 → wait，绝不打扰。
+    - 码从页面上消失（扫上码的典型形态）→ 先只 wait；久到 QR_GONE_REOPEN_SECONDS
+      才回退去点一次登录（reopen，不动页面上下文，不撕掉正在确认的那一次）。
+    - 码还在页面上、只是不换新 → 到 QR_STALL_RELOAD_SECONDS 才判定页面真死了，
+      整页重开（reload）。QR_STALL_SECONDS 只用来让日志开始怀疑，不动页面。
+    - 已经消失到 QR_STALL_RELOAD_SECONDS 还没回来 → 也认了，reload 兜底。
+
+    has_qr 是三值：True/False 是页面给的答案，None 表示这次没读到（页面正在
+    跳转或 evaluate 抛了）。None 一律按「不知道」处理，不能当成「码没了」。
+    """
+    if scanned:
+        return "wait"
+    if hint and hint in CONFIRMING_HINTS:
+        return "wait"
+    gone = False
+    if has_qr is False and qr_gone_at:
+        age = now - qr_gone_at
+        if age >= QR_STALL_RELOAD_SECONDS:
+            return "reload"
+        if age >= QR_GONE_REOPEN_SECONDS:
+            return "reopen"
+        gone = True
+    if gone or has_qr is False:
+        # 码不在页面上、又还没到要动手的程度：继续等。宁可多等，也不要把
+        # 用户正在确认的那一屏刷掉。
+        return "wait"
+    if now - last_qr_at >= QR_STALL_RELOAD_SECONDS:
+        return "reload"
+    return "wait"
 
 # ---- 二次验证页的判据与按钮文案 ----
 # 「这是验证码页」最硬的信号：可见输入框自己的 placeholder / name / id 里带这些词。
@@ -232,10 +298,34 @@ CLICK_LOGIN_JS = r"""
 PANEL_HINT_JS = r"""
 () => {
   const el = document.querySelector('#login-panel-new') || document.body;
-  const t = ((el && el.innerText) || '').replace(/\s+/g, '');
+  let t = ((el && el.innerText) || '').replace(/\s+/g, '');
+  // innerText 不穿透 shadow DOM。抖音一旦把登录弹窗挪进 Web Component，
+  // 「已扫码，请在手机上确认」这类话术就读不到 —— 读不到就谈不上「放过」，
+  // 看门狗会把用户正在确认的那张码整页刷掉（2026-10-30 的事故就是这么来的）。
+  // 这里把整页 shadow root 的文本补进去。
+  const deep = (root) => {
+    let out = '';
+    const walk = (node) => {
+      if (!node) return;
+      const sr = node.shadowRoot;
+      if (sr) {
+        out += ' ' + ((sr.textContent || '').replace(/\s+/g, ''));
+        walk(sr);
+      }
+      const kids = node.children || [];
+      for (const kid of kids) walk(kid);
+    };
+    walk(root);
+    return out;
+  };
+  t += deep(document.body);
   const marks = ['请在手机上确认', '扫描成功', '已扫码', '确认登录',
                  '二维码已失效', '二维码失效', '点击刷新'];
-  return marks.filter((m) => t.indexOf(m) >= 0);
+  return {
+    marks: marks.filter((m) => t.indexOf(m) >= 0),
+    hasQr: !!document.querySelector('img[src^="data:image/png;base64,"]'),
+    url: String(location.href || '').slice(0, 200),
+  };
 }
 """
 
@@ -698,18 +788,47 @@ class QrLoginSession(threading.Thread):
             # 把新码画出来，我们跟着读数就行；但页面卡住（JS 死了 / 反复跳转 /
             # evaluate 一直抛）时 qr_seq 会永远停在 1，面板端着一张死码不动 ——
             # 用户扫它自然没反应，然后干等到 TTL 报「你还没扫上」，完全误导。
-            # 所以只要超过 QR_STALL_SECONDS 没读到新码，就整页重开、重新取码。
+            #
+            # ★ 但「码不换」不等于「页面死了」：用户扫上码、手机上还没点时，抖音
+            #   就是把码停在那里的。整页重载会把这张正在被确认的码换掉，用户随后
+            #   点的那一下就没有页面对接了（2026-10-30 的真现场）。所以判据拆成
+            #   三档，统一交给 _stall_verdict：
+            #     ① 码从页面上消失             → 大概率在等手机确认：只等，绝不重载
+            #     ② 码还在、只是没换新         → 先提示 + 打诊断，
+            #                                    够 QR_STALL_RELOAD_SECONDS 才真的重开
+            #     ③ 页面上有确认类话术 / 已扫过 → 一律不重载
             deadline = time.time() + self.ttl
             last_qr_at = time.time()
+            qr_gone_at = 0.0            # 码从页面上消失的时刻（0 = 码还在）
             recoveries = 0
+            last_diag = 0.0             # 上一次打诊断日志的时刻
             need_code = False           # 探测到「身份验证」页就置位（见循环尾）
             while time.time() < deadline:
                 if self._cancel.is_set():
                     return self._cancel_now("已取消")
                 png = self._read_qr(page)
-                if self._set_qr(png):
+                moved = self._set_qr(png)
+                if moved:
                     last_qr_at = time.time()
-                hint = self._panel_hint(page)
+                    qr_gone_at = 0.0
+                    if self._qr_seq > 1 and not self._scanned:
+                        # 码换了一张，用户手里那张就作废了 —— 必须让他看见，
+                        # 否则他扫的是旧码，页面这边却在等新码，谁都等不到谁。
+                        self._set(STATE_WAITING_SCAN,
+                                  f"二维码已换新（第 {self._qr_seq} 张），请扫这一张")
+                info = self._panel_probe(page)
+                hint = info["hint"]
+                # 码从页面上消失（读不出图 / 面板里没图了）时记一笔时刻。
+                # 扫上码之后抖音会把二维码换成一屏「请在手机上确认」，这时候
+                # 码没了才是**正常**的，绝不能当成页面停摆去重载。
+                if info["has_qr"] is False and self._qr_seq > 0:
+                    if not qr_gone_at:
+                        qr_gone_at = time.time()
+                        logger.info(
+                            f"[QR] 页面上的二维码不见了（qr_seq={self._qr_seq}）："
+                            "多半是扫上码、正在等手机确认，先不重载")
+                elif info["has_qr"] is True:
+                    qr_gone_at = 0.0
                 if hint:
                     with self._lock:
                         self._hint = hint
@@ -736,32 +855,73 @@ class QrLoginSession(threading.Thread):
                             logger.info("[QR] 旁路确认：服务端认了这份登录态，去收尾")
                             break
                         logger.info("[QR] 浏览器里有登录 cookie，但服务端还没认 —— 继续等扫码")
-                # hint 是「已扫码」那类话术时说明手机上正在确认，重开页面会打断用户。
-                # 注意判据只看这一类，不看「二维码已过期」—— 那个恰恰是停摆现场。
-                if (hint not in CONFIRMING_HINTS and not self._scanned
-                        and time.time() - last_qr_at > QR_STALL_SECONDS):
+                # ---- 停摆看门狗 --------------------------------------------------
+                # 判据统一交给 _stall_verdict：码没换 ≠ 页面死了。三档：
+                #   wait   —— 有确认类话术 / 已扫过 / 还在正常范围内
+                #   reopen —— 码从页面上消失了很久：去点一次登录让它重新出码
+                #   reload —— 码还在却一直不换新，或者消失太久：整页重开
+                now = time.time()
+                if now - last_diag >= QR_DIAG_INTERVAL_SECONDS:
+                    last_diag = now
+                    logger.info(
+                        f"[QR] 扫码轮询：qr_seq={self._qr_seq} has_qr={info['has_qr']} "
+                        f"距上次换码 {now - last_qr_at:.0f}s "
+                        f"url={(info['url'] or page.url)[:100]} marks={info['marks']}")
+                verdict = _stall_verdict(
+                    now, last_qr_at,
+                    has_qr=info["has_qr"],
+                    qr_gone_at=qr_gone_at,
+                    hint=hint,
+                    scanned=self._scanned)
+                if verdict != "wait":
                     if recoveries >= QR_MAX_RECOVERIES:
                         logger.error(
-                            f"[QR] 二维码连续 {int(QR_STALL_SECONDS)} 秒没刷新，"
-                            f"自愈 {recoveries} 次仍未恢复（qr_seq={self._qr_seq}，"
-                            f"evaluate 失败 {self._qr_read_fails} 次"
+                            f"[QR] 二维码停摆，处置 {recoveries} 次仍未恢复"
+                            f"（verdict={verdict} qr_seq={self._qr_seq} "
+                            f"has_qr={info['has_qr']} evaluate 失败 {self._qr_read_fails} 次"
                             + (f"，最后一次：{self._qr_read_error}" if self._qr_read_error else "")
                             + "）")
                         self._set(STATE_ERROR,
-                                  "二维码卡住了：页面停止刷新，这张码已经作废。"
+                                  "二维码卡住了：页面不再刷新，这张码已经作废。"
                                   "请点「开始扫码登录」重来一次",
                                   error="qr_stalled")
                         return
                     recoveries += 1
+                    if verdict == "reopen":
+                        # 码从页面上消失了：多半是扫上码之后抖音把二维码换成了
+                        # 「请在手机上确认」那一屏。这种情况**不能整页重载** ——
+                        # 重载会把用户正在确认的那一次登录整个撕掉。只去点一次
+                        # 「登录」，让面板自己把码重新画出来。
+                        gone = now - (qr_gone_at or now)
+                        logger.warning(
+                            f"[QR] 二维码从页面消失 {gone:.0f} 秒没回来"
+                            f"（处置 {recoveries}/{QR_MAX_RECOVERIES}）："
+                            f"qr_seq={self._qr_seq} url={page.url[:100]}，去点一次登录")
+                        self._set(STATE_WAITING_QR, "二维码不见了，正在重新唤出登录面板…")
+                        try:
+                            page.evaluate(CLICK_LOGIN_JS)
+                        except Exception as exc:                     # noqa: BLE001
+                            logger.warning("[QR] 重新唤出登录面板失败"
+                                           f"（{type(exc).__name__}）")
+                        fresh = self._wait_for_qr(page, timeout_seconds=12.0)
+                        if fresh and self._set_qr(fresh):
+                            last_qr_at = time.time()
+                            qr_gone_at = 0.0
+                            self._set(STATE_WAITING_SCAN,
+                                      "请用抖音 App 扫描二维码，并在手机上确认登录")
+                        else:
+                            logger.warning("[QR] 点了登录仍没出码，继续等下一轮")
+                        continue
                     logger.warning(
-                        f"[QR] 二维码 {int(QR_STALL_SECONDS)} 秒没刷新"
-                        f"（自愈 {recoveries}/{QR_MAX_RECOVERIES}）：qr_seq={self._qr_seq} "
-                        f"url={page.url[:100]} evaluate 失败 {self._qr_read_fails} 次，"
-                        "重新载入登录页")
+                        f"[QR] 二维码 {now - last_qr_at:.0f} 秒没换新"
+                        f"（重开 {recoveries}/{QR_MAX_RECOVERIES}）：qr_seq={self._qr_seq} "
+                        f"has_qr={info['has_qr']} url={page.url[:100]} "
+                        f"evaluate 失败 {self._qr_read_fails} 次，重新载入登录页")
                     self._set(STATE_WAITING_QR, "二维码卡住了，正在自动重开登录页…")
                     if self._reopen_login_page(page, deadline):
                         last_qr_at = time.time()
-                        self._set(STATE_WAITING_SCAN, "请用抖音 App 扫描二维码，并在手机上确认登录")
+                        qr_gone_at = 0.0
+                        self._set(STATE_WAITING_SCAN, "二维码已换新，请扫这张（上一张作废了）")
                     else:
                         logger.warning("[QR] 自愈后仍没拿到二维码，继续等下一轮")
                     continue
@@ -1002,16 +1162,36 @@ class QrLoginSession(threading.Thread):
             return False
         return self._set_qr(fresh)
 
-    def _panel_hint(self, page) -> str:
+    def _panel_probe(self, page) -> dict:
+        """读一次登录面板，返回 {hint, marks, has_qr, url}。
+
+        has_qr 是三值：True 页面上确实有二维码图，False 确实没有，None 这次
+        没读到（evaluate 抛了 / 页面正在跳转）。判「码是不是消失了」必须能
+        区分「没有」和「不知道」—— 把 None 当成「没有」，看门狗会在页面卡死
+        时误以为用户扫上码了，一路干等到 TTL。
+        """
         try:
-            marks = page.evaluate(PANEL_HINT_JS)
+            got = page.evaluate(PANEL_HINT_JS)
         except Exception:                                        # noqa: BLE001
-            return ""
-        for marker in marks or []:
-            for key, text in SCAN_MARKERS:
-                if key in marker:
-                    return text
-        return ""
+            return {"hint": "", "marks": [], "has_qr": None, "url": ""}
+        if isinstance(got, dict):
+            marks = [str(m) for m in (got.get("marks") or [])]
+            raw_qr = got.get("hasQr")
+            url = str(got.get("url") or "")
+        else:
+            # 老版本脚本只回 marks 数组：兼容一下，别炸（has_qr 未知）
+            marks = [str(m) for m in (got or [])]
+            raw_qr = None
+            url = ""
+        return {
+            "hint": _hint_of(marks),
+            "marks": marks,
+            "has_qr": None if raw_qr is None else bool(raw_qr),
+            "url": url,
+        }
+
+    def _panel_hint(self, page) -> str:
+        return self._panel_probe(page)["hint"]
 
     def _verify(self, page, mon, *, conclusive_exit: bool = False) -> bool:
         """把聊天页打开，用主程序那套门禁判定登录态（服务端说了算）。
