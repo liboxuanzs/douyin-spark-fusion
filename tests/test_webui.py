@@ -2041,6 +2041,73 @@ class QrLoginWebUITestCase(WebUITestCase):
         self.assertTrue(_FakeQrSession.instances[-1].cancelled)
         self.assertEqual(status["session"]["state"], "cancelled")
 
+    def test_取消扫码会等会话真的停下再回页面(self) -> None:
+        """取消后立刻 303 回首页时，那一页是服务端渲染的「会话还开着」版本。
+
+        真机现场（2026-10-30）：点取消 → 回首页 → 账号卡的「重新登录」是灰的，
+        要等 10 秒一次的总览轮询才恢复，用户以为按钮坏了。现在取消请求会等会话
+        真的停下（浏览器关掉）再跳转。
+        """
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.install_fake_qr_login()
+
+        class SlowTeardown(_FakeQrSession):
+            deadline = float("inf")  # 取消之前一直是活的
+
+            def cancel(self) -> None:
+                type(self).deadline = time.time() + 0.25
+
+            def snapshot(self) -> Dict[str, Any]:
+                data = dict(super().snapshot())
+                still = time.time() < type(self).deadline
+                data["active"] = still
+                data["state"] = "waiting_scan" if still else "cancelled"
+                return data
+
+        sys.modules["core.qr_login"].start_session = (
+            lambda profile_dir, **kwargs: SlowTeardown(profile_dir, **kwargs)
+        )
+        with self.make_client() as client:
+            self.login(client)
+            client.post("/ops/login/start", headers={"Accept": "application/json"})
+            started = time.time()
+            cancelled = client.post("/ops/login/cancel", headers={"Accept": "application/json"})
+            elapsed = time.time() - started
+            page = client.get("/")
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertTrue(cancelled.json()["ok"])
+        self.assertTrue(cancelled.json()["settled"])
+        self.assertGreaterEqual(elapsed, 0.2, "要等浏览器真的关掉，而不是立刻回一句 ok")
+        self.assertIn('data-login-active="0"', page.text, "回页那一刻账号卡就该是解锁态")
+        self.assertNotIn('data-login-active="1"', page.text)
+
+    def test_取消时浏览器迟迟不关也不拖死请求(self) -> None:
+        """等不到落定（浏览器卡在 goto 里）时，请求必须放走，只用一句话说清现状。"""
+        os.environ["WEBUI_PASSWORD"] = PASSWORD
+        self.install_fake_qr_login()
+
+        class StuckTeardown(_FakeQrSession):
+            def cancel(self) -> None:
+                pass  # 线程卡在关浏览器里：active 一直是 True
+
+        sys.modules["core.qr_login"].start_session = (
+            lambda profile_dir, **kwargs: StuckTeardown(profile_dir, **kwargs)
+        )
+        with mock.patch.object(webui_app, "CANCEL_SETTLE_SECONDS", 0.05):
+            with self.make_client() as client:
+                self.login(client)
+                client.post("/ops/login/start", headers={"Accept": "application/json"})
+                started = time.time()
+                cancelled = client.post(
+                    "/ops/login/cancel",
+                    headers={"Accept": "text/html"},
+                    follow_redirects=False,
+                )
+                elapsed = time.time() - started
+        self.assertEqual(cancelled.status_code, 303)
+        self.assertLess(elapsed, 2.0, "等不到也得放请求走，不能让页面一直转圈")
+        self.assertIn("还在关闭", unquote(cancelled.headers["location"]))
+
     def test_验证码送进正在等它的会话(self) -> None:
         os.environ["WEBUI_PASSWORD"] = PASSWORD
         self.install_fake_qr_login()
@@ -3637,6 +3704,17 @@ class FrontendAgreementTests(unittest.TestCase):
         self.assertIn(
             "login.active === undefined ? undefined : Boolean(login.active)", self.js
         )
+
+    def test_取消扫码后账号卡按钮不必等十秒(self) -> None:
+        """扫码面板 2 秒一轮、总览 10 秒一轮：取消之后账号卡不能只等慢的那一路。
+
+        真机现场（2026-10-30）：点取消 → 回首页 →「重新登录」灰了整整十秒
+        （服务端那一刻会话还在收尾，之后要等总览轮询才翻过来）。现在扫码轮询
+        自己也去同步一份，且同步时不许把「任务在跑」这条禁用理由丢掉。
+        """
+        self.assertIn("window.dsfSyncBusy = updateDisableWhileRunning;", self.js)
+        self.assertIn("window.dsfSyncBusy(undefined, active)", self.js)
+        self.assertIn("updateDisableWhileRunning.lastRunning", self.js)
 
     def test_运行记录页的本轮数字不会被总览轮询改写(self) -> None:
         """`data-overview-value` 是"今天总览"的挂点，前端每 10 秒往里写一次。

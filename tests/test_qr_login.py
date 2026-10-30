@@ -80,6 +80,24 @@ class SessionStateTests(unittest.TestCase):
         self.assertEqual(session.snapshot()["qr_seq"], 2, "空图不推进序号")
         self.assertEqual(session.qr_png(), b"second")
 
+    def test_a_finished_session_stops_handing_out_the_qr(self):
+        """收尾之后那张码已经没有页面在对接了，不能再让面板画出来（2026-10-30）。"""
+        session = self.make()
+        session._set_qr(b"picture")
+        session._set(qr_login.STATE_WAITING_SCAN, "等待扫码")
+        self.assertTrue(session.snapshot()["has_qr"])
+        session._set(qr_login.STATE_CANCELLED, "已取消")
+        snap = session.snapshot()
+        self.assertFalse(snap["active"])
+        self.assertFalse(snap["has_qr"], "死码不能再展示：用户扫了只会得到「二维码已过期」")
+        self.assertEqual(session.qr_png(), b"")
+
+    def test_the_qr_is_still_served_while_the_session_is_alive(self):
+        session = self.make()
+        session._set_qr(b"picture")
+        session._set(qr_login.STATE_WAITING_SCAN, "等待扫码")
+        self.assertEqual(session.qr_png(), b"picture")
+
     def test_set_qr_tells_the_watchdog_whether_the_image_moved(self):
         """`_set_qr` 的返回值就是看门狗的计时依据，不能只当副作用函数用。"""
         session = self.make()

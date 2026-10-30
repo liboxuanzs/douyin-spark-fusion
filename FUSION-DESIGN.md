@@ -1120,3 +1120,50 @@ NOT_LOGGED_IN 拒、blocked 放行、already-sent 不探测、页面提交 303 �
 
 **回滚**：把这块搬回 `page.wait_for_timeout(POLL_INTERVAL_MS)` 之前即可，其余不动。
 
+
+## 2026-10-30 取消扫码之后：一张死码，一个灰按钮
+
+**现场**（用户当晚第二次报障）：扫了码，手机那头显示「已过期」，点了取消 —— 回到首页，
+wheat 那张账号卡上的「重新登录」**变成灰的，点不动**。
+
+**复现**（服务器 headless Chromium，`max_redirects=0` 才看得见真相 —— 第一次脚本
+拿到 200，是因为 @@ctx.request@@ 默认跟了 303）：
+
+1. `POST /ops/login/start` → 303 `/?login=…`；2 秒后会话 `state=starting`、`active=true`；
+2. 首页上 wheat 的「重新登录」`disabled=true data-login-active="1"` —— 这时是对的（会话开着）；
+3. `POST /ops/login/cancel` → 303 `/?warn=已取消扫码登录`，**紧接着查会话仍是**
+   `state=starting active=true`：取消只是置了旗，线程还卡在起浏览器/关浏览器里；
+4. 取消后立刻打开的那张首页，是服务端在"会话还开着"的瞬间渲染的 → 按钮灰；
+5. 2.5 秒一跳采样：t+2.5 / 5.0 / 7.5s 都是灰的，**t+10.0s 才解锁** —— 正好一个总览轮询周期；
+6. console / pageerror 全程为空，与 JS 无关。
+
+**同时查出的第二件事**：会话结束（取消 / 失败 / 成功）之后，`snapshot()["has_qr"]` 仍是
+`true`、`qr_png()` 仍把旧图给出去 —— 面板于是继续画一张**没有任何页面在对接的死码**，
+还配一句「用抖音 App 扫这张码，然后在手机上确认」。用户照着扫，只会得到「二维码已过期」，
+然后以为扫码功能坏了。
+
+**改法**（三处，各自独立可回滚）：
+
+- `core/qr_login.py`：`has_qr = bool(self._qr_png) and self._state in ACTIVE_STATES`；
+  `qr_png()` 同样加状态闸，终态返回 `b""`。码只在会话活着时对外存在。
+- `webui/app.py`：`cancel_login_session()` 取消后等会话真的停下再回页面 ——
+  `_wait_login_settled()` 每 50ms 看一眼 `active`，上限 `CANCEL_SETTLE_SECONDS`（3s），
+  返回 `{"ok": True, "settled": bool}`。落定了就照旧「已取消扫码登录」；没落定（浏览器卡在
+  goto 里）也**不拖死请求**，改成「已取消扫码登录（浏览器还在关闭，几秒钟后「重新登录」会恢复）」。
+- `webui/static/app.js`：账号卡的禁用是两路理由（任务在跑 / 扫码会话开着）。扫码面板自己
+  2 秒轮询一次，以前只更新面板、从不碰账号卡；现在把同一份判断挂成 `window.dsfSyncBusy`，
+  面板轮询里顺带同步一次 —— 陈旧窗口从 10 秒压到 ≤2 秒。`updateDisableWhileRunning` 里加了
+  粘性 `lastRunning`：只带登录态的同步不许把「任务在跑」这条理由丢掉（否则跑任务时按钮被点亮）。
+
+**为什么是"在请求里等"而不是"前端自己刷新"**：取消后 303 回的那一页是**服务端**渲染的，前端
+拿到它时按钮已经是灰的；只靠前端补，用户会先看见灰按钮再看见它变亮 —— 那正是这次投诉的画面。
+等落定再跳，页面一打开就是对的；2 秒轮询只是兜底。
+
+**验证**：`tests/test_qr_login.py` 2 条（终态不再给码 / 活着时照给）、
+`tests/test_webui.py::QrLoginWebUITestCase` 2 条（取消要等落定、回页即解锁；卡住时不拖死请求且
+话术带「还在关闭」）、`FrontendAgreementTests` 1 条（`dsfSyncBusy` 契约 + 粘性 `lastRunning`）。
+本机 `tests.test_qr_login + tests.test_webui` 1450 条 OK（skipped=2）；服务器全量 3028 条 OK（skipped=35）。
+
+**回滚**：三处互不依赖 —— 去掉 `has_qr` 与 `qr_png` 的状态闸即恢复"永远给码"；`cancel` 直接
+返回 `{"ok": True}` 即恢复"立即跳转"；`app.js` 删掉 `window.dsfSyncBusy` 那两行即恢复
+10 秒同步。

@@ -737,13 +737,24 @@
   // 轮询照样把按钮写回 disabled —— 用户看到的就是"重新登录永远是灰的、必须刷新页面"
   // （2026-10-20 的真实缺陷）。轮询拿到状态就同步回属性，两处判断才真正同源。
   const updateDisableWhileRunning = (running, loginActive) => {
+    // 记住最近一次「任务是否在跑」：扫码那段轮询只带登录态过来、不带任务态，缺了它
+    // 就会把「运行期间不许动账号」这条禁用理由弄丢（跑任务时按钮被点亮）。
+    if (running !== undefined) updateDisableWhileRunning.lastRunning = Boolean(running);
+    const runningNow =
+      running === undefined
+        ? updateDisableWhileRunning.lastRunning === true
+        : Boolean(running);
     document.querySelectorAll("[data-disable-while-running]").forEach((button) => {
       if (loginActive !== undefined && button.hasAttribute("data-login-active")) {
         button.dataset.loginActive = loginActive ? "1" : "0";
       }
-      button.disabled = Boolean(running) || button.dataset.loginActive === "1";
+      button.disabled = runningNow || button.dataset.loginActive === "1";
     });
   };
+  updateDisableWhileRunning.lastRunning = false;
+  // 扫码面板那段轮询（2 秒一次）复用这一份判断：总览轮询 10 秒一次，取消扫码之后
+  // 账号卡上的「重新登录」要灰满整整十秒，用户会以为按钮坏了（2026-10-30）。
+  window.dsfSyncBusy = updateDisableWhileRunning;
 
   const render = (data) => {
     const summary = data.summary || {};
@@ -1133,6 +1144,9 @@ window.addEventListener("DOMContentLoaded", renderIcons);
     const active = Boolean(session.active);
     if (startBtn) startBtn.disabled = active;
     if (cancelBtn) cancelBtn.disabled = !active;
+    // 账号卡上的「重新登录」跟着扫码会话一起动：它和这块面板是同一件事，只等 10 秒
+    // 一次的总览轮询，取消之后会灰满十秒（2026-10-30 的真现场）。
+    if (typeof window.dsfSyncBusy === "function") window.dsfSyncBusy(undefined, active);
     if (timerEl) {
       timerEl.textContent = active ? `已进行 ${session.age_seconds || 0} 秒` : "";
     }

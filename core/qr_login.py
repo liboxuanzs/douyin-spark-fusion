@@ -616,7 +616,10 @@ class QrLoginSession(threading.Thread):
                 "hint": self._hint,
                 "error": self._error,
                 "qr_seq": self._qr_seq,
-                "has_qr": bool(self._qr_png),
+                # 会话一结束就别再端那张码出去：面板看到 has_qr 就会把它画出来、写一句
+                # 「用抖音 App 扫这张码，然后在手机上确认」，而这时已经没有页面在对接它了。
+                # 2026-10-30 的真现场：点了取消，面板还端着一张死码，用户又去扫了一遍。
+                "has_qr": bool(self._qr_png) and self._state in ACTIVE_STATES,
                 # 收尾期间也算 active：终态一置位门就开了的话，浏览器还占着
                 # 资料目录，后起的会话会跟它抢同一个 user-data-dir。
                 "active": self._state in ACTIVE_STATES or self._closing,
@@ -641,7 +644,14 @@ class QrLoginSession(threading.Thread):
             }
 
     def qr_png(self) -> bytes:
+        """会话活着时才把码给出去。
+
+        结束（取消 / 失败 / 成功）之后这张码已经没有任何页面在对接：再让面板把它画
+        出来，用户扫了只会得到「二维码已过期」，还以为扫码功能坏了。
+        """
         with self._lock:
+            if self._state not in ACTIVE_STATES:
+                return b""
             return self._qr_png
 
     def cancel(self) -> None:

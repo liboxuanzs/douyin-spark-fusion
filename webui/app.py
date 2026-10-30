@@ -1707,6 +1707,38 @@ def start_login_session(
     return {"ok": True, "session": session_id}
 
 
+#: 点了「取消」之后，等会话真的停下再回页面的上限（秒）。
+#:
+#: 扫码循环 700ms 一轮，正常情况下不到一秒就能看到终态；等不到多半是浏览器正卡在
+#: 一次 goto 里 —— 那就别让请求一直吊着，交给面板 2 秒一次的轮询去补。
+CANCEL_SETTLE_SECONDS = 3.0
+#: 等待期间的重试间隔（秒）。
+CANCEL_SETTLE_STEP_SECONDS = 0.05
+
+
+def _wait_login_settled(session: Any, *, seconds: Optional[float] = None) -> bool:
+    """等这个扫码会话真的停下（`active` 变 False），最多 `seconds` 秒。
+
+    ★ 为什么要在请求里等：取消之后立刻 303 回首页，而那一页的状态是**服务端**渲染
+      的。会话还在收尾（`active` 仍是 True）时，渲染出来的账号卡把「重新登录」画成
+      灰按钮 —— 用户看到的就是「我明明点了取消，怎么反而点不了重新登录」
+      （2026-10-30 的真现场）。等落定再跳，页面一打开就是对的；等不到也不拖死请求，
+      前端 2 秒一次的轮询会补上。
+    """
+    if seconds is None:
+        seconds = CANCEL_SETTLE_SECONDS
+    deadline = time.time() + max(0.0, float(seconds))
+    while True:
+        try:
+            if not session.snapshot().get("active"):
+                return True
+        except Exception:                                # noqa: BLE001 - 问不出来就不再等
+            return False
+        if time.time() >= deadline:
+            return False
+        time.sleep(CANCEL_SETTLE_STEP_SECONDS)
+
+
 def cancel_login_session() -> Dict[str, Any]:
     session_id, session = _latest_login_slot()
     if session is None or not session.snapshot().get("active"):
@@ -1717,9 +1749,11 @@ def cancel_login_session() -> Dict[str, Any]:
         _drop_claim(_LOGIN_SESSIONS, _LOGIN_LOCK, session_id)
         session.cancel()
         _log(f"取消扫码登录（浏览器还在启动，占位已撤）：session={session_id}")
-        return {"ok": True}
+        return {"ok": True, "settled": True}
     session.cancel()
-    return {"ok": True}
+    settled = _wait_login_settled(session)
+    _log(f"取消扫码登录：session={session_id} 状态已落定={settled}")
+    return {"ok": True, "settled": settled}
 
 
 def submit_login_code(code: str) -> Dict[str, Any]:
@@ -2504,7 +2538,14 @@ def create_app() -> FastAPI:
         result = cancel_login_session()
         if as_html:
             if result.get("ok"):
-                return redirect_with(request, path="/", warn="已取消扫码登录")
+                if result.get("settled", True):
+                    return redirect_with(request, path="/", warn="已取消扫码登录")
+                # 没等到的极少数情况：把话说明白，别让用户对着灰按钮猜自己在等什么。
+                return redirect_with(
+                    request,
+                    path="/",
+                    warn="已取消扫码登录（浏览器还在关闭，几秒钟后「重新登录」会恢复）",
+                )
             return redirect_with(request, path="/", error=result.get("error") or "取消失败")
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
