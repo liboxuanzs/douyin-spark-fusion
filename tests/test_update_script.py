@@ -78,6 +78,27 @@ class UpdateScriptTests(unittest.TestCase):
         offenders = [ln for ln in _code_lines(_read()) if "`" in ln]
         self.assertEqual(offenders, [])
 
+    def test_units_table_covers_every_shipped_unit(self):
+        """UNITS 表必须列全 deploy/ 下的单元 —— 漏一个就等于永远不重装它。
+
+        2026-10-31 复查发现：doctor.service / doctor.timer 是在 update.sh 写完之后
+        才加的，UNITS 里一直没有它们。后果不是报错，而是「改了单元、升级了、线上还
+        是旧版」：daemon-reload 只重读文件，不会把仓库里的新副本装进 /etc。
+        这条测试扫描目录与表对账，以后加单元忘了登记会立刻红。
+        """
+        import re
+
+        match = re.search(r"^UNITS=\(\n(.*?)^\)", _read(), re.S | re.M)
+        self.assertIsNotNone(match, "找不到 UNITS=( ... ) 定义")
+        listed = set(re.findall(r'"([^"]+)"', match.group(1)))
+        deploy_dir = os.path.join(ROOT, "deploy")
+        shipped = {
+            name for name in os.listdir(deploy_dir)
+            if name.endswith(".service") or name.endswith(".timer")
+        }
+        self.assertEqual(sorted(shipped - listed), [], "这些单元没登记进 UNITS，升级时不会被重装")
+        self.assertEqual(sorted(listed - shipped), [], "UNITS 里写了 deploy/ 下不存在的单元")
+
     @unittest.skipUnless(shutil.which("bash"), "没有 bash，跳过语法检查")
     def test_syntax_is_valid(self):
         done = subprocess.run([shutil.which("bash"), "-n", SCRIPT], capture_output=True, text=True)

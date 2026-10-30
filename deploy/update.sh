@@ -31,10 +31,16 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/douyin-spark-fusion}"
 DEFAULT_APP_DIR="/opt/douyin-spark-fusion"
 WEB_UNIT="douyin-spark-fusion-web.service"
+#: deploy/ 下所有会被装进 /etc/systemd/system 的单元。漏一个的后果很隐蔽：
+#: 那个单元后来改了（比如给 doctor.service 加了新的只读检查），update.sh 永远
+#: 不会重装它，线上跑的还是安装那天的旧副本 —— 而 daemon-reload 也不会报错。
+#: tests/test_update_script.py 里有一条测试扫描 deploy/*.service|*.timer 与这张表对账。
 UNITS=(
   "douyin-spark-fusion-web.service"
   "douyin-spark-fusion-daily.service"
   "douyin-spark-fusion-daily.timer"
+  "douyin-spark-fusion-doctor.service"
+  "douyin-spark-fusion-doctor.timer"
 )
 
 CHECK_ONLY=0
