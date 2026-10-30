@@ -98,6 +98,29 @@ class SessionStateTests(unittest.TestCase):
         session._set(qr_login.STATE_WAITING_SCAN, "等待扫码")
         self.assertEqual(session.qr_png(), b"picture")
 
+    def test_a_finished_session_stops_handing_out_the_verification_shot(self):
+        """二次验证截图与二维码同一条规矩：会话结束就不再端旧现场（2026-10-31）。"""
+        session = self.make()
+        session._shot_png = b"shot"
+        session._set(qr_login.STATE_WAITING_CODE, "需要短信验证码")
+        self.assertTrue(session.snapshot()["has_shot"])
+        self.assertEqual(session.shot_png(), b"shot", "会话活着时该给就给")
+        session._set(qr_login.STATE_ERROR, "登录失败", error="code_timeout")
+        self.assertFalse(session.snapshot()["has_shot"],
+                         "收尾之后那张验证页已经没有页面在产出了")
+        self.assertEqual(session.shot_png(), b"")
+
+    def test_entering_a_terminal_state_drops_every_artifact(self):
+        """终态 = 附产品一起作废：留一个字节在内存里就够晚到的标签页画出来。"""
+        session = self.make()
+        session._set_qr(b"picture")
+        session._shot_png = b"shot"
+        session._code_value = "123456"
+        session._set(qr_login.STATE_CANCELLED, "已取消")
+        self.assertEqual(session._qr_png, b"")
+        self.assertEqual(session._shot_png, b"")
+        self.assertEqual(session._code_value, "")
+
     def test_set_qr_tells_the_watchdog_whether_the_image_moved(self):
         """`_set_qr` 的返回值就是看门狗的计时依据，不能只当副作用函数用。"""
         session = self.make()

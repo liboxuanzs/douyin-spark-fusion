@@ -146,6 +146,138 @@ class AccountCountTests(unittest.TestCase):
         self.assertIn("坏配置", info["error"])
 
 
+ACTIVE_WEB = {
+    "unit": doctor.WEB_UNIT, "known": True, "load": "loaded",
+    "active": "active", "enabled": "enabled",
+    "started": "Fri 2026-10-24 00:08:59 CST", "restarts": "0", "error": "",
+}
+
+
+def _acct_row(minutes_ago, uid="100", status="error", error="", run_id=""):
+    """一条只关心结论的记录：某个账号这一轮是 ok 还是 error。"""
+    row = _row(minutes_ago, run_id=run_id or "r%d" % minutes_ago)
+    row["accounts"] = [{"unique_id": uid, "status": status, "error": error}]
+    return row
+
+
+class ServiceStateTests(unittest.TestCase):
+    def test_parses_the_properties_it_asks_for(self):
+        seen = {}
+
+        def runner(unit, props):
+            seen["unit"] = unit
+            seen["props"] = list(props)
+            return (
+                "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+                "ExecMainStartTimestamp=Fri 2026-10-24 00:08:59 CST\nNRestarts=0\n"
+            )
+
+        info = doctor.service_state(runner=runner)
+        self.assertTrue(info["known"])
+        self.assertEqual(info["active"], "active")
+        self.assertEqual(info["enabled"], "enabled")
+        self.assertEqual(info["restarts"], "0")
+        self.assertEqual(seen["unit"], doctor.WEB_UNIT)
+        self.assertIn("ActiveState", seen["props"])
+
+    def test_not_found_unit_is_unknown_not_dead(self):
+        info = doctor.service_state(runner=lambda unit, props: "LoadState=not-found\n")
+        self.assertFalse(info["known"])
+        self.assertIn("没有这个单元", info["error"])
+
+    def test_missing_systemctl_is_unknown(self):
+        info = doctor.service_state(runner=lambda unit, props: None)
+        self.assertFalse(info["known"])
+        self.assertIn("systemctl", info["error"])
+
+
+class WebCheckTests(unittest.TestCase):
+    def _report(self, **kwargs):
+        base = dict(now_dt=NOW, rows=[_row(10)], users=_users(True),
+                    timer=ACTIVE_TIMER, web=ACTIVE_WEB)
+        base.update(kwargs)
+        return doctor.diagnose(**base)
+
+    def test_a_dead_panel_is_an_error_even_though_the_timer_is_fine(self):
+        dead = dict(ACTIVE_WEB, active="failed", restarts="3")
+        report = self._report(web=dead)
+        self.assertEqual(report["level"], "error")
+        self.assertIn("web_down", report["problems"])
+        self.assertTrue(any("面板服务" in line and "用不了" in line
+                            for line in report["lines"]))
+
+    def test_an_unknown_panel_state_is_not_a_problem(self):
+        unknown = {"unit": doctor.WEB_UNIT, "known": False, "error": "systemctl 不可用"}
+        report = self._report(web=unknown)
+        self.assertEqual(report["problems"], [])
+        self.assertEqual(report["level"], "ok")
+        self.assertTrue(any("读不到状态" in line for line in report["lines"]))
+
+    def test_enabled_but_will_not_come_back_is_a_warning(self):
+        off = dict(ACTIVE_WEB, enabled="disabled")
+        report = self._report(web=off)
+        self.assertIn("web_disabled", report["problems"])
+        self.assertEqual(report["level"], "warning")
+
+    def test_without_the_injection_the_check_is_simply_absent(self):
+        report = self._report(web=None)
+        self.assertFalse(any("面板服务" in line for line in report["lines"]))
+        self.assertEqual(report["problems"], [])
+        self.assertEqual(report["web"], {})
+
+
+class AccountOutcomeTests(unittest.TestCase):
+    USERS = [{"unique_id": "100", "username": "wheat", "enabled": True}]
+
+    def _report(self, rows, users=None):
+        return doctor.diagnose(now_dt=NOW, rows=rows,
+                               users=self.USERS if users is None else users,
+                               timer=ACTIVE_TIMER, web=ACTIVE_WEB)
+
+    def test_a_single_bad_run_is_a_warning_that_names_the_account(self):
+        report = self._report([_acct_row(10, status="error", error="login_dead: 登录已失效")])
+        self.assertIn("account_failing", report["problems"])
+        self.assertEqual(report["level"], "warning")
+        body = "\n".join(report["lines"])
+        self.assertIn("wheat（100）", body)
+        self.assertIn("login_dead", body)
+
+    def test_three_bad_runs_in_a_row_is_an_error(self):
+        rows = [_acct_row(10, status="error"), _acct_row(20, status="error"),
+                _acct_row(30, status="error")]
+        report = self._report(rows)
+        self.assertIn("account_dead", report["problems"])
+        self.assertEqual(report["level"], "error")
+        self.assertIn("最近 3 轮一条都没发出去", "\n".join(report["lines"]))
+
+    def test_an_ok_run_resets_the_streak(self):
+        rows = [_acct_row(10, status="error"), _acct_row(20, status="ok"),
+                _acct_row(30, status="error"), _acct_row(40, status="error")]
+        report = self._report(rows)
+        self.assertNotIn("account_dead", report["problems"])
+        self.assertIn("account_failing", report["problems"])
+
+    def test_a_healthy_account_says_nothing_at_all(self):
+        report = self._report([_acct_row(10, status="ok")])
+        self.assertEqual(report["problems"], [])
+        self.assertFalse(any("账号 wheat" in line for line in report["lines"]))
+
+    def test_a_stopped_account_is_never_reported(self):
+        users = [{"unique_id": "100", "username": "wheat", "enabled": False}]
+        rows = [_acct_row(10, status="error"), _acct_row(20, status="error"),
+                _acct_row(30, status="error")]
+        report = self._report(rows, users=users)
+        self.assertEqual(report["problems"], [])
+        self.assertEqual(report["level"], "ok")
+
+    def test_an_account_outside_the_config_is_ignored(self):
+        report = self._report([_acct_row(10, uid="999", status="error")])
+        self.assertEqual(report["problems"], [])
+        self.assertEqual([item["unique_id"] for item in report["outcomes"]["accounts"]],
+                         ["100"])
+        self.assertFalse(report["outcomes"]["accounts"][0]["seen"])
+
+
 class DiagnoseTests(unittest.TestCase):
     def _report(self, **kwargs):
         base = dict(now_dt=NOW, rows=[_row(120)], users=_users(True), timer=ACTIVE_TIMER)

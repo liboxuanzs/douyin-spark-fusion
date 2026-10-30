@@ -639,7 +639,10 @@ class QrLoginSession(threading.Thread):
                 "code_max_attempts": CODE_MAX_ATTEMPTS,
                 "code_error": self._code_error,
                 "code_options": list(self._code_options),
-                "has_shot": bool(self._shot_png),
+                # 与 has_qr 同一条规矩：会话一结束就别再端二次验证那张截图出去。
+                # 面板看到 has_shot 就会把图摆上去、留一句"这就是抖音在问的页面"，
+                # 而那时已经没有任何页面在对它做什么了（2026-10-30 的死码同款）。
+                "has_shot": bool(self._shot_png) and self._state in ACTIVE_STATES,
                 "shot_seq": self._shot_seq,
             }
 
@@ -661,8 +664,16 @@ class QrLoginSession(threading.Thread):
         self.message = "已请求取消，正在关闭浏览器…"
 
     def shot_png(self) -> bytes:
-        """验证码页的截图（面板显示用；没有就返回 b""）。"""
+        """验证码页的截图（面板显示用；没有就返回 b""）。
+
+        和 qr_png() 同一条规矩：会话结束（取消 / 失败 / 成功）之后这张图已经没有
+        任何页面在产出新内容，再让面板显示它就是在给一张"看起来还活着"的旧现场。
+        终态置位与清空产物在 _set() 里一起做，这里再判一次状态是为了兜住
+        "先读到终态、再取图"的竞态。
+        """
         with self._lock:
+            if self._state not in ACTIVE_STATES:
+                return b""
             return self._shot_png
 
     def submit_code(self, code: str) -> dict:
@@ -696,6 +707,14 @@ class QrLoginSession(threading.Thread):
             self._updated_at = time.time()
             if state not in ACTIVE_STATES:
                 self._finished_at = self._updated_at
+                # 终态 = 会话的附产品一起作废。二维码与二次验证截图都只对"活着的
+                # 会话"有意义：留着它们，任何一个晚到的标签页都能把一张死码 / 一张
+                # 旧验证页重新画出来（2026-10-30 的真现场）。
+                # 清在这里而不是每个出口各写一遍，是为了让"终态没有产物"成为会话的
+                # 不变量，而不是十几处出口各自的自觉。
+                self._qr_png = b""
+                self._shot_png = b""
+                self._code_value = ""
 
     @property
     def message(self) -> str:
@@ -1680,6 +1699,11 @@ class QrLoginSession(threading.Thread):
                 self._message = f"会话卡住（{reason}），浏览器已被强制关闭，请重新发起"
                 self._error = reason
                 self._updated_at = time.time()
+                # 守夜线程直接写字段、不走 _set()，所以这里也得清一遍：终态没有产物
+                # 是会话级不变量，不能因为"另一条线程进的终态"就漏掉（2026-10-31）。
+                self._qr_png = b""
+                self._shot_png = b""
+                self._code_value = ""
 
     def _close(self, ctx) -> bool:
         """关浏览器。返回**是否关干净** —— 关不干净就不能去搬它的资料目录。

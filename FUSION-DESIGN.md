@@ -1167,3 +1167,74 @@ wheat 那张账号卡上的「重新登录」**变成灰的，点不动**。
 **回滚**：三处互不依赖 —— 去掉 `has_qr` 与 `qr_png` 的状态闸即恢复"永远给码"；`cancel` 直接
 返回 `{"ok": True}` 即恢复"立即跳转"；`app.js` 删掉 `window.dsfSyncBusy` 那两行即恢复
 10 秒同步。
+
+## 2026-10-31 预测性加固：终态之后不留产物，体检不许绿着坏
+
+**缘起**：用户要求"基于刚刚解决的几个问题（都是在真实实际使用中暴露出来的）做预测性修复，
+确保实际使用中不得再出现这类问题"。刚解决的三件事——扫上了码却被 90 秒看门狗撕掉、
+二次验证页被看门狗碰、取消扫码后留一张死码和一个灰按钮——表面上分属三条链路，底下是同一个病：
+
+> **会话已经结束，而它留下的东西还在对外表现"我还活着"。**
+
+所以这次不再逐个补，而是把那一族整套关掉，并顺手补上一个更危险的同族问题：体检报告本身
+也会"活着"——它每天说一切正常，而账号早已发不出去了。
+
+### 一、终态就是没有产物（`core/qr_login.py`）
+
+- `QrLoginSession._set()` 进终态（成功 / 失败 / 取消 / 超时）时，除了写 `_finished_at`，
+  现在同时清掉 `_qr_png`、`_shot_png`、`_code_value`。
+- `shot_png()` 与 `snapshot()["has_shot"]` 各加一次状态闸（`_state in ACTIVE_STATES`），
+  与 `qr_png()`、`has_qr` 完全同一条规矩。
+
+为什么两处都做：清产物让"终态没有产物"成为**会话级不变量**；状态闸兜的是"先读到终态、再取图"
+的竞态。前两次（`qr.png` 的死码、`has_qr` 的假 true）都是单点修复，各修一处、
+又各漏一处 —— 这次把规矩写在会话语义里，新加任何对外产物都应该照抄这两行。
+
+顺手覆盖了 `GET /ops/login/shot.png`：它原来直接依赖 `shot_png()`，现在同样在终态回空。
+
+### 二、体检要看"跑成了没有"，不只看"跑过没有"（`core/doctor.py`）
+
+账本顶层的真实形状里**没有总结论字段**（`run_id/started_at/finished_at/dry_run/source/schedule/skipped/limit/rate_limited/accounts`），
+结论只写在 `accounts[]` 每项的 `status` 里。于是出现过这样一段：wheat 掉登录，每天
+照跑、每天写一条 `status=error`（`login_dead: 登录已失效`），账本永远是新的、定时器
+永远 `active` —— 只看这两样的体检天天说"一切正常"，而实际上零条消息发出去。
+
+新增两项检查：
+
+- **⑤ 面板服务**（`WEB_UNIT = douyin-spark-fusion-web.service`）：面板是唯一的人机入口，
+  它挂了就没法扫码、改消息、点立即运行，而定时器还在照发。真 `failed`/`inactive` 是 ⛔
+  （`web_down`）；`UnitFileState` 不在 enabled/static 是 ⚠️（`web_disabled`，重启后不自起）；
+  **读不到状态不算故障**（不知道 ≠ 坏了，与定时器同一口径）。
+- **⑥ 逐账号结果**（`account_outcomes()`，往前看 `OUTCOME_DEPTH=5` 条）：最后一轮非 `ok`
+  就 ⚠️（`account_failing`），连着 3 轮非 `ok` 直接 ⛔（`account_dead`，点名账号、
+  最后一次时间、压缩到 100 字的原因、并提示去「扫码登录」重扫）。已停用的账号不参与（那是用户关的，
+  与"全停用不报静默"同一条原则），账本里出现配置外的 uid 也不参与。
+
+`diagnose(web=...)` 是**显式注入**：命令行 `main()` 一定传 `service_state()`，单测默认不传
+（否则 Linux 上跑全量会真的去问 systemd、多出一行把既有断言打翻）。`--json` 多出 `web` 与
+`outcomes` 两个键。
+
+### 三、看过但**故意不改**的（避免下一个人重挖）
+
+- `core/friend_scan.py::cancel()` 取消后**不置终态**：`active` 要等浏览器真关掉才放资料目录，
+  首屏仍显示"扫描中"是如实，不是残留；前端 `app.js` 的 `sawActive` 会在 `active` 变 false 时整页
+  reload，按钮自己就恢复了。
+- 扫码面板的 `app.js` 轮询早就双向同步（`has_qr` / `has_shot` / start、cancel 按钮 /
+  `window.dsfSyncBusy` 同步账号卡），失败还有 10→20→40s 退避：不是这次的洞。
+- `webui/logtail.py` 每次请求现读文件尾部，`copytruncate` 轮转安全；`RunLock` 已有 pid 存活
+  + 超时判定与 0 字节锁宽限，崩溃残留不会永久卡死。这两处都看过，不动。
+- `POST /ops/run-now` 返回 303 后首屏可能仍显示"空闲"最多 10 秒（`running` 来自 `read_lock()`）：
+  已有 flash「已开始运行」覆盖，属观感细节，不改行为。
+
+### 验证
+
+- `tests/test_qr_login.py`：终态 `shot_png()` 返回空、`has_shot` 为 false，活着时照给。
+- `tests/test_doctor.py`：`ServiceStateTests`(3)、`WebCheckTests`(4)、`AccountOutcomeTests`(6)，
+  覆盖"面板挂了但定时器正常"、"读不到状态不算问题"、"一轮失败是 ⚠️、连着三轮是 ⛔"、"ok 之后重置连败"、
+  "停用账号不报"、"配置外的 uid 不报"。
+
+### 回滚
+
+三块互不依赖：删 `_set()` 里三行清空 + 两处状态闸 → 恢复"终态仍给产物"；`diagnose` 里删掉
+⑤⑥ 两段 → 恢复四件事体检（`main()` 传的 `web` 只是被忽略，不会报错）。
+

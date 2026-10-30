@@ -169,13 +169,20 @@ cd /opt/douyin-spark-fusion
 
 ```bash
 cd /opt/douyin-spark-fusion
-.venv/bin/python main.py doctor              # 人话四行；有事退出码 1
+.venv/bin/python main.py doctor              # 人话几行；有事退出码 1
 .venv/bin/python main.py doctor --json       # 同上，机器可读
 .venv/bin/python main.py doctor --no-notify  # 只检查，不推送
 ```
 
-判据是「账本最后一条记录距今多少小时」（`NOTIFY_SILENCE_HOURS`，默认 30；0 关闭）
-+「定时器还在不在」+「账号是不是全停用」。**全停用不算故障** —— 那是你自己关的。
+一共看六件事：账本还新吗（`NOTIFY_SILENCE_HOURS`，默认 30 小时；0 关闭）、定时器还在不在、
+面板服务（`douyin-spark-fusion-web.service`）还活着吗、账号是不是全停用、以及**每个账号最近
+有没有真发出去**。**全停用不算故障** —— 那是你自己关的；面板读不到状态也不算故障（不知道 ≠
+坏了），只有它真到了 `failed` / `inactive` 才是 ⛔。
+
+最后一条补的是一个很能骗人的盲区：账号掉登录之后每天照样跑、照样写一条 `error` 记录，账本
+永远是新的、定时器永远 active —— 只看「账本新不新」的体检于是天天说一切正常，而实际上一条消息
+都没发出去。现在：最后一轮没发出去就 ⚠️ 提醒，连着三轮没发出去直接 ⛔ 算故障，并且点名是哪个
+账号、最后一次是什么错、该去「扫码登录」重扫。已停用的账号不参与判定（那是你关的）。
 `deploy/install.sh` 会装一个 `douyin-spark-fusion-doctor.timer`（每天 09:00）并自动启用；
 它只读、不发消息，所以和必须人点头的 `daily.timer` 不同。不想跑就
 `systemctl disable --now douyin-spark-fusion-doctor.timer`。

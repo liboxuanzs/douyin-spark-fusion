@@ -32,15 +32,20 @@ from core.util_time import human_duration, iso, now, parse_iso
 
 __all__ = [
     "DEFAULT_SILENCE_HOURS",
+    "OUTCOME_DEPTH",
+    "SERVICE_PROPERTIES",
     "SILENCE_KEY",
     "TIMER_UNIT",
+    "WEB_UNIT",
     "account_counts",
+    "account_outcomes",
     "diagnose",
     "format_lines",
     "last_run",
     "main",
     "maybe_notify",
     "read_ledger_rows",
+    "service_state",
     "silence_hours",
     "timer_state",
 ]
@@ -55,6 +60,11 @@ SILENCE_KEY = "NOTIFY_SILENCE_HOURS"
 #: 与 deploy/ 里的 unit 同名；改名要同步改 install.sh、docs/deploy.md。
 TIMER_UNIT = "douyin-spark-fusion-daily.timer"
 
+#: 面板服务。体检也要看它一眼：定时器在跑、账本很新，但面板挂掉的时候，用户点开
+#: 网页是打不开的 —— 而过去的体检每天照样说「一切正常」（2026-10-30 想到的盲区：
+#: 登录那一块连着修了三次，真正「坏掉却没人报」的还有面板自己）。
+WEB_UNIT = "douyin-spark-fusion-web.service"
+
 #: 体检状态（每天最多推一条通知）的位置。和账本一样按仓库根解析。
 STATE_FILE = os.path.join("logs", "doctor_state.json")
 
@@ -68,6 +78,17 @@ TIMER_PROPERTIES = (
     "LastTriggerUSec",
     "NextElapseUSecRealtime",
 )
+
+SERVICE_PROPERTIES = (
+    "LoadState",
+    "ActiveState",
+    "UnitFileState",
+    "ExecMainStartTimestamp",
+    "NRestarts",
+)
+
+#: 判断「连续失败」时往前看几条记录：3 条就够定性，5 条留出一次网页重试的余量。
+OUTCOME_DEPTH = 5
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +273,47 @@ def timer_state(unit: str = TIMER_UNIT, *,
     }
 
 
+def service_state(unit: str = WEB_UNIT, *,
+                  runner: Optional[Callable[[str, Sequence[str]], Optional[str]]] = None
+                  ) -> Dict[str, Any]:
+    """面板（web）服务的状态。跟 timer_state 一样：读不到就说不知道，别猜成坏的。
+
+    面板是整套东西唯一的人机入口：它挂了，扫码、改消息、立即运行全部用不了，
+    但定时器还在跑、账本还在长 —— 只看「账本新不新」的体检会照样说一切正常。
+    """
+    run = runner or (lambda u, p: _systemctl_show(u, p))
+    out = run(unit, SERVICE_PROPERTIES)
+    empty: Dict[str, Any] = {
+        "unit": unit, "known": False, "load": "", "active": "", "enabled": "",
+        "started": "", "restarts": "", "error": "",
+    }
+    if not out:
+        empty["error"] = "systemctl 不可用（不是 systemd 部署？）"
+        return empty
+    props: Dict[str, str] = {}
+    for line in out.splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        props[key.strip()] = value.strip()
+    load = props.get("LoadState", "")
+    if load in ("", "not-found"):
+        empty["load"] = load
+        empty["error"] = f"没有这个单元（LoadState={load or '未知'}）"
+        return empty
+    return {
+        "unit": unit,
+        "known": True,
+        "load": load,
+        "active": props.get("ActiveState", ""),
+        "enabled": props.get("UnitFileState", ""),
+        # 同样是 systemd 自己的时间戳格式，只原样展示给人看。
+        "started": props.get("ExecMainStartTimestamp", ""),
+        "restarts": props.get("NRestarts", ""),
+        "error": "",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 账号
 # ---------------------------------------------------------------------------
@@ -279,6 +341,92 @@ def account_counts(users: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str
             "stopped": len(items) - active, "error": ""}
 
 
+def _enabled_of(user: Optional[Dict[str, Any]]) -> bool:
+    try:
+        from core.schedule import user_enabled
+    except Exception:  # noqa: BLE001
+        return bool((user or {}).get("enabled", True))
+    return bool(user_enabled(user))
+
+
+def account_outcomes(rows: Sequence[Dict[str, Any]],
+                     users: Optional[Sequence[Dict[str, Any]]] = None,
+                     *, depth: int = OUTCOME_DEPTH) -> Dict[str, Any]:
+    """逐账号看**结果**，而不只是「账本还新呢」。
+
+    这条检查是补一个真实盲区：账号掉登录之后，每天照样跑、照样写一条
+    status=error 的记录 —— 账本永远很新、定时器永远 active，只看这两样的体检
+    于是每天说「一切正常」，而实际上一条消息都没发出去。
+
+    账本顶层的 ran_at / accounts 结构见 core/tasks.py::_record，结论只写在
+    accounts[] 里每项的 status（ok / skipped / error），顶层没有总结论字段。
+    """
+    if users is None:
+        try:
+            from utils.config import get_userData
+
+            users = list(get_userData() or ())
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"{type(exc).__name__}: {exc}", "depth": depth,
+                    "accounts": []}
+
+    # 新 → 旧。只看有时间的记录（手改过的脏行忽略）。
+    ordered = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        stamp = _row_time(row)
+        if stamp is None:
+            continue
+        ordered.append((stamp, row))
+    ordered.sort(key=lambda pair: pair[0], reverse=True)
+
+    history: Dict[str, List[Dict[str, Any]]] = {}
+    for stamp, row in ordered:
+        for acc in row.get("accounts") or ():
+            if not isinstance(acc, dict):
+                continue
+            uid = str(acc.get("unique_id") or "").strip()
+            status = str(acc.get("status") or "").strip()
+            if not uid or not status:
+                continue
+            bucket = history.setdefault(uid, [])
+            if len(bucket) >= depth:
+                continue
+            bucket.append({
+                "status": status,
+                "at": stamp,
+                "error": str(acc.get("error") or ""),
+                "run_id": str(row.get("run_id") or ""),
+            })
+
+    accounts: List[Dict[str, Any]] = []
+    for user in users or ():
+        if not isinstance(user, dict):
+            continue
+        uid = str(user.get("unique_id") or "").strip()
+        bucket = history.get(uid) or []
+        fails = 0
+        for item in bucket:
+            if item["status"] == "ok":
+                break
+            fails += 1
+        last = bucket[0] if bucket else None
+        accounts.append({
+            "unique_id": uid,
+            "username": str(user.get("username") or ""),
+            "enabled": _enabled_of(user),
+            "seen": bool(bucket),
+            "runs": len(bucket),
+            "fails_in_a_row": fails,
+            "status": last["status"] if last else "",
+            "at": iso(last["at"]) if last else "",
+            "error": last["error"] if last else "",
+            "run_id": last["run_id"] if last else "",
+        })
+    return {"error": "", "depth": depth, "accounts": accounts}
+
+
 # ---------------------------------------------------------------------------
 # 体检
 # ---------------------------------------------------------------------------
@@ -290,18 +438,36 @@ def _hours_between(later: datetime, earlier: Optional[datetime]) -> Optional[flo
     return max(0.0, (later - earlier).total_seconds() / 3600.0)
 
 
+def _clip(text: Any, limit: int = 100) -> str:
+    """把账本里的失败原因压成一行：换行、连续空格都拍平，超长截断。"""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: max(0, limit - 1)] + "…"
+
+
+def _minute_text(stamp: Any) -> str:
+    """ISO 时间戳 → 「10-30 21:45」；看不懂就原样给回去。"""
+    parsed = parse_iso(stamp) if stamp else None
+    if parsed is None:
+        return str(stamp or "—")
+    return parsed.strftime("%m-%d %H:%M")
+
+
 def diagnose(
     *,
     now_dt: Optional[datetime] = None,
     rows: Optional[Sequence[Dict[str, Any]]] = None,
     users: Optional[Sequence[Dict[str, Any]]] = None,
     timer: Optional[Dict[str, Any]] = None,
+    web: Optional[Dict[str, Any]] = None,
     threshold: Optional[float] = None,
     ledger_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """把三件事读一遍，返回结构化结论（模板 / 接口 / 命令行共用）。
+    """把这些事读一遍，返回结构化结论（模板 / 接口 / 命令行共用）。
 
-    所有入参都可注入，单测因此不需要 systemd、不需要真账本。
+    所有入参都可注入，单测因此不需要 systemd、不需要真账本、不需要真 TASKS。
+    web 传 None 表示「这次不查面板服务」—— 命令行总会传（面板挂了就没人能打开
+    网页，那是最该知道的一件事），单测默认不传，免得 Linux 上真 systemctl 多出
+    一行把既有断言打翻。
     """
     at = now_dt or now()
     limit = silence_hours() if threshold is None else float(threshold)
@@ -318,6 +484,8 @@ def diagnose(
     silent = _hours_between(at, last_at)
     accounts = account_counts(users)
     timer_info = dict(timer) if timer is not None else timer_state()
+    web_info = dict(web) if web is not None else None
+    outcomes = account_outcomes(ledger.get("rows") or (), users)
 
     problems: List[str] = []
     lines: List[str] = []
@@ -402,7 +570,69 @@ def diagnose(
             f"、{accounts['stopped']} 个已停用"
         )
 
-    severe = bool({"no_ledger", "no_run", "silent", "timer_inactive"} & set(problems))
+    # ⑤ 面板服务：定时器在跑、账本很新，面板挂了照样是「用不了」
+    if web_info is not None:
+        if not web_info.get("known"):
+            lines.append(
+                f"⚠️ 面板服务 {web_info.get('unit') or WEB_UNIT}：读不到状态"
+                f"（{web_info.get('error') or '未知原因'}）—— 这次只看了定时器"
+            )
+        else:
+            active = str(web_info.get("active") or "")
+            enabled = str(web_info.get("enabled") or "")
+            detail = f"enabled={enabled or '?'} active={active or '?'}"
+            if web_info.get("started"):
+                detail += f" 启动于 {web_info['started']}"
+            if str(web_info.get("restarts") or "").strip() not in ("", "0"):
+                detail += f" 重启过 {web_info['restarts']} 次"
+            if active != "active":
+                problems.append("web_down")
+                lines.append(
+                    f"⛔ 面板服务 {web_info['unit']}：{detail} —— 面板打不开，"
+                    f"扫码 / 改消息 / 立即运行全都用不了，但定时器还在照发"
+                )
+            elif enabled not in ("enabled", "static", "enabled-runtime"):
+                problems.append("web_disabled")
+                lines.append(
+                    f"⚠️ 面板服务 {web_info['unit']}：{detail} —— 现在能用，"
+                    f"但重启后不会自己起来（systemctl enable {web_info['unit']}）"
+                )
+            else:
+                lines.append(f"✅ 面板服务 {web_info['unit']}：{detail}")
+
+    # ⑥ 逐账号看结果：账本新 ≠ 发得出去（掉登录那几天正是「每天都跑、每天都 error」）
+    if outcomes.get("error"):
+        lines.append(f"⚠️ 逐账号结果读不出来：{outcomes['error']}")
+    else:
+        for item in outcomes.get("accounts") or ():
+            if not item.get("enabled") or not item.get("seen"):
+                continue
+            fails = int(item.get("fails_in_a_row") or 0)
+            if fails < 1:
+                continue
+            username = str(item.get("username") or "")
+            uid = str(item.get("unique_id") or "")
+            who = f"{username}（{uid}）" if username and uid else (username or uid or "?")
+            when = _minute_text(item.get("at"))
+            reason = _clip(item.get("error"), 100) or "没有写原因"
+            if fails >= 3:
+                problems.append("account_dead")
+                lines.append(
+                    f"⛔ 账号 {who}：最近 {fails} 轮一条都没发出去（最后一次 {when}，"
+                    f"{reason}）—— 多半是掉登录了，到「扫码登录」重扫一次；"
+                    f"再不行看运行日志里这一轮停在哪"
+                )
+            else:
+                problems.append("account_failing")
+                lines.append(
+                    f"⚠️ 账号 {who}：最近 {fails} 轮没发出去（最后一次 {when}，"
+                    f"{reason}）—— 偶发一次可能是限流/网络，连着 3 轮才升级成故障"
+                )
+
+    severe = bool(
+        {"no_ledger", "no_run", "silent", "timer_inactive", "web_down", "account_dead"}
+        & set(problems)
+    )
     level = "error" if severe else ("warning" if problems else "ok")
     if level == "ok":
         headline = "一切正常"
@@ -430,7 +660,9 @@ def diagnose(
             "bad_lines": int(ledger.get("bad_lines") or 0),
         },
         "timer": timer_info,
+        "web": web_info or {},
         "accounts": accounts,
+        "outcomes": outcomes,
         "checked_at": iso(at),
     }
 
@@ -538,7 +770,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if any(item in ("-h", "--help") for item in args):
         print(
             "用法：python main.py doctor [--json] [--no-notify]\n"
-            "  体检：账本还新吗、定时器还在跑吗、账号是不是全停用了。\n"
+            "  体检：账本还新吗、定时器与面板还在跑吗、每个账号最近发出去没有。\n"
             "  退出码 0=一切正常，1=有事（同时按 NOTIFY_* 推一条，每天最多一条）。\n"
             "  --json       机器可读\n"
             "  --no-notify  只打印，不推通知"
@@ -550,7 +782,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    report = diagnose()
+    report = diagnose(web=service_state())
     if "--json" in args:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
