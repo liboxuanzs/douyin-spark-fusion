@@ -173,7 +173,7 @@ LEVEL_LABELS: Dict[str, str] = {
 }
 
 SEGMENTS: Tuple[Tuple[str, str], ...] = (
-    ("success", "成功"),
+    ("success", "已送达"),
     ("weak", "可能已送达"),
     ("failed", "发送失败"),
     ("pending", "待发送"),
@@ -1218,7 +1218,7 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
     # 单元文件里的时间才是真的；`.env` 和它对不上就明说，别让两个地方各说各话。
     mismatch = bool(armed and timer_times and labels and timer_times != labels)
     if dispatch:
-        label = f"每 {dispatch} 分钟敲一次门，各账号按自己的时间发"
+        label = f"每 {dispatch} 分钟检查一次，各账号按自己的时间发"
         if next_due:
             next_iso = _text(_get(next_due, "at"))
             next_text = _text(_get(next_due, "text"))
@@ -1533,7 +1533,7 @@ def build(
         own = _text(card.get("message"))
         card["message_preview"] = msg_preview.preview(own or global_template)
         card["message_preview_source"] = (
-            "这个账号单独配置" if card.get("has_message") else "全局模板 MESSAGE_TEMPLATE"
+            "这个账号单独配置" if card.get("has_message") else "全局模板"
         )
     finished = _text(_get(selected, "finished_at"))
     summary = summarize(cards, last_at=store.fmt_stamp(finished) if finished else "")

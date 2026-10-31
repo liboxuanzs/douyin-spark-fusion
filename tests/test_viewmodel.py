@@ -2141,7 +2141,7 @@ class MessagePreviewViewTests(unittest.TestCase):
         preview = card["message_preview"]
         self.assertEqual(preview["line_count"], 2)
         self.assertTrue(preview["has_api"])
-        self.assertEqual(card["message_preview_source"], "全局模板 MESSAGE_TEMPLATE")
+        self.assertEqual(card["message_preview_source"], "全局模板")
 
     def test_单独配了内容就用它(self):
         card = self._view(message="只有这一句")["accounts"][0]

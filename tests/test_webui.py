@@ -4072,7 +4072,7 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
         """新架构：timer 只负责"敲门"，几点发由各账号自己的 time 决定。"""
         page = self._page_with_timer("enabled", dispatch=5)
         self.assertNotIn("data-schedule-warning", page)
-        self.assertIn("每 5 分钟敲一次门", page)
+        self.assertIn("每 5 分钟检查一次", page)
         self.assertNotIn("系统定时器：", page, "别再把 */5 说成'系统定时器：每天 20:30'")
 
     def test_禁跑窗关掉时不出红框(self) -> None:

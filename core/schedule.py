@@ -899,9 +899,9 @@ def window_text(plan):
     plan = dict(plan or {})
     due = plan.get("due_text") or plan.get("time") or ""
     if not plan.get("jitter_minutes"):
-        return f"每天 {plan.get('time') or ''}（不抖动）"
+        return f"每天 {plan.get('time') or ''}（不浮动）"
     return (f"每天 {plan.get('time') or ''}（今天落在 {due}，"
-            f"抖动 ±{plan.get('jitter_minutes')} 分钟）")
+            f"浮动 ±{plan.get('jitter_minutes')} 分钟）")
 
 
 def summary_text(result, plan=None, record=None):

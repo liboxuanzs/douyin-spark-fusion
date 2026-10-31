@@ -530,7 +530,7 @@ class TextTests(unittest.TestCase):
     def test_window_text_says_so_when_jitter_is_off(self):
         plan = schedule.plan_for({"unique_id": "u", "time": "08:00"},
                                  when=_at(), fallback="20:30", jitter=0)
-        self.assertIn("不抖动", schedule.window_text(plan))
+        self.assertIn("不浮动", schedule.window_text(plan))
 
     def test_summary_text_for_a_finished_account(self):
         record = {"status": schedule.STATUS_OK, "sent_at": "2026-10-07T08:11:00+08:00",

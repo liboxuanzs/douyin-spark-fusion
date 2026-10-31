@@ -295,7 +295,7 @@
         <i data-lucide="calendar-clock"></i>
         <span data-account-run-missing-own {% if not account.own_run_text %}hidden{% endif %}>这一轮没有轮到它 —— 每个账号按自己的发送时间分开跑，上面的数字是<strong>这一轮</strong>的。
           它最近一次是 <strong data-account-run-missing-own-text>{{ account.own_run_text }}</strong> 那一轮。</span>
-        <span data-account-run-missing-never {% if account.own_run_text %}hidden{% endif %}>最近这些轮次里都没有它 —— 下面的数字只是 <code>TASKS</code> 里的目标，一次都还没试过。</span>
+        <span data-account-run-missing-never {% if account.own_run_text %}hidden{% endif %}>最近这些轮次里都没有它 —— 下面的数字只是配置里登记的目标，一次都还没试过。</span>
       </p>
     {% endmacro %}
     <template data-account-run-missing-tpl>{{ run_missing_block({}) }}</template>
@@ -317,9 +317,9 @@
           <small class="muted">
             抖音号 {{ account.unique_id or "—" }}
             {%- if account.fingerprint %} · 设备标识 {{ account.fingerprint }}{% endif %}
-            {%- if account.orphan %} · 不在 TASKS 里
-            {%- elif account.cookie_configured %} · cookie {{ account.cookie_names|length }} 项
-            {%- else %} · <span class="danger-text">cookie 缺失</span>{% endif %}
+            {%- if account.orphan %} · 不在配置里
+            {%- elif account.cookie_configured %} · 登录凭证 {{ account.cookie_names|length }} 项
+            {%- else %} · <span class="danger-text">登录凭证缺失</span>{% endif %}
             {# 每张卡的数字来自"这个账号自己的最近一轮"：把那一轮写出来，
                否则看着像是刚刚这一轮的（每个账号按自己的时间分开跑）。 #}
             {%- if account.run_text and not account.run_missing %} · 数字来自 {{ account.run_text }} 那一轮{% endif %}
@@ -636,7 +636,7 @@
             <button class="button button-primary" type="submit"{% if not picker.rows %} disabled{% endif %}>
               <i data-lucide="save"></i><span>保存勾选</span>
             </button>
-            <span class="muted compact">只影响这个账号的 <code>TASKS[].targets</code>，写前自动备份。</span>
+            <span class="muted compact">只影响这个账号发给谁；保存前会自动备份配置。</span>
           </div>
         </form>
       </div>
@@ -644,7 +644,7 @@
     </article>
     {% else %}
     <div class="empty-state">
-      还没有账号。扫一次码就会自动加进 <code>TASKS</code>（好友列表可以之后再勾）。
+      还没有账号。扫一次码就会自动加进账号列表（好友列表可以之后再勾）。
     </div>
     {% endfor %}
   </section>
@@ -673,7 +673,7 @@
       <div class="collapsible-body">
         {% if view.login.tasks_error %}
         <div class="danger-box">
-          <strong><i data-lucide="triangle-alert"></i>TASKS 读不出来</strong>
+          <strong><i data-lucide="triangle-alert"></i>账号配置读不出来</strong>
           <p>{{ view.login.tasks_error }}</p>
         </div>
         {% endif %}
@@ -888,7 +888,7 @@
             <p class="compact" data-maintenance-locked-text></p>
             <small class="muted">
               名单读不到时一个文件都不会删（宁可不清，也不能把真账号的登录态删了）。
-              先到「运行配置」把 <code>TASKS</code> / <code>COOKIES_*</code> 修好，再回来展开这一块。
+              先到「运行配置」把账号配置（<code>TASKS</code> / <code>COOKIES_*</code>）修好，再回来展开这一块。
             </small>
           </div>
         </div>
