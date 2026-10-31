@@ -1456,6 +1456,12 @@ class ImMonitor:
                 logger.debug(f"[CONV] cmd={env['name']} code={env['code']}")
         except Exception as e:
             self.errors.append((url, str(e)))
+            # `self.errors` 只在扫描收尾（`_finish_scan`）读一次，发送阶段的解析
+            # 异常根本走不到那儿 —— 症状会退化成「没有回执」，事后分不清
+            # 「服务端没回」和「我们解析炸了」（2026-10-09 类事故最难受的地方）。
+            if route in ("send", "login"):
+                logger.error(f"[NET] {route} 响应解析失败  url={url}  "
+                             f"{type(e).__name__}: {e}")
 
     def _handle_login(self, body):
         r = scrape_ssr(body)
@@ -1750,9 +1756,14 @@ class DouyinIM:
                 body = resp.body()
             except Exception:
                 return
-            if not body or len(body) > 4096:
+            if not body:
                 return
-            code = _envelope_code(body)
+            # 只解信封头（protobuf 的 cmd/seq/code 都在最前面的字段里）：长响应
+            # （会话列表 / 长消息体）不该整块解析，但**掉登录码必须优先认出来**。
+            # 老代码把 len(body) > 4096 挡在 _envelope_code 前面，超过 4KB 的 IM
+            # 响应连看都没看，code=8 就这么漏过去，掉登录只能等 20 秒超时后靠
+            # 复检兜（2026-10-09 那轮就是这样把名额一条条烧掉的）。
+            code = _envelope_code(body[:4096])
             if code == 8:
                 self._emit_login_lost(code)
         try:
@@ -3285,8 +3296,12 @@ class DouyinIM:
             try:
                 r = self.page.evaluate(JS_EDITOR_CLEAR)
             except Exception as e:
-                logger.debug(f"[SEND] 清空输入框失败：{_brief(e)}")
-                return False, "error", left
+                logger.warning(f"[SEND] 清空输入框失败（页面可能已经没了）：{_brief(e)}")
+                # 第三个返回值 left 是「残留文本」，读不到时必须给 None 而不是空串：
+                # 调用方按 残留={left!r} 打日志，空串会被读成「已经空了」——把
+                # 「读不到」谎报成「清干净了」，Draft 的 EditorState 里那份残留
+                # 就这么藏到下一次输入，两条消息叠着发（2026-10-03 的坑）。
+                return False, "error", None
             if isinstance(r, dict):
                 how = str(r.get("how") or "unknown")
                 left = str(r.get("left") or "")
@@ -3300,8 +3315,14 @@ class DouyinIM:
                              f"插一个字符逼 Draft 重渲染，确认没有藏在 state 里的残留")
                 try:
                     self.page.evaluate(JS_TYPE_LINE, {"text": "."})
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 逼现形失败：这一轮的「看着是空的」就不再可信了。老代码在这里
+                    # pass + continue，下一轮 probe_left 已为 False，会走
+                    # 「empty → 清 dirty → return True」，把「读不到」当成「已清空」，
+                    # 藏在 Draft state 里的残留留到下一次输入叠着发。
+                    logger.warning(f"[SEND] 逼 Draft 重渲染失败（{_brief(e)}）："
+                                   f"不再相信这一轮的「看着是空的」，按没清干净处理")
+                    return False, "probe_failed", left
                 self.page.wait_for_timeout(settle_ms)
                 continue
             if how in ("key", "cmd"):

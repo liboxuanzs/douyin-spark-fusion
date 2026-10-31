@@ -1145,7 +1145,117 @@ class ClearEditorTests(unittest.TestCase):
         page = _ClearPage([], text="旧文本")
         page.exc = RuntimeError("页面没了")
         im = _ClearIM(page)
-        self.assertEqual(im._clear_editor(), (False, "error", ""))
+        # 第三项是 None（读不到），不是 ""（读到了、确实是空的）：把"读不到"说成
+        # "已经空了"会让调用方以为清干净了，Draft 里的残留就留到下次输入叠两条。
+        self.assertEqual(im._clear_editor(), (False, "error", None))
+        self.assertTrue(im._editor_dirty)
+
+    def test_probe_failure_does_not_mark_the_editor_clean(self):
+        """逼重渲染的探针自己炸了 → 必须报失败，不能把"没读到"当成"已清空"。
+
+        老代码在探针失败后 `pass` 掉、继续走下一轮；下一轮读到 `empty=True`
+        就把 `_editor_dirty` 清掉，残留文本会跟着下一条消息一起发出去。
+        """
+        page = _ClearPage(["key"], text="残留")
+        real = page.evaluate
+
+        def evaluate(expr, arg=None):
+            if expr is douyin_im.JS_TYPE_LINE:
+                raise RuntimeError("探针字符插不进去")
+            return real(expr, arg)
+
+        page.evaluate = evaluate
+        im = _ClearIM(page)
+        cleared, how, left = im._clear_editor(distrust_empty=True)
+        self.assertFalse(cleared)
+        self.assertEqual(how, "probe_failed")
+        self.assertEqual(left, "")          # 上一轮读到的是空串
+        self.assertTrue(im._editor_dirty)    # 关键：账不能勾掉
+
+
+def _envelope_bytes(code: int, filler: int = 0) -> bytes:
+    """造一个最小 protobuf 信封：字段 3（返回码）= code，可选塞一段 filler 字节的业务体。"""
+    buf = bytes([0x18, code & 0x7F])
+    if filler:
+        length = filler
+        varint = b""
+        while True:
+            byte = length & 0x7F
+            length >>= 7
+            varint += bytes([byte | (0x80 if length else 0)])
+            if not length:
+                break
+        buf += bytes([0x32]) + varint + b"x" * filler    # 字段 6 = 业务体
+    return buf
+
+
+class _LoginLostIM:
+    """借用真的掉登录监控（`_watch_login_lost` / `_emit_login_lost`）的最小宿主。"""
+
+    _watch_login_lost = douyin_im.DouyinIM._watch_login_lost
+    _emit_login_lost = douyin_im.DouyinIM._emit_login_lost
+
+    def __init__(self, page):
+        self.page = page
+        self._login_dead = False
+        self._login_dead_reason = ""
+        self._login_lost = []
+
+
+class _Resp:
+    def __init__(self, url, body):
+        self.url = url
+        self._body = body
+
+    def body(self):
+        return self._body
+
+
+class LoginLostWatcherTests(unittest.TestCase):
+    """运行期掉登录监控：`status_code=8` 必须**优先**认出来。"""
+
+    def _host(self):
+        page = _FakePage()
+        im = _LoginLostIM(page)
+        im._watch_login_lost()
+        return im, page
+
+    def test_status_code_8_marks_the_session_dead(self):
+        im, page = self._host()
+        for cb in page.listeners["response"]:
+            cb(_Resp("https://imapi.douyin.com/v1/message/send", _envelope_bytes(8)))
+        self.assertTrue(im._login_dead)
+
+    def test_long_response_is_still_checked_for_code_8(self):
+        """老代码把 `len(body) > 4096` 挡在解信封前面：长响应里的掉登录码直接漏过去。
+
+        会话列表 / 长消息体本来就可能几 KB；漏一次就得等 20 秒超时后靠复检兜，
+        期间发送循环会一条条把名额烧掉（2026-10-09 就是这样）。
+        """
+        im, page = self._host()
+        body = _envelope_bytes(8, filler=6000)
+        self.assertGreater(len(body), 4096)
+        for cb in page.listeners["response"]:
+            cb(_Resp("https://imapi.douyin.com/v1/message/list", body))
+        self.assertTrue(im._login_dead)
+
+    def test_other_codes_and_urls_leave_the_session_alone(self):
+        im, page = self._host()
+        for cb in page.listeners["response"]:
+            cb(_Resp("https://imapi.douyin.com/v1/message/send", _envelope_bytes(0)))
+            cb(_Resp("https://www.douyin.com/aweme/v1/web/foo", _envelope_bytes(8)))
+        self.assertFalse(im._login_dead)
+
+    def test_body_that_cannot_be_read_is_ignored(self):
+        im, page = self._host()
+
+        class Boom(_Resp):
+            def body(self):
+                raise RuntimeError("body 读不出来")
+
+        for cb in page.listeners["response"]:
+            cb(Boom("https://imapi.douyin.com/v1/message/send", b""))
+        self.assertFalse(im._login_dead)
 
 
 class _FakePage:

@@ -404,7 +404,18 @@ def run_once(run_id: str, dry_run: str, force: bool = False) -> Dict[str, Any]:
     # 先把 .env 重新读进环境 + 清掉 utils.config 的缓存，再去拿 runTasks
     # （load_run_tasks 会顺带把 core.tasks 重载一次，让它重新做模块级快照）。
     # 顺序不能反：先重载模块、后刷新环境，快照就还是旧的。
-    store.refresh_env()
+    if not store.refresh_env(force=True) and envfile.env_path().exists():
+        # 这一步失败 = `.env` 在，但读不进来（编码/权限/TASKS 不是合法 JSON）。此时
+        # `utils.config` 还是进程启动那一刻的快照，`core.tasks` 重载后拿到的也是
+        # 旧 TASKS / 旧 COOKIE —— 会按已删除或已停用的账号发一整轮，运行记录
+        # 看起来还挺正常（2026-10 审计：事故⑦）。读不到就说读不到，别发。
+        # 没有 `.env` 时不拦：那是"全靠进程环境变量跑"的部署方式，core 本来就按
+        # 这套降级逻辑走（容器里就是这样的）。
+        result["error"] = "配置读不进来（.env 解析失败或没权限），这一轮不发"
+        result["hint"] = ("先看 .env 里的 TASKS 是不是合法 JSON、文件权限对不对；"
+                          "改好之后不会自动重跑，需要再点一次「立即运行」")
+        _log(f"手动触发被拒绝（run_id={run_id}）：{result['error']}")
+        return result
     try:
         runner = load_run_tasks()
     except RunUnavailable as exc:
@@ -482,14 +493,47 @@ def _log(message: str) -> None:
         pass
 
 
-def _ledger_marker() -> str:
-    """运行记录最后一条的设备标识，用来判断这一轮到底有没有留下记录。"""
+def _reload_after_env_write() -> bool:
+    """`.env` 刚写成功：本进程**无条件**重读一次，并且把成败说出来。
+
+    为什么必须 force：`store.refresh_env()` 非 force 时先比 `.env` 的
+    `(mtime_ns, size)`，跟上次一样就直接 `return True` 却根本没读 —— 写盘成功
+    这条路径上不能指望那个短路（同秒内连改、时间戳被还原、同步盘），否则面板
+    文案说「已保存」，紧接着点「立即运行」用的还是本进程启动那一刻的快照
+    （2026-10 审计：事故⑦「配置改了没用」）。
+
+    返回 False = 文件写进去了、但本进程没跟上（要重启面板才完全生效）。
+    """
+    try:
+        envfile.reload()
+    except Exception as exc:  # noqa: BLE001 - 重读失败只该影响"立刻生效"
+        _log(f".env 已写入，但面板进程重读失败：{type(exc).__name__}: {exc}")
+        return False
+    try:
+        ok = bool(store.refresh_env(force=True))
+    except Exception as exc:  # noqa: BLE001
+        _log(f".env 已写入，但配置缓存刷新失败：{type(exc).__name__}: {exc}")
+        return False
+    if not ok:
+        _log(".env 已写入，但本进程没有重读成功（面板上仍是旧配置，重启面板后完全生效）")
+    return ok
+
+
+def _ledger_marker() -> Optional[str]:
+    """运行记录最后一条的设备标识，用来判断这一轮到底有没有留下记录。
+
+    三态：`None` = **读不到**（文件锁/权限/尾部坏行），`""` = 确实一条都没有，
+    其它 = 最后一条的 run_id/started_at。读不到和"没有"必须分开：混成一个空串时，
+    `_record_failed_run()` 会把 core **已经写好**的那一轮再补记一遍 —— 同一轮在
+    运行记录里出现两条，那条假的 error 还会成为「最新一轮」，把面板 KPI 顶成
+    更早那次成功的数字（2026-10 审计：事故②⑤）。
+    """
     try:
         from core import run_ledger
 
         runs = run_ledger.read_runs(limit=1)
-    except Exception:  # noqa: BLE001 - 读不到就当"没有运行记录"，下面会走补记分支
-        return ""
+    except Exception:  # noqa: BLE001 - 读不到 ≠ 没写过
+        return None
     if not runs:
         return ""
     last = runs[0] or {}
@@ -508,6 +552,11 @@ def _record_failed_run(run_id: str, dry_run: str, result: Dict[str, Any], before
         from core import run_ledger
 
         after = _ledger_marker()
+        if after is None:
+            # 读不到账本就无从判断 core 有没有写过 —— 补记会把一轮记成两条，
+            # 而且那条假记录会顶掉面板上的「最新一轮」。宁可只留日志。
+            _log(f"运行记录读不出来，放弃补记（run_id={run_id}）")
+            return
         if after and after != before:
             return  # core 自己写了记录，别记两遍
         now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1261,7 +1310,14 @@ def _dispatcher_accounts() -> set:
     except Exception:                                    # noqa: BLE001 - 读不到就放行
         return set()
     if not state.running:
-        return set()
+        # `running=False` 只说明「不再拦住新一轮」，**不说明那只 Chromium 已经关了**：
+        # 锁文件还在、持有者进程还活着（只是跑了 > 6 小时被 `read_lock()` 当残留），
+        # 或者锁内容此刻读不全时，作业进程手上有同一份 user-data-dir。面板这边再开
+        # 一只 → 两个浏览器抢一个资料目录，派发器那轮被抖音挤掉登录态，而面板上刚
+        # 显示「登录成功」（2026-10 审计：事故①⑥）。所以 pid **没被判死**就按占用
+        # 处理；pid 已死的残留锁不算（`core.run_ledger.RunLock` 下次抢锁会自己删）。
+        if not (state.exists and getattr(state, "pid_alive", None) is not False):
+            return set()
     return {str(x) for x in (getattr(state, "accounts", None) or []) if str(x).strip()}
 
 
@@ -1603,11 +1659,7 @@ def start_login_session(
             username=nickname,
             fingerprint=str(fingerprint or "").strip() or None,
         )
-        envfile.reload()                 # 让本进程立刻用上新的 cookie / 账号
-        try:
-            store.refresh_env()
-        except Exception:  # noqa: BLE001
-            pass
+        _reload_after_env_write()        # 让本进程立刻用上新的 cookie / 账号
         # 新建账号时还不知道抖音号，扫码只能用 `default/` 那份资料目录；现在知道了，
         # 让 qr_login 在浏览器关掉之后把它搬到 `<抖音号>/`，否则"按账号读好友列表"
         # 打开的是另一个空目录，会误报"这个账号还没登录"。
@@ -1615,6 +1667,18 @@ def start_login_session(
         if adopt == str(result.get("profile_dir") or ""):
             adopt = ""
         requeue = _requeue_after_relogin(real_uid)
+        # 撤账结果必须**说出来**：这是「重新登录后当天自动补发」的唯一开关。以前它
+        # 只是被塞进返回值、连日志都没有 —— 用户看到「登录成功」，以为今天会自动补发，
+        # 实际没撤账、当天就此断签（2026-10 审计：事故③⑦）。
+        requeue_note = ""
+        if requeue.get("requeued"):
+            requeue_note = "今天已经办过的记账已撤回，5 分钟内会自动补发"
+            _log(f"扫码登录成功后已撤回账号 {real_uid} 今天的记账（会自动补发）")
+        else:
+            reason = str(requeue.get("reason") or "")
+            requeue_note = (REQUEUE_REFUSALS.get(reason)
+                            or f"今天不会自动补发：{reason or '未知原因'}")
+            _log(f"扫码登录成功，但自动补发没生效（账号 {real_uid}）：{requeue_note}")
         return {
             "ok": bool(merged.get("ok")),
             "error": merged.get("error") or "",
@@ -1627,6 +1691,7 @@ def start_login_session(
             "note": merged.get("message") or "",
             "adopt_profile": adopt,
             "requeue": requeue,
+            "requeue_note": requeue_note,
         }
 
     # 缺陷 1：占位与忙检查必须在同一把锁里完成 —— 出锁之后才开始启动浏览器，
@@ -2396,6 +2461,19 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return fail(f"导入 core.tasks 时出错：{type(exc).__name__}: {exc}", 503)
 
+        # 同一进程里只允许一条「立即运行」的线程。`read_lock()` 拦不住连点：
+        # core 的锁是在 jitter 等待**之后**才 `RunLock.acquire()` 的（先 sleep 再抢锁），
+        # 那段空窗里锁文件还不存在 → 第二次点击照样起第二条线程，它随后被
+        # `RunLocked` 跳过，往运行记录里补一条 `accounts=[]` 的空轮，把面板的
+        # 「最新一轮」顶成"什么都没干"（2026-10 审计：事故②⑦）。
+        for thread in list(_RUN_THREADS):
+            if thread.is_alive():
+                message = "上一轮「立即运行」还没结束（同一个进程里只跑一轮），等它收尾再点"
+                if as_html:
+                    return redirect_with(request, path="/", error=message)
+                return JSONResponse({"started": False, "error": message},
+                                    status_code=409)
+
         run_id = new_run_id()
         # 这里**故意不写运行锁**：锁由 core.runTasks 自己用 O_EXCL 原子建，它才是
         # 唯一的持锁者。webui 若先写一把，runTasks 会把自己人当外人 →
@@ -2576,11 +2654,7 @@ def create_app() -> FastAPI:
             items = [{"name": name} for name in (_split_targets(targets) or [])]
         result = envfile.set_targets(unique_id, items)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
         if as_html:
             if result.get("ok"):
                 saved_targets = result.get("targets") or []
@@ -2620,11 +2694,7 @@ def create_app() -> FastAPI:
 
         result = envfile.set_account_message(unique_id, message)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
         if as_html:
             if result.get("ok"):
                 text = str(result.get("message_set") or "")
@@ -2663,11 +2733,7 @@ def create_app() -> FastAPI:
 
         result = envfile.set_account_time(unique_id, time)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
         if as_html:
             if result.get("ok"):
                 saved = str(result.get("time_set") or "")
@@ -2744,10 +2810,9 @@ def create_app() -> FastAPI:
         """
         if current_user(request) is None:
             return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
-        try:
-            store.refresh_env()          # 面板可能刚改过 .env，名单要按最新的读
-        except Exception:  # noqa: BLE001
-            pass
+        # 面板可能刚改过 .env，名单要按最新的读。读不进来也要说出来：这个区块是
+        # 清理孤儿目录的入口，名单读空会被当成「这些目录都不属于任何账号」。
+        _reload_after_env_write()
         tasks, _tasks_error = store.read_tasks_env()
         # 昵称只是给人看的（目录名是抖音号，光看号认不出是谁）；名单的**权威**判定
         # 在 core.maintenance.known_ids() 里，读不到它会返回 ok=False。
@@ -2757,6 +2822,13 @@ def create_app() -> FastAPI:
             if str(item.get("unique_id") or "")
         }
         payload = viewmodel.maintenance_view(names=names)
+        if _tasks_error:
+            # 老代码把这条错误直接丢掉：账号名全空但 HTTP 200，用户看到的是「没有账号」
+            # 而不是「配置读不出来」（2026-10 审计：低危，但会误导清理操作）。
+            payload["ok"] = False
+            payload["error"] = (
+                f"账号名单读不出来（{_tasks_error}）：下面列出的目录无法归属，别照着它清理。"
+            )
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.post("/ops/maintenance/caches")
@@ -2777,10 +2849,7 @@ def create_app() -> FastAPI:
                 return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
             return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
 
-        try:
-            store.refresh_env()
-        except Exception:  # noqa: BLE001
-            pass
+        _reload_after_env_write()
         # 名单读不到时 known_ids() 会把错误带出来，prune_caches 见到错误直接空手而归
         # —— 这里不再自己判断，避免出现"两套安全线"。
         payload = viewmodel.prune_view(
@@ -2816,10 +2885,9 @@ def create_app() -> FastAPI:
                 return redirect_with(request, path="/", error="跨站请求被拒绝（Origin/Referer 不同源）")
             return JSONResponse({"ok": False, "error": "跨站请求被拒绝"}, status_code=403)
 
-        try:
-            store.refresh_env()
-        except Exception:  # noqa: BLE001
-            pass
+        # 名单读不到时 pruned 会空手而归（core.maintenance.known_ids 自带安全线），
+        # 这里只负责把「读不到」这件事记进面板日志，别让它静默地看起来像「没有孤儿」。
+        _reload_after_env_write()
         payload = viewmodel.prune_view(
             maintenance.prune_orphans(apply=_form_flag(apply)), what="孤儿目录"
         )
@@ -2862,11 +2930,7 @@ def create_app() -> FastAPI:
         uid = str(unique_id or "").strip()
         result = envfile.set_account_enabled(uid, flag)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
             _log(f"账号 {uid} 已{'启用' if flag else '停用'}（TASKS[].enabled={'true' if flag else 'false'}）")
         if as_html:
             if result.get("ok"):
@@ -2903,11 +2967,7 @@ def create_app() -> FastAPI:
         else:
             result = envfile.set_account_proxy(uid, wanted)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
             _log(f"账号 {uid} 的出口已更新：{result.get('proxy_text') or '直连'}")
         if as_html:
             if result.get("ok"):
@@ -2989,11 +3049,7 @@ def create_app() -> FastAPI:
 
         result = envfile.remove_account(unique_id)
         if result.get("ok"):
-            envfile.reload()
-            try:
-                store.refresh_env()
-            except Exception:  # noqa: BLE001
-                pass
+            _reload_after_env_write()
         if as_html:
             if result.get("ok"):
                 return redirect_with(request, path="/", warn=result.get("message") or "已移除账号")
@@ -3099,11 +3155,7 @@ def create_app() -> FastAPI:
         # 实际还在用旧值，直到重启面板。返回值以前被丢掉了，这里必须留着。
         reloaded = False
         if result.get("ok"):
-            envfile.reload()
-            try:
-                reloaded = bool(store.refresh_env())
-            except Exception:  # noqa: BLE001
-                reloaded = False
+            reloaded = _reload_after_env_write()
         result["env_reloaded"] = reloaded
         changed = result.get("changed") or {}
         if as_html:
@@ -3209,11 +3261,7 @@ def create_app() -> FastAPI:
         result = envfile.set_webui_password(fresh, store=store_mode)
         if not result.get("ok"):
             return fail(result.get("error") or "写 .env 失败")
-        envfile.reload()
-        try:
-            store.refresh_env()
-        except Exception:  # noqa: BLE001 - 重读失败不该把"已写盘"说成失败
-            pass
+        _reload_after_env_write()        # 重读失败不该把"已写盘"说成失败
 
         changed = result.get("changed") or []
         mode = result.get("mode") or envfile.PASSWORD_MODE_PLAIN

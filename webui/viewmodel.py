@@ -1307,6 +1307,7 @@ def _banners(
     blocked_reason: str,
     last_skip: str = "",
     last_skip_until: str = "",
+    newest_note: str = "",
     streak_labels: Sequence[str] = (),
     proxy_shared: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -1380,6 +1381,17 @@ def _banners(
                 "title": f"{summary['accounts_blocked']} 个账号被阻断",
                 "text": f"共 {summary.get('blocked_targets')} 个目标本轮发不出去，"
                 "通常是登录失效或缺 cookie；下面「账号与目标好友」里每个账号都写了原因。",
+                "until": "",
+                "secondsLeft": 0,
+            }
+        )
+    if newest_note:
+        banners.append(
+            {
+                "kind": "newest",
+                "level": "warning",
+                "title": "最新一轮没发出去",
+                "text": newest_note,
                 "until": "",
                 "secondsLeft": 0,
             }
@@ -1521,6 +1533,22 @@ def build(
         selected = next((r for r in records if _get(r, "accounts")), None)
     if selected is None and records:
         selected = records[0]
+    # 上面这套回落是**故意**的：账号卡要讲"这个号最近一次真跑起来的那一轮"，否则
+    # 一轮在起浏览器前就被跳过（锁被占 / 配置读不进来 / 整轮跳过）时，每张卡都会
+    # 瞬间变成「还没跑过」。代价是 KPI 可能来自更早那一轮 —— 所以必须在这里补一句
+    # 话，明说"最新一轮什么都没发、下面这些数字不是它的"（2026-10 审计：事故②⑦）。
+    latest = records[0] if records else None
+    newest_note = ""
+    if latest is not None and latest is not selected:
+        latest_counts = _get(latest, "counts") or {}
+        if not _int(_get(latest_counts, "accounts")):
+            row = run_row(latest)
+            reason = row["skip_reason_text"] or row["note"] or row["status_text"] or "没有账号结果"
+            when = row["started_text"] or row["run_id"] or "最新一轮"
+            newest_note = (
+                f"{when} 那一轮一条消息都没发出去（{reason}）。"
+                "下面的统计数字来自它之前那次真正跑起来的轮次，不是最新这一轮的成绩。"
+            )
 
     cards = account_cards(accounts, selected, records=records, per_account=per_account)
     streak_view = streak if isinstance(streak, dict) else {}
@@ -1550,6 +1578,8 @@ def build(
         _text(card.get("dry_run"), "off") for card in cards if not card.get("orphan")
     }
     summary["run_count"] = len(card_runs)
+    summary["newest_run_id"] = _text(_get(latest, "run_id"))
+    summary["newest_is_selected"] = bool(latest is not None and latest is selected)
     summary["mixed_runs"] = bool(per_account and len(card_runs) > 1)
     if summary["mixed_runs"]:
         summary["run_id"] = ""
@@ -1629,6 +1659,7 @@ def build(
             blocked_reason=blockers[0] if blockers else "",
             last_skip=_text(_get(selected, "skip_reason")),
             last_skip_until=_text(_get(selected, "skip_until")),
+            newest_note=newest_note,
             streak_labels=broken_labels,
             proxy_shared=proxy_shared,
         ),

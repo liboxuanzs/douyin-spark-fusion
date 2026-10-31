@@ -1675,6 +1675,70 @@ class WholeRunErrorTests(unittest.TestCase):
         self.assertEqual(card["state"], "blocked")
 
 
+class NewestRoundBannerTests(unittest.TestCase):
+    """最新一轮空手而归时，页面必须自己说出来。
+
+    2026-10 审计：`selected` 取的是「最近一条**带账号**的记录」，而没能跑起来的那一轮
+    记的就是 `accounts=[]`（锁被占 / 配置读不进来 / 整轮跳过都这样）。于是 KPI 和
+    「上一轮」悄悄退回更早那次成功的轮次，页面上一处都不提"今天其实一条都没发"，
+    用户对着「已送达 5」以为一切正常。
+    """
+
+    def _view(self, records, *, selected=None):
+        return viewmodel.build(
+            records=records,
+            accounts=[],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            default_dry_run="off",
+            selected=selected,
+            per_account=False,
+        )
+
+    def _failed(self):
+        return _record(
+            accounts=[],
+            run_id="20261031-195500",
+            started_text="2026-10-31 19:55:00",
+            status="error",
+            status_text="出错",
+            note="这一轮没能跑起来",
+        )
+
+    def _good(self):
+        return _record(
+            accounts=[_account(sent_ok=1, entries=[_entry()])],
+            run_id="20261031-173000",
+            started_text="2026-10-31 17:30:00",
+        )
+
+    def test_最新一轮没跑起来要有一条横幅说明(self):
+        view = self._view([self._failed(), self._good()])
+        newest = [b for b in view["banners"] if b["kind"] == "newest"]
+        self.assertEqual(len(newest), 1, view["banners"])
+        text = newest[0]["text"]
+        self.assertIn("19:55", text, "要说清是哪一轮")
+        self.assertIn("一条消息都没发出去", text)
+        self.assertIn("不是最新这一轮的成绩", text)
+        self.assertFalse(view["summary"]["newest_is_selected"])
+
+    def test_最新一轮就是选中的那轮时不多嘴(self):
+        """数字本来就来自最新一轮 —— 再弹一条"最新一轮没发出去"就是自相矛盾。"""
+        view = self._view([self._good()])
+        self.assertEqual([b for b in view["banners"] if b["kind"] == "newest"], [])
+        self.assertTrue(view["summary"]["newest_is_selected"])
+
+    def test_最新一轮有账号结果时不多嘴(self):
+        latest = _record(accounts=[_account(status="error")], run_id="r-latest",
+                         started_text="2026-10-31 20:30:00", status="error", status_text="出错")
+        view = self._view([latest, self._good()])
+        self.assertEqual([b for b in view["banners"] if b["kind"] == "newest"], [])
+
+
 class MaintenanceViewTests(unittest.TestCase):
     """「磁盘与资料目录」区块的数据层：字段名、安全线、以及"跳过了谁"。
 
