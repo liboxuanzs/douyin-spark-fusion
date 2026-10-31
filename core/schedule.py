@@ -51,6 +51,7 @@
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time as _time
 from contextlib import contextmanager
@@ -110,6 +111,49 @@ def last_dispatch_minute(cadence=None):
     step = int(cadence if cadence is not None else DISPATCH_MINUTES) or TICK_MINUTES
     step = max(TICK_MIN, min(59, step))
     return (59 // step) * step
+
+
+#: `CRON_SCHEDULE` 里“每 N 分钟一次”的形态：`*/N * * * *`。只认这一种 ——
+#: 别的写法（`0 20 * * *` 一天一次、`0,30 * * * *`）没有单一节奏可言，
+#: 一律回落到 `DISPATCH_MINUTES`。
+_CRON_EVERY_N = re.compile(r"^\*/(\d{1,2})\s+\*\s+\*\s+\*\s+\*$")
+
+
+def _int_or_none(raw):
+    """把 env 里的字符串读成整数；空 / 写坏 / 溢出一律 None（不抛）。"""
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        # 与 jitter_minutes_env 同一套：`float("1e999")` 是合法 inf，`int(inf)` 抛
+        # OverflowError。这个函数在 `plan_for()` 里，抛出去就是面板整页 500。
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def dispatch_minutes_env(env=None):
+    """当前部署**真实的**派发节奏（分钟）。
+
+    来源优先级：
+
+    1. `CRON_TICK_MINUTES` —— docker 部署的旋钮（`docker/entrypoint-cron.sh` 用它
+       生成 `*/N * * * *`，并写进 cron 行让子进程也读得到）；
+    2. `CRON_SCHEDULE` 里的 `*/N * * * *` —— 用户直接写整条表达式时（老写法）；
+    3. `DISPATCH_MINUTES`（5）—— systemd 部署的 `OnCalendar=*:0/5`。
+
+    为什么非要读它：`plan_for()` 把抖出当天的 `due_at` 夹到“当天最后一次派发”，
+    而那个刻度**必须真的会响**。写死 23:55 时，`*/10 * * * *` 的部署里 23:55 从不
+    出现，落在 23:50~23:59 的账号当天一条都发不出去，日志里还一句都不说（issue #19）。
+    """
+    get = env.get if isinstance(env, dict) else os.getenv
+    tick = _int_or_none(get("CRON_TICK_MINUTES"))
+    if tick is not None:
+        return max(TICK_MIN, min(59, tick))
+    schedule = str(get("CRON_SCHEDULE") or "").strip()
+    match = _CRON_EVERY_N.match(schedule)
+    if match:
+        return max(TICK_MIN, min(59, int(match.group(1))))
+    return DISPATCH_MINUTES
 
 
 def tick_minutes(jitter=None):
@@ -255,12 +299,15 @@ def user_enabled(user):
     return task_enabled({"enabled": value})
 
 
-def plan_for(user, *, when=None, fallback=None, jitter=None):
+def plan_for(user, *, when=None, fallback=None, jitter=None, cadence=None):
     """算出一个账号"今天几点该发"。
 
     返回的字典是**只读的展示/判定用快照**，不落盘：
         unique_id / username / time（最终生效的 HH:MM）/ custom（是不是账号自己写的）
         enabled（`TASKS[].enabled`）/ jitter_minutes / due_at（datetime）/ due_text / tick_minutes
+
+    `cadence` 是派发节奏（分钟），默认从环境读（`dispatch_minutes_env()`）；显式传入
+    只给测试和“按别的节奏预演”用。
     """
     when = when or now()
     uid = str((user or {}).get("unique_id") or "")
@@ -280,7 +327,12 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
     #   而 `select()` 拿"今天"的日期去比一个昨天的时刻，直接变成"永远没到点"。
     #   同理挤回当天 00:00，让当天第一个门铃就发。
     day_start = when.replace(hour=0, minute=0, second=0, microsecond=0)
-    last_tick = when.replace(hour=23, minute=last_dispatch_minute(), second=0, microsecond=0)
+    last_tick = when.replace(
+        hour=23,
+        minute=last_dispatch_minute(cadence if cadence is not None else dispatch_minutes_env()),
+        second=0,
+        microsecond=0,
+    )
     if due < day_start:
         due = day_start
     elif due > last_tick:

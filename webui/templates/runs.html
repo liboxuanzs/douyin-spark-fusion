@@ -57,6 +57,10 @@
           {% if not banner.until %}hidden{% endif %}>
       <span data-countdown-text>{{ banner.untilText }}</span>
     </span>
+    {# 「知道了」：只有服务端标了 dismissKey 的横幅（长期建议类）才给这个按钮。
+       点了存在浏览器本地（app.js），关掉之后同一条不再出现；出口变了键就变了。 #}
+    <button type="button" class="status-banner-dismiss" data-banner-dismiss="{{ banner.dismissKey or '' }}"
+            {% if not banner.dismissKey %}hidden{% endif %}>知道了</button>
   </div>
   {% endfor %}
   </div>
@@ -69,6 +73,7 @@
       <span class="pill info" data-countdown-until="" hidden>
         <span data-countdown-text></span>
       </span>
+      <button type="button" class="status-banner-dismiss" data-banner-dismiss="" hidden>知道了</button>
     </div>
   </template>
 

@@ -515,6 +515,26 @@
   // 每 10 秒都变一次；带上它等于每次轮询都重建 DOM（数字闪一下），
   // 而倒计时本来就有自己的每秒 tick（按 until 算），不需要靠重建来刷新。
   let bannerSignature = null;
+  // "知道了"：只有服务端标了 dismissKey 的横幅能关（长期建议类，例如"多个账号
+  // 共用一个出口"）。决定存在**浏览器本地**：这是个人的阅读偏好，不该写进 .env，
+  // 也不该因为换台电脑就消失。键里带着出口本身 —— 换过代理、换过宽带，同一句
+  // 提醒会自己回来。
+  const BANNER_DISMISS_PREFIX = "dsf:banner:";
+  const bannerDismissed = (key) => {
+    try {
+      return !!window.localStorage.getItem(BANNER_DISMISS_PREFIX + key);
+    } catch (error) {
+      // 隐私模式下 localStorage 会抛；抛了就当"没关过"，宁可多显示一条。
+      return false;
+    }
+  };
+  const rememberBannerDismissed = (key) => {
+    try {
+      window.localStorage.setItem(BANNER_DISMISS_PREFIX + key, "1");
+    } catch (error) {
+      // 存不进去也让这一屏先消失（下次轮询会再出现，属于可接受的降级）。
+    }
+  };
   const bannerKey = (banner) =>
     [
       banner.kind,
@@ -523,16 +543,20 @@
       banner.text,
       banner.icon,
       banner.until,
+      banner.dismissKey,
     ].join("\u0000");
   const updateBanners = (banners) => {
     const list = document.querySelector("[data-status-banner-list]");
     if (!list) return;
-    const signature = banners.map(bannerKey).join("\u0001");
+    const visible = banners.filter(
+      (banner) => !(banner.dismissKey && bannerDismissed(banner.dismissKey)),
+    );
+    const signature = visible.map(bannerKey).join("\u0001");
     if (signature === bannerSignature) return;
     bannerSignature = signature;
     const tpl = document.querySelector("template[data-status-banner-tpl]");
     list.textContent = "";
-    banners.forEach((banner) => {
+    visible.forEach((banner) => {
       const node = tpl ? tpl.content.firstElementChild.cloneNode(true) : null;
       if (!node) return;
       node.className = `status-banner ${banner.level || "info"}`;
@@ -554,10 +578,35 @@
         const countdown = pill.querySelector("[data-countdown-text]");
         if (countdown) countdown.textContent = banner.untilText || "";
       }
+      const close = node.querySelector("[data-banner-dismiss]");
+      if (close) {
+        close.hidden = !banner.dismissKey;
+        close.dataset.bannerDismiss = banner.dismissKey || "";
+        if (banner.dismissKey) {
+          close.addEventListener("click", () => {
+            rememberBannerDismissed(banner.dismissKey);
+            bannerSignature = null; // 下一次重画时它就该消失
+            updateBanners(banners);
+          });
+        }
+      }
       list.appendChild(node);
     });
     renderIcons(); // 克隆来的 <i data-lucide> 也得点亮，不然横幅前面少个图标
   };
+
+  // 首屏是服务端渲染的：已经点过"知道了"的横幅不该等到第一次轮询才消失。
+  const dropDismissedBanners = () => {
+    document
+      .querySelectorAll("[data-status-banner-list] [data-banner-dismiss]")
+      .forEach((node) => {
+        const key = node.getAttribute("data-banner-dismiss") || "";
+        if (!key || !bannerDismissed(key)) return;
+        const banner = node.closest("[data-status-banner]");
+        if (banner) banner.remove();
+      });
+  };
+  dropDismissedBanners();
 
   // 服务端 viewmodel.STATE_CHIP 会发过来的四档配色类名（模板把它写进
   // `class="status-chip {{ account.chip }}"`）。放在这里当一份可被测试对着看的词表：

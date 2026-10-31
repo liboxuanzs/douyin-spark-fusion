@@ -1177,7 +1177,17 @@ html[data-theme="light"] .progress-track { background: rgba(21, 28, 56, 0.08); }
 }
 .status-banner strong svg.lucide { width: 16px; height: 16px; flex: 0 0 auto; }
 .status-banner .banner-note { font-size: 12px; color: var(--text-3); white-space: nowrap; }
-
+/* 「知道了」：与装饰性的 pill 同款玻璃边框（issue #20）。 */
+.status-banner-dismiss {
+  border-color: var(--line);
+  border-radius: 999px;
+  background: var(--glass);
+  color: var(--text-3);
+  backdrop-filter: blur(8px);
+}
+.status-banner-dismiss:hover { color: var(--text); border-color: var(--text-3); }
+/* 出错的那天用 danger 色，别跟着主题走成绿色（issue #21）。 */
+.time-state-error { color: var(--danger); }
 .status-banner.success { background: linear-gradient(96deg, var(--success-soft), var(--glass) 62%); border-color: rgba(52, 211, 153, 0.26); }
 .status-banner.success::before { background: var(--success); color: var(--success); }
 .status-banner.success strong svg.lucide { color: var(--success); }

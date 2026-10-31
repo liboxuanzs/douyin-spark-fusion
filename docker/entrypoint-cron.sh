@@ -143,6 +143,11 @@ cat > /etc/cron.d/douyin-spark-flow <<EOF
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 TZ=${TZ}
+# 派发节奏要传给 cron 里的 python：应用侧靠它算“当天最后一次派发”在哪一分钟
+# （core/schedule.py 的 dispatch_minutes_env）。少了这一行，容器环境变量设成
+# CRON_TICK_MINUTES=10 时，应用仍旧按 5 分钟去夹取，夹出一个永不响的 23:55 ——
+# 落在那之后的账号当天一条都发不出去（issue #19）。
+CRON_TICK_MINUTES=${CRON_TICK_MINUTES}
 ${CRON_SCHEDULE} root /app/docker/run-task.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 EOF
 

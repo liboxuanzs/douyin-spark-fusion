@@ -121,6 +121,22 @@ class EntrypointCronTests(unittest.TestCase):
                               CRON_TICK_MINUTES=3)
         self.assertTrue(task.startswith("*/3 * * * * "), task)
 
+    def test_tick_is_exported_into_the_crontab_for_the_task_itself(self):
+        """issue #19：cron 里跑的那个 python 必须也读得到真实节奏。
+
+        应用侧按 `CRON_TICK_MINUTES` 算"当天最后一次派发"落在哪一分钟；而这个值
+        只存在于入口脚本的进程环境里 —— cron 拉起任务时环境是**另造**的（只有
+        PATH/LANG/TZ 那几项），不写进 crontab 就丢。丢了会怎样：`*/10` 的部署里
+        应用仍按 5 分钟算，把抖动后的时刻夹到 23:55，那分钟永不出现，当天尾巴上的
+        账号一条都发不出去。
+        """
+        self._run("TZ=Asia/Shanghai\nCRON_TICK_MINUTES=10\n")
+        with open(self.cron_file, encoding="utf-8") as f:
+            cron = f.read()
+        assignments = [ln.strip() for ln in cron.splitlines()
+                       if ln.strip().startswith("CRON_TICK_MINUTES=")]
+        self.assertEqual(assignments, ["CRON_TICK_MINUTES=10"], cron)
+
     def test_invalid_tick_falls_back_and_warns(self):
         out, task = self._run("TZ=Asia/Shanghai\nCRON_TICK_MINUTES=99\n")
         self.assertTrue(task.startswith(f"*/{core_schedule.TICK_MINUTES} "), task)

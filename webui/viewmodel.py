@@ -502,8 +502,17 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None,
     elif record:
         clock = str(record.get("sent_at") or "")[11:16]
         label = schedule.STATUS_LABELS.get(status, "已处理")
-        state_key = "sent"
-        state_text = f"今天 {clock} {label}（{record.get('source') or '手动'}）"
+        # 配色必须跟结论走：记成 error 的那天再涂成「已发」的绿色，等于把
+        # 「今天发过了」这句假话又说了一遍（issue #21）。认不出的状态用中性色。
+        if status == schedule.STATUS_ERROR:
+            state_key = "error"
+        elif status == schedule.STATUS_OK:
+            state_key = "sent"
+        else:
+            state_key = "unknown"
+        # 来源翻译成中文（timer → 定时任务）。这里从前直接印 `record['source']`，
+        # 页面上就出现「今天 17:30 已发（timer）」。
+        state_text = f"今天 {clock} {label}（{store.source_text(record.get('source') or '手动')}）"
     elif when >= plan["due_at"]:
         # 到点了但还没发：只有"今天一个定时检查都没敲到"或"刚跨过时间点"才会看到，
         # 文案要说明"不用管，下一轮定时检查就发"，否则用户会以为卡住了。
@@ -886,15 +895,22 @@ def account_cards(
 # ---------------------------------------------------------------- 连续天数（issue #15）
 
 
-def _attach_proxy(cards: List[Dict[str, Any]], cfg: Any, state: Any) -> int:
-    """给每张账号卡挂上"这个号走哪个出口"（issue #18），返回共用直连的账号数。
+def _attach_proxy(cards: List[Dict[str, Any]], cfg: Any, state: Any) -> Dict[str, Any]:
+    """给每张账号卡挂上"这个号走哪个出口"（issue #18），并算出"谁和谁共用一个出口"。
 
     卡上只放遮掩后的形态：`proxy_text` 是 host:port（或「直连」），`proxy_mask` 是带
     `***` 的完整地址（只用作输入框的 placeholder）—— 出口地址里通常带口令，页面上
     不能出现第二份明文。`card["proxy"]` 是原文，只给保存/自检链路用，模板不许渲染它。
+
+    返回值不是"直连的账号数"（旧写法只统计直连，配了全局代理的两个号共用同一个出口
+    反而一条提醒都没有 —— issue #20），而是**人最多的那一组共用出口**：
+
+        {count: n, kind: "direct"|"proxy", label: host:port, key: 隐藏键}
+
+    `count < 2` 表示没有可提醒的共用；`key` 只随出口变化（出口换了，提醒该重新出现）。
     """
     global_raw = proxy_mod.normalize(_get(cfg, "proxyAddress"))
-    shared = 0
+    groups: Dict[str, int] = {}
     for card in cards:
         own = proxy_mod.normalize(card.get("proxy"))
         effective = own or global_raw
@@ -908,9 +924,25 @@ def _attach_proxy(cards: List[Dict[str, Any]], cfg: Any, state: Any) -> int:
         card["proxy_check_text"] = (
             f"上次自检 {ip}（{at}）" if ip else "还没自检过：点「自检」看这个出口现在是什么 IP"
         )
-        if not card.get("orphan") and card.get("enabled", True) and not effective:
-            shared += 1
-    return shared
+        if card.get("orphan") or not card.get("enabled", True):
+            # 停用/孤儿账号不会真的发出去，不参与"共用出口"的判断。
+            continue
+        groups[effective] = groups.get(effective, 0) + 1
+    best_effective, count = "", 0
+    for effective, size in groups.items():
+        if size > count:        # 人最多的一组；同票保持插入顺序（先配的先算）
+            best_effective, count = effective, size
+    if count < 2:
+        return {"count": 0, "kind": "direct", "label": "", "key": ""}
+    kind = "proxy" if best_effective else "direct"
+    label = proxy_mod.describe(best_effective)
+    return {
+        "count": count,
+        "kind": kind,
+        "label": label,
+        "key": f"proxy_shared:{kind}:{label}",
+    }
+
 def _attach_streak(cards: Sequence[Dict[str, Any]], data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把 core.streak 的结果贴到账号卡上（一张卡一份）。
 
@@ -1297,6 +1329,31 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
     }
 
 
+def _shared_proxy_group(value: Any) -> Optional[Dict[str, Any]]:
+    """把 `_attach_proxy()` 的结果（或旧版的整数）归一成横幅要用的那一组。
+
+    整数是旧接口（="直连的账号数"）：留着它是因为调用方可能还在传，
+    也方便测试直接构造"两个号共用出口"这种局面。
+    """
+    if isinstance(value, dict):
+        count = _int(value.get("count"))
+        if count < 2:
+            return None
+        kind = "proxy" if _text(value.get("kind")) == "proxy" else "direct"
+        label = _text(value.get("label")) or ("代理" if kind == "proxy" else "直连")
+        return {
+            "count": count,
+            "kind": kind,
+            "label": label,
+            "key": _text(value.get("key")) or f"proxy_shared:{kind}:{label}",
+        }
+    count = _int(value)
+    if count < 2:
+        return None
+    return {"count": count, "kind": "direct", "label": "直连",
+            "key": "proxy_shared:direct:直连"}
+
+
 def _banners(
     *,
     cooldown: Dict[str, Any],
@@ -1310,7 +1367,7 @@ def _banners(
     newest_note: str = "",
     selected_missing: str = "",
     streak_labels: Sequence[str] = (),
-    proxy_shared: int = 0,
+    proxy_shared: Any = 0,
 ) -> List[Dict[str, Any]]:
     """页面顶部的状态横幅（B 的 ``status-banner``）。顺序 = 紧急程度。"""
     banners: List[Dict[str, Any]] = []
@@ -1422,20 +1479,7 @@ def _banners(
                 "secondsLeft": 0,
             }
         )
-    if proxy_shared >= 2:
-        # 共用出口是**已知的风控面**（README/FAQ：掉登录头号起因是出口 IP 变了）。
-        # 单账号时直连反而最稳，所以只在两个以上账号都走同一个出口时才提醒。
-        banners.append(
-            {
-                "kind": "proxy_shared",
-                "level": "info",
-                "title": "多个账号共用一个出口",
-                "text": f"{proxy_shared} 个账号都是直连（同一个出口 IP）。出口 IP 一变就可能要重新扫码登录；"
-                "要让某个账号单独走一个出口，在它的账号卡里填「出口」。",
-                "until": "",
-                "secondsLeft": 0,
-            }
-        )
+
     if streak_labels:
         # 断签是"已经发生的事"，不是"等一下会好的事"：它必须出现在首屏，
         # 否则用户要先滚到某张账号卡才能发现自己漏了一天。
@@ -1452,6 +1496,38 @@ def _banners(
                 "连续天数不会因此恢复，但今天这一格能接上。",
                 "until": "",
                 "secondsLeft": 0,
+            }
+        )
+    group = _shared_proxy_group(proxy_shared)
+    if group:
+        # 共用出口是**已知的风控面**（README/FAQ：掉登录的头号起因是出口 IP 变了）。
+        # 单账号时直连反而最稳，所以只在两个以上账号走同一个出口时才提醒 ——
+        # 但"同一个出口"既包括都直连，也包括都走同一个代理（issue #20：旧写法把
+        # 后者漏掉了，而它恰恰是更危险的那种：代理一挂，两个号一起掉线）。
+        # 顺序上排在断签之后：断签是"已经发生的事"，这条是"长期建议"。
+        if group["kind"] == "proxy":
+            text = (
+                f"{group['count']} 个账号都走同一个代理 {group['label']}。"
+                "代理换 IP 或不通用的时候，这几个账号会一起受影响；"
+                "要给某个账号单独走一个出口，在它的账号卡里填「出口」。"
+            )
+        else:
+            text = (
+                f"{group['count']} 个账号都是直连，用的是同一个出口 IP。"
+                "出口 IP 一变（换宽带、换网络、换城市）就可能要重新扫码登录；"
+                "要给某个账号单独走一个出口，在它的账号卡里填「出口」。"
+            )
+        banners.append(
+            {
+                "kind": "proxy_shared",
+                "level": "info",
+                "title": "多个账号共用一个出口",
+                "text": text,
+                "until": "",
+                "secondsLeft": 0,
+                # 出口不常变，这条提醒却会一直挂在首页 —— 给一个"知道了"的出口。
+                # 键里带出口本身：换过代理/换过宽带，提醒会自己回来。
+                "dismissKey": group["key"],
             }
         )
     if blocked_reason and not banners:
@@ -1768,6 +1844,9 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
                 "icon": _text(banner.get("icon"), "info"),
                 "until": _text(banner.get("until")),
                 "untilText": _text(banner.get("untilText")),
+                # 「知道了」的键：不带出去的话，首屏还在、10 秒后轮询一刷新
+                # 按钮就没了（而用户刚关掉的横幅又会自己回来）。
+                "dismissKey": _text(banner.get("dismissKey")),
             }
             for banner in (view.get("banners") or [])
         ],

@@ -244,6 +244,59 @@ class LastDispatchMinuteTests(unittest.TestCase):
         self.assertEqual(plan["due_at"].date(), when.date())
 
 
+class DispatchCadenceEnvTests(unittest.TestCase):
+    """issue #19：应用侧必须知道**当前部署真实的**派发节奏。
+
+    从前 `plan_for()` 永远按 `DISPATCH_MINUTES`（5）夹取，docker 里把
+    `CRON_TICK_MINUTES` 调成 10 之后，夹出来的 23:55 在 `*/10 * * * *` 的刻度上
+    根本不存在 —— 落在 23:50~23:59 的账号当天一条都发不出去，而且一声不吭。
+    """
+
+    def test_default_without_any_env_is_the_shipped_cadence(self):
+        self.assertEqual(schedule.dispatch_minutes_env({}), schedule.DISPATCH_MINUTES)
+
+    def test_reads_cron_tick_minutes(self):
+        self.assertEqual(schedule.dispatch_minutes_env({"CRON_TICK_MINUTES": "10"}), 10)
+        # 带空格、字符串小数（configTool 会写 `15.0` 这种）都要认
+        self.assertEqual(schedule.dispatch_minutes_env({"CRON_TICK_MINUTES": " 7 "}), 7)
+        self.assertEqual(schedule.dispatch_minutes_env({"CRON_TICK_MINUTES": "15.0"}), 15)
+
+    def test_bad_values_fall_back_instead_of_raising(self):
+        # 这个函数跑在 `plan_for()` 里，抛出去 = 面板整页 500、派发器整轮炸
+        for bad in ("", "  ", "abc", "1e999", "-3", "0"):
+            with self.subTest(bad=bad):
+                got = schedule.dispatch_minutes_env({"CRON_TICK_MINUTES": bad})
+                self.assertGreaterEqual(got, schedule.TICK_MIN)
+                self.assertLessEqual(got, 59)
+
+    def test_explicit_cron_schedule_is_understood(self):
+        # 老用户直接写整条表达式（容器日志里会警告抖动失效），节奏照样认得出来
+        self.assertEqual(
+            schedule.dispatch_minutes_env({"CRON_SCHEDULE": "*/10 * * * *"}), 10)
+        self.assertEqual(
+            schedule.dispatch_minutes_env({"CRON_SCHEDULE": "*/7 * * * *"}), 7)
+        # 一天一次 / 分钟列表都没有单一节奏 → 回落到默认，不瞎猜
+        for other in ("0 20 * * *", "0,30 * * * *", "* * * * *"):
+            with self.subTest(other=other):
+                self.assertEqual(schedule.dispatch_minutes_env({"CRON_SCHEDULE": other}),
+                                 schedule.DISPATCH_MINUTES)
+
+    def test_cron_tick_wins_over_schedule(self):
+        got = schedule.dispatch_minutes_env(
+            {"CRON_TICK_MINUTES": "5", "CRON_SCHEDULE": "*/10 * * * *"})
+        self.assertEqual(got, 5)
+
+    def test_plan_clamps_onto_the_real_cadence(self):
+        """★ 核心回归：`*/10` 的部署里，夹取上界必须落在 :50（刻度上），而不是 :55。"""
+        when = _at("2026-10-07 00:00:00")
+        with mock.patch.object(schedule, "jitter_minutes", return_value=15):
+            plan = schedule.plan_for({"unique_id": "11223344556", "time": "23:58"},
+                                     when=when, fallback="20:30", jitter=15, cadence=10)
+        self.assertEqual(plan["due_at"], when.replace(hour=23, minute=50))
+        self.assertEqual(plan["due_at"].date(), when.date())
+        self.assertEqual(plan["due_at"].minute % 10, 0, "夹取上界必须真的会响")
+
+
 class JitterEnvTests(unittest.TestCase):
     def test_bad_values_fall_back_to_the_default(self):
         for bad in ("", "  ", "abc", None):

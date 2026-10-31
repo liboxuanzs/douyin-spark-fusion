@@ -3866,12 +3866,20 @@ class FrontendAgreementTests(unittest.TestCase):
         而那条 `data-countdown-until` 倒计时也永远等不到它的横幅。
         """
         for hook in ("data-status-banner-list", "data-status-banner-tpl",
-                     "data-status-banner-icon", "data-status-banner-text"):
+                     "data-status-banner-icon", "data-status-banner-text",
+                     "data-banner-dismiss"):
             self.assertIn(hook, self.dashboard, f"首页少了挂点 {hook}")
             self.assertIn(hook, self.runs, f"运行记录页少了挂点 {hook}")
             self.assertIn(hook, self.js, f"轮询没重画 {hook}")
         self.assertIn("updateBanners", self.js)
-        # 倒计时必须**每次**重新取节点：否则轮询新插进来的横幅没有倒计时
+        # issue #20：共用出口是长期建议，光"挂在首页"没有出口 —— 给一个「知道了」。
+        self.assertIn("dsf:banner:", self.js, "关掉的横幅要记住，否则刷新又回来")
+        self.assertIn("bannerDismissed", self.js)
+        css = (REPO_ROOT / "webui" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn(".status-banner-dismiss", css)
+        # issue #21：出错的那天不能用「已发」的绿色（两个类名由轮询逐字写回）。
+        self.assertIn(".time-state-error", css)
+        self.assertIn("time-state-${state}", self.js)        # 倒计时必须**每次**重新取节点：否则轮询新插进来的横幅没有倒计时
         self.assertNotIn('const nodes = [...document.querySelectorAll("[data-countdown-until]")]', self.js)
         self.assertIn('document.querySelectorAll("[data-countdown-until]").forEach', self.js)
         # 服务端把同一份横幅发出来（文案只有 viewmodel._banners() 一处）

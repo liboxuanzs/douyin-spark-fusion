@@ -40,7 +40,25 @@ docker compose down         # 停止
 docker compose restart      # 重启（改配置后）
 ```
 
-## 6. 给 configTool 配配套代理
+## 6. 调发送节奏（可选）
+
+默认每 `5` 分钟检查一次（crontab 是 `*/5 * * * *`）。**各账号几点发**由 `.env` 里的
+`TASKS[].time` 决定，这个频率只决定"最多迟到几分钟"：5 分钟一查 = 最多迟到 5 分钟。
+
+想放宽到没那么像打卡，在 `./config/.env` 里加：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `CRON_TICK_MINUTES` | `5` | 每 N 分钟检查一次，取 1–59 的整数。调大 = 更松散、迟到更多。 |
+| `CRON_SCHEDULE` | 空 | 直接指定整条 cron 表达式，写了就原样用；此时 `SCHEDULE_JITTER_MINUTES` 的浮动会失效（容器日志里会警告）。 |
+
+改完要 `docker compose restart` 才生效。
+
+> 这两个值只写 cron 是不够的：应用侧也读同一个 `CRON_TICK_MINUTES`，用来算"当天最后一次
+> 检查落在哪一分钟"，好把抖动后的发送时刻夹进真正会响的刻度里。只改 cron 不改配置（或反过来），
+> 落在当天尾巴上的账号就会一条都发不出去 —— 详见 [issue #19](https://github.com/liboxuanzs/douyin-spark-fusion/issues/19)。
+
+## 7. 给 configTool 配配套代理
 
 本地 configTool 抓 Cookie 时，需要走服务器上的 gost 容器，让出口 IP 与任务一致。在 configTool 的「工具配置」页签填：
 
@@ -52,7 +70,7 @@ docker compose restart      # 重启（改配置后）
 
 > 端口别省 —— configTool 不会给 `ws://` 补默认端口。
 
-## 7. 安全提醒
+## 8. 安全提醒
 
 - `.env` 里的 `GOST_PASSWORD` 要设成足够长的随机串（留空则 docker compose 无法启动）
 - 建议在云服务器安全组里限制 9000 端口的来源 IP（只放你本机出口）

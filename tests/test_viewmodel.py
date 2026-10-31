@@ -2372,7 +2372,23 @@ class ProxyViewTests(unittest.TestCase):
         self.assertEqual(banners[0]["level"], "info")
         self.assertIn("2 个账号", banners[0]["text"])
 
-    def test_配了代理就不提醒(self):
+    def test_都走同一个代理也算共用出口(self):
+        """issue #20：两个号都继承全局代理时，共用出口反而被漏报。
+
+        旧写法只数"直连的账号"，`PROXY_ADDRESS` 一填，`proxy_shared` 就恒为 0 ——
+        而代理挂掉或换 IP 时这两个号是一起掉线的，比直连更需要这句提醒。
+        """
+        view = self._view(
+            [_snapshot(unique_id="10001"), _snapshot(username="账号乙", unique_id="10002")],
+            cfg={"proxyAddress": "http://g:2"},
+        )
+        banners = [item for item in view["banners"] if item["kind"] == "proxy_shared"]
+        self.assertEqual(len(banners), 1)
+        self.assertIn("都走同一个代理 g:2", banners[0]["text"])
+        self.assertTrue(banners[0]["dismissKey"].startswith("proxy_shared:proxy:"))
+        self.assertIn("g:2", banners[0]["dismissKey"])
+
+    def test_出口不同的账号不算共用(self):
         view = self._view(
             [_snapshot(unique_id="10001", proxy="http://h:1"), _snapshot(unique_id="10002")],
             cfg={"proxyAddress": "http://g:2"},
@@ -2380,6 +2396,52 @@ class ProxyViewTests(unittest.TestCase):
         self.assertEqual(
             [item for item in view["banners"] if item["kind"] == "proxy_shared"], []
         )
+
+    def test_共用出口的提醒键里带着出口本身(self):
+        """「知道了」要能关掉，但换过出口之后必须自己回来 —— 所以键里带出口。"""
+        direct = [item for item in self._view([
+            _snapshot(unique_id="10001"), _snapshot(unique_id="10002"),
+        ])["banners"] if item["kind"] == "proxy_shared"][0]
+        self.assertEqual(direct["dismissKey"], "proxy_shared:direct:直连")
+        proxied = [item for item in self._view(
+            [_snapshot(unique_id="10001"), _snapshot(unique_id="10002")],
+            cfg={"proxyAddress": "http://g:2"},
+        )["banners"] if item["kind"] == "proxy_shared"][0]
+        self.assertNotEqual(direct["dismissKey"], proxied["dismissKey"])
+
+    def _banners(self, **kwargs):
+        base = dict(cooldown={}, quiet={}, task={}, summary={}, missing_browser=[],
+                    blocked_reason="")
+        base.update(kwargs)
+        return viewmodel._banners(**base)
+
+    def test_断签排在共用出口之前(self):
+        """issue #20：断签是"已经发生的事"，共用出口是"长期建议"，别抢它前面。"""
+        banners = self._banners(
+            streak_labels=["🌈LBX🌈"],
+            proxy_shared={"count": 2, "kind": "direct", "label": "直连",
+                          "key": "proxy_shared:direct:直连"},
+        )
+        kinds = [item["kind"] for item in banners]
+        self.assertLess(kinds.index("streak"), kinds.index("proxy_shared"))
+
+    def test_轮询载荷里带着可以关掉的键(self):
+        """★ 漏了这个键，首屏有「知道了」、10 秒后轮询一刷新就没了。"""
+        view = self._view([_snapshot(unique_id="10001"), _snapshot(unique_id="10002")])
+        payload = viewmodel.overview_payload(view)
+        banner = [item for item in payload["banners"] if item["kind"] == "proxy_shared"][0]
+        self.assertEqual(banner["dismissKey"], "proxy_shared:direct:直连")
+        # 别的横幅没有这个键 → 前端不给按钮，也不许按空串去关
+        self.assertTrue(all(item["dismissKey"] == "" for item in payload["banners"]
+                            if item["kind"] != "proxy_shared"))
+
+    def test_旧接口传整数仍然认(self):
+        """`_banners(proxy_shared=2)` 是旧签名（直连账号数），别让调用方一改就炸。"""
+        banners = self._banners(proxy_shared=2)
+        self.assertEqual(
+            [item["kind"] for item in banners], ["proxy_shared"]
+        )
+        self.assertEqual(banners[0]["dismissKey"], "proxy_shared:direct:直连")
 
     def test_停用的账号不算共用出口(self):
         view = self._view([
@@ -2397,6 +2459,72 @@ class ProxyViewTests(unittest.TestCase):
         )
         self.assertEqual(card["proxy_check_ip"], "203.0.113.7")
         self.assertIn("203.0.113.7", card["proxy_check_text"])
+
+class AccountMarkColorTests(unittest.TestCase):
+    """issue #21：账号卡上那串时间是绿是红，必须跟当天结论一致。
+
+    `state_key` 从前写死成 `"sent"`，于是记成 `error`（发挂了）的那天也涂成
+    「已送达」的绿色 —— 页面上同时出现「已发」和「出错」两个词，绿色那半句更显眼。
+    顺带把 `record["source"]` 的英文（timer/webui/cli）翻成中文。
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="dsf-mark-color-")
+        self.addCleanup(shutil.rmtree, self._dir, True)
+        self._old_state = os.environ.get("SCHEDULE_STATE_FILE")
+        os.environ["SCHEDULE_STATE_FILE"] = os.path.join(self._dir, "schedule_state.json")
+
+        def restore():
+            if self._old_state is None:
+                os.environ.pop("SCHEDULE_STATE_FILE", None)
+            else:
+                os.environ["SCHEDULE_STATE_FILE"] = self._old_state
+        self.addCleanup(restore)
+
+    @staticmethod
+    def _when(text="2026-10-12 23:00:00"):
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").astimezone()
+
+    def _mark(self, status, *, source="timer", note="", uid="10060yi"):
+        when = self._when("2026-10-12 21:30:00")
+        state = schedule.load_state()
+        schedule.mark_sent(state, uid, when=when, status=status,
+                           plan={"time": "21:30", "due_at": when},
+                           run_id="r1", source=source, note=note)
+        schedule.save_state(state)
+
+    def _fields(self):
+        return viewmodel.schedule_fields("10060yi", "21:30", when=self._when())
+
+    def test_真正发出去的那天才是已发的绿色(self):
+        self._mark(schedule.STATUS_OK)
+        fields = self._fields()
+        self.assertEqual(fields["send_state"], "sent")
+        self.assertIn("已发", fields["send_state_text"])
+
+    def test_出错的那天不能涂成已送达的绿色(self):
+        self._mark(schedule.STATUS_ERROR, note="nothing_sent")
+        fields = self._fields()
+        self.assertEqual(fields["send_state"], "error")
+        self.assertIn("出错", fields["send_state_text"])
+
+    def test_来源翻成中文而不是印英文键(self):
+        self._mark(schedule.STATUS_OK, source="timer")
+        text = self._fields()["send_state_text"]
+        self.assertIn("定时任务", text)
+        self.assertNotIn("timer", text)
+
+    def test_认不出的状态用中性色(self):
+        """面板自己升级/降级时，认不出的 status 不许冒充绿色。"""
+        when = self._when("2026-10-12 21:30:00")
+        state = schedule.load_state()
+        state.setdefault("accounts", {})["10060yi"] = {
+            "date": "2026-10-12", "time": "21:30", "due_at": schedule.iso(when),
+            "sent_at": schedule.iso(when), "run_id": "old",
+            "status": "weird", "source": "cli", "note": "",
+        }
+        schedule.save_state(state)
+        self.assertEqual(self._fields()["send_state"], "unknown")
 
 
 if __name__ == "__main__":
