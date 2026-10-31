@@ -4043,3 +4043,830 @@ html[data-theme="light"] .segmented-control.has-thumb .segment-button.active:hov
   .proxy-input { flex: 1 1 100%; }
 }
 
+/* == 25 视觉统一层：一套色、三层深、一条基线 ================================
+   这一层解决三件事，全部是覆盖式追加，删掉本分区即可整体回滚：
+
+   1) 一套色。原来光谱是「青 → 靛 → 紫 → 粉」四段，青和粉各自往外拉，页面上出现
+      两种互不相干的强调色；现在收成「蓝 → 靛 → 紫 → 淡紫」一条色相带，强调色只剩
+      一个 --accent（靛），彩虹只出现在品牌标、主按钮、进度条、当前导航这四处。
+   2) 三层深。原来横幅、概览条、KPI 卡、面板、账号卡全是同一档玻璃（同样的
+      rgba 白 4.5% + 同一档阴影），页面没有面的层级，眼睛只能靠边框找边界。现在
+      定面 1（面板）/ 面 2（面板里的块）/ 面 3（悬停、浮层）三档，外加一条 1px
+      描边和一条上沿高光；大面积面板不再用 backdrop-filter（玻璃感留在整页背景上，
+      卡面要「实」才压得住底下的光）。
+   3) 一条基线。间距按 4 的倍数收口（8/10/14/18/22），字号按 10.5/11/12/12.5/13/
+      15 一条刻度走，数字统一 tabular-nums，标签统一大写 + 0.12em 字距。
+
+   写在这一层里的选择器一律加 html[data-skin="aurora"] 前缀（0,2,1），稳压上面
+   分区里同名的普通规则（0,1,0），也不用去动 07/08/11 那些原始分区。
+   ========================================================================= */
+
+/* -- 25.0 语义令牌 ------------------------------------------------------- */
+
+html[data-skin="aurora"] {
+  /* 面：1 = 面板，2 = 面板里的块（表格、折叠块、编辑区），3 = 悬停与浮层。
+     深色是「白叠黑」的三档不透明度，浅色换成实色（见 25.14），组件规则只写一次。 */
+  --surface-1:      rgba(255, 255, 255, 0.038);
+  --surface-2:      rgba(255, 255, 255, 0.058);
+  --surface-3:      rgba(255, 255, 255, 0.088);
+  --surface-sunken: rgba(2, 4, 12, 0.34);
+  --surface-card:   rgba(17, 19, 29, 0.94);
+  --surface-page:   #06070d;
+  --table-head:     rgba(13, 15, 24, 0.98);
+
+  --stroke:         rgba(255, 255, 255, 0.07);
+  --stroke-strong:  rgba(255, 255, 255, 0.13);
+  --stroke-soft:    rgba(255, 255, 255, 0.045);
+
+  --elev-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+            0 1px 2px rgba(0, 0, 0, 0.4),
+            0 16px 34px -28px rgba(0, 0, 0, 0.95);
+  --elev-2: 0 1px 0 rgba(255, 255, 255, 0.05) inset,
+            0 2px 6px -3px rgba(0, 0, 0, 0.5),
+            0 26px 56px -32px rgba(0, 0, 0, 1);
+  --elev-3: 0 44px 96px -46px rgba(0, 0, 0, 1),
+            0 2px 12px -6px rgba(0, 0, 0, 0.9);
+
+  --r-1: 8px;
+  --r-2: 10px;
+  --r-3: 14px;
+  --r-4: 18px;
+
+  --focus-ring: 0 0 0 1px var(--accent), 0 0 0 4px rgba(124, 131, 255, 0.2);
+}
+
+/* -- 25.0b 色相收口：彩虹从四段收到一条「蓝 → 靛 → 紫 → 淡紫」 ---------- */
+
+html[data-skin="aurora"] {
+  --c1: #7c86ff;
+  --c2: #8b8cf8;
+  --c3: #a78bfa;
+  --c4: #c4b5fd;
+
+  /* 主按钮、头像、勾选框都用这条光谱打底，上面压的是近黑的 --accent-ink：
+     最亮处 #7c86ff 与 #070a16 是 6.2:1，过了正文 4.5:1 的线。 */
+  --spectrum:      linear-gradient(100deg, #7c86ff 0%, #8b8cf8 34%, #a78bfa 68%, #c4b5fd 100%);
+  --spectrum-soft: linear-gradient(100deg, rgba(124, 134, 255, 0.2), rgba(139, 140, 248, 0.22) 34%, rgba(167, 139, 250, 0.22) 68%, rgba(196, 181, 253, 0.18));
+  --spectrum-line: linear-gradient(90deg, rgba(124, 134, 255, 0), rgba(124, 134, 255, 0.7) 18%, rgba(167, 139, 250, 0.7) 62%, rgba(196, 181, 253, 0));
+}
+
+html[data-theme="light"][data-skin="aurora"] {
+  --c1: #1d4ed8;
+  --c2: #4338ca;
+  --c3: #6d28d9;
+  --c4: #9333ea;
+  --spectrum:      linear-gradient(100deg, #1d4ed8 0%, #4338ca 34%, #6d28d9 68%, #9333ea 100%);
+  --spectrum-soft: linear-gradient(100deg, rgba(29, 78, 216, 0.16), rgba(67, 56, 202, 0.16) 34%, rgba(109, 40, 217, 0.16) 68%, rgba(147, 51, 234, 0.14));
+  --spectrum-line: linear-gradient(90deg, rgba(29, 78, 216, 0), rgba(29, 78, 216, 0.65) 18%, rgba(109, 40, 217, 0.65) 62%, rgba(147, 51, 234, 0));
+}
+
+/* -- 25.1 画布：把「偏紫的雾」收成一束冷光 --------------------------------- */
+
+html[data-skin="aurora"] body { background: var(--surface-page); }
+
+html[data-skin="aurora"] .aurora-scene::before {
+  background:
+    radial-gradient(112% 82% at 10% -8%, rgba(58, 84, 178, 0.3) 0%, rgba(58, 84, 178, 0) 58%),
+    radial-gradient(96% 72% at 92% 2%, rgba(108, 60, 170, 0.2) 0%, rgba(108, 60, 170, 0) 54%),
+    radial-gradient(120% 96% at 50% 116%, rgba(34, 62, 148, 0.16) 0%, rgba(34, 62, 148, 0) 62%),
+    linear-gradient(180deg, #06070d 0%, #080a12 52%, #05060b 100%);
+}
+
+/* 三段极光只剩「冷蓝 / 靛 / 淡紫」一条色相带：色相不再跨到青和粉。 */
+html[data-skin="aurora"] .aurora-blob {
+  opacity: 0.24;
+  filter: blur(132px) saturate(0.86);
+}
+html[data-skin="aurora"] .aurora-blob--a {
+  background: radial-gradient(circle at 34% 34%, rgba(59, 130, 246, 0.5), rgba(59, 130, 246, 0) 62%);
+}
+html[data-skin="aurora"] .aurora-blob--b {
+  background: radial-gradient(circle at 60% 40%, rgba(139, 92, 246, 0.46), rgba(139, 92, 246, 0) 64%);
+}
+html[data-skin="aurora"] .aurora-blob--c {
+  background: radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.4), rgba(99, 102, 241, 0) 60%);
+}
+html[data-skin="aurora"] .aurora-grid {
+  background-size: 88px 88px;
+  opacity: 0.75;
+}
+html[data-skin="aurora"] .aurora-vignette {
+  background: radial-gradient(128% 104% at 50% 34%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, 0.68) 100%);
+}
+
+/* -- 25.2 指挥条 / 抽屉导航 ----------------------------------------------- */
+
+html[data-skin="aurora"] .sidebar {
+  background: linear-gradient(180deg, rgba(11, 13, 21, 0.94), rgba(7, 9, 15, 0.97));
+  border-right: 1px solid var(--stroke);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+}
+
+html[data-skin="aurora"] .nav-item {
+  border-radius: var(--r-1);
+  color: var(--text-2);
+  font-weight: 550;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+html[data-skin="aurora"] .nav-item:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+}
+html[data-skin="aurora"] .nav-item.active {
+  background: rgba(124, 131, 255, 0.14);
+  color: var(--text);
+}
+/* 当前项：竖栏时代是左光条、横排之后是底部光谱 —— 统一成一根强调色 */
+html[data-skin="aurora"] .nav-item.active::before {
+  background: var(--accent);
+  box-shadow: none;
+  opacity: 1;
+}
+html[data-skin="aurora"] .nav-item.active svg.lucide { color: var(--accent); }
+
+html[data-skin="aurora"] .nav-group-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--text-4);
+}
+
+html[data-skin="aurora"] .brand-title { letter-spacing: -0.01em; }
+html[data-skin="aurora"] .brand-subtitle { color: var(--text-4); letter-spacing: 0.04em; }
+
+@media (min-width: 1081px) {
+  html[data-skin="aurora"] .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--stroke);
+    background: linear-gradient(180deg, rgba(9, 11, 18, 0.9), rgba(7, 9, 15, 0.82));
+  }
+  html[data-skin="aurora"] .nav-item { border-radius: 999px; }
+  html[data-skin="aurora"] .nav-item.active {
+    background: rgba(124, 131, 255, 0.16);
+    box-shadow: inset 0 0 0 1px rgba(124, 131, 255, 0.22);
+  }
+  /* 横排里左光条会压到前一项身上，改成胶囊内的一根短下划线 */
+  html[data-skin="aurora"] .nav-item.active::before {
+    left: 14px;
+    right: 14px;
+    top: auto;
+    bottom: 5px;
+    width: auto;
+    height: 2px;
+    transform: none;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0.9;
+  }
+}
+
+/* -- 25.3 页头：标题回到实色，一道发丝线把页头和内容分开 ------------------- */
+
+html[data-skin="aurora"] :where(.page-heading h1) {
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  color: var(--text);
+  -webkit-text-fill-color: currentColor;
+  font-size: clamp(20px, 0.9vw + 15px, 26px);
+  font-weight: 640;
+  letter-spacing: -0.012em;
+}
+html[data-skin="aurora"] .page-heading p {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+html[data-skin="aurora"] .page-header {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--stroke);
+}
+html[data-skin="aurora"] .page-header::after { display: none; }
+
+/* -- 25.4 面板骨架：面 1 + 1px 描边 + 上沿高光，不用毛玻璃 ------------------ */
+
+html[data-skin="aurora"] .dashboard-section {
+  --panel-radius: var(--r-3);
+  padding: 22px 24px 24px;
+  gap: 18px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-3);
+  background: linear-gradient(180deg, rgba(17, 19, 29, 0.94), rgba(10, 12, 19, 0.97));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--elev-1);
+  animation: none;
+}
+html[data-skin="aurora"] :where(.dashboard-section.section-flush) {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+html[data-skin="aurora"] :where(.dashboard-section.section-flush > .collapsible-section) {
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-1);
+}
+
+html[data-skin="aurora"] .section-header { align-items: center; gap: 14px; }
+
+html[data-skin="aurora"] .section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 15px;
+  font-weight: 620;
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+/* 标题前一根 2×14 的强调色短条 —— 替掉原来标题下面那道 26px 光谱下划线 */
+html[data-skin="aurora"] .section-title::after {
+  content: "";
+  order: -1;
+  display: block;
+  width: 2px;
+  height: 14px;
+  margin: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+html[data-skin="aurora"] .section-header .muted,
+html[data-skin="aurora"] .muted.compact {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-4);
+}
+html[data-skin="aurora"] .section-link {
+  font-size: 12px;
+  color: var(--accent);
+  border-radius: var(--r-1);
+}
+
+/* 折叠块：面 2，收起时更暗一档，展开才是「一块内容」 */
+html[data-skin="aurora"] .collapsible-section {
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.026);
+}
+html[data-skin="aurora"] .collapsible-section[open] {
+  border-color: var(--stroke);
+  background: var(--surface-1);
+}
+html[data-skin="aurora"] .collapsible-section > summary { padding: 13px 16px; }
+html[data-skin="aurora"] .collapsible-section > summary:hover { background: rgba(255, 255, 255, 0.04); }
+html[data-skin="aurora"] .summary-copy strong { font-size: 13px; font-weight: 600; }
+html[data-skin="aurora"] .summary-copy small { font-size: 11.5px; color: var(--text-4); }
+html[data-skin="aurora"] .summary-value { font-size: 12px; color: var(--text-3); }
+html[data-skin="aurora"] .collapsible-body { padding: 15px 16px 16px; border-top: 1px solid var(--stroke-soft); }
+
+/* -- 25.5 概览条：一整块「今日状态」，四格靠发丝线分栏 --------------------- */
+
+html[data-skin="aurora"] .overview-strip {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-3);
+  background: linear-gradient(180deg, rgba(18, 20, 31, 0.95), rgba(10, 12, 19, 0.97));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--elev-1);
+}
+html[data-skin="aurora"] .overview-strip::before { display: none; }
+html[data-skin="aurora"] .overview-strip::after { display: none; }
+
+html[data-skin="aurora"] .overview-primary,
+html[data-skin="aurora"] .overview-cell { padding: 20px 22px; }
+html[data-skin="aurora"] .overview-cell { border-left: 1px solid var(--stroke-soft); }
+html[data-skin="aurora"] .overview-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  color: var(--text-4);
+}
+html[data-skin="aurora"] .overview-primary .overview-value {
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  color: var(--text);
+  -webkit-text-fill-color: currentColor;
+  font-size: clamp(28px, 1.8vw + 16px, 38px);
+  font-weight: 660;
+  letter-spacing: -0.03em;
+}
+html[data-skin="aurora"] .overview-strip .overview-value:not(.overview-value--short):not(.overview-value--prose) {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+html[data-skin="aurora"] .overview-help { font-size: 11.5px; line-height: 1.6; color: var(--text-4); }
+html[data-skin="aurora"] .overview-head { gap: 8px; }
+
+/* -- 25.6 KPI 卡：数字不再发光，语义色只留在数字和标签点上 ----------------- */
+
+html[data-skin="aurora"] .metric-grid { gap: 12px; }
+html[data-skin="aurora"] .metric-card {
+  gap: 8px;
+  padding: 16px 18px 15px;
+  min-height: 128px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--elev-1);
+  animation: none;
+}
+html[data-skin="aurora"] .metric-card:hover {
+  transform: none;
+  border-color: var(--stroke-strong);
+  box-shadow: var(--elev-1);
+}
+html[data-skin="aurora"] .metric-card::before { display: none; }
+html[data-skin="aurora"] .metric-card::after { display: none; }
+html[data-skin="aurora"] .metric-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
+}
+html[data-skin="aurora"] .metric-label::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--metric-tone, var(--accent));
+  opacity: 0.9;
+}
+html[data-skin="aurora"] .metric-value {
+  font-size: clamp(26px, 1.4vw + 16px, 32px);
+  font-weight: 620;
+  letter-spacing: -0.03em;
+  text-shadow: none;
+}
+html[data-skin="aurora"] .metric-card .metric-value { text-shadow: none; }
+html[data-skin="aurora"] .metric-help { font-size: 11.5px; line-height: 1.6; color: var(--text-4); }
+
+/* -- 25.7 表格：一行一条发丝线，不要斑马纹，不要每行的厚重边框 ------------- */
+
+html[data-skin="aurora"] .table-shell {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-2);
+  background: var(--surface-sunken);
+}
+html[data-skin="aurora"] .table-shell table { font-size: 12.5px; }
+html[data-skin="aurora"] .table-shell thead th {
+  padding: 10px 14px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  color: var(--text-4);
+  background: var(--table-head);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-bottom: 1px solid var(--stroke);
+}
+html[data-skin="aurora"] .table-shell tbody td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--stroke-soft);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+html[data-skin="aurora"] .table-shell tbody tr:hover { background: rgba(255, 255, 255, 0.032); }
+html[data-skin="aurora"] .table-shell tbody tr.is-selected {
+  background: rgba(124, 131, 255, 0.1);
+}
+html[data-skin="aurora"] .table-shell tbody tr.is-selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+html[data-skin="aurora"] .table-shell tbody tr.muted td { color: var(--text-4); font-size: 11.5px; }
+
+/* -- 25.8 表单与按钮：统一 9px 圆角、聚焦一圈强调色 ------------------------ */
+
+html[data-skin="aurora"] .button {
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+}
+html[data-skin="aurora"] .button-primary {
+  box-shadow: 0 8px 20px -12px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+html[data-skin="aurora"] .button-quiet {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: var(--stroke);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-skin="aurora"] .button-quiet:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--stroke-strong);
+  transform: none;
+}
+html[data-skin="aurora"] .button-soft {
+  background: rgba(124, 131, 255, 0.12);
+  border-color: rgba(124, 131, 255, 0.2);
+}
+html[data-skin="aurora"] .icon-button { border-radius: var(--r-1); }
+
+html[data-skin="aurora"] :where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]),
+  textarea,
+  select
+) {
+  border-radius: 9px;
+  border-color: var(--stroke);
+  background: var(--surface-sunken);
+  font-size: 13px;
+  transition: border-color var(--dur-1) var(--ease-out), box-shadow var(--dur-1) var(--ease-out);
+}
+html[data-skin="aurora"] :where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]),
+  textarea,
+  select
+):focus {
+  border-color: rgba(124, 131, 255, 0.6);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+html[data-skin="aurora"] .toggle-track { border-color: var(--stroke-strong); }
+
+/* -- 25.9 账号卡：头像、名字、状态一行说清楚，内部编辑块落在面 2 ----------- */
+
+html[data-skin="aurora"] .account-card {
+  gap: 14px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-3);
+  background: var(--surface-1);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--elev-1);
+}
+html[data-skin="aurora"] .account-card::before {
+  left: 20px;
+  width: 42px;
+  height: 2px;
+}
+html[data-skin="aurora"] .account-card:hover {
+  border-color: var(--stroke-strong);
+  box-shadow: var(--elev-1);
+}
+html[data-skin="aurora"] .account-card[data-account-state]::before { box-shadow: none; }
+html[data-skin="aurora"] .account-card[data-account-state="attention"],
+html[data-skin="aurora"] .account-card[data-account-state="blocked"] { border-color: var(--stroke); }
+
+html[data-skin="aurora"] :where(.account-avatar) {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 16px;
+}
+html[data-skin="aurora"] .account-title {
+  font-size: 15px;
+  font-weight: 620;
+  letter-spacing: -0.005em;
+}
+html[data-skin="aurora"] .account-card-actions { gap: 6px; }
+html[data-skin="aurora"] .account-card-actions .button { height: 28px; font-size: 12px; }
+
+/* 卡里的四块编辑区（时间 / 内容 / 出口 / 目标好友）统一成面 2 的「字段组」 */
+html[data-skin="aurora"] :where(.time-editor, .message-editor, .proxy-editor, .friend-picker) {
+  padding: 14px 16px;
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.026);
+}
+html[data-skin="aurora"] :where(.time-editor-head, .message-editor-head, .proxy-editor-head, .friend-picker-toolbar) {
+  margin-bottom: 8px;
+}
+html[data-skin="aurora"] .field-label,
+html[data-skin="aurora"] .time-editor-head strong,
+html[data-skin="aurora"] .message-editor-head strong,
+html[data-skin="aurora"] .proxy-editor-head strong {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+html[data-skin="aurora"] :where(.time-editor-lead, .message-editor-lead, .proxy-editor-lead, .friend-picker-lead) {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-4);
+}
+html[data-skin="aurora"] .account-stats { gap: 10px; font-size: 11.5px; }
+html[data-skin="aurora"] .account-streak {
+  padding: 12px 14px;
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* -- 25.10 状态件：横幅、胶囊、进度条 ------------------------------------- */
+
+html[data-skin="aurora"] .status-banner {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.034);
+  font-size: 12.5px;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-skin="aurora"] .status-banner strong { font-weight: 550; color: var(--text-2); }
+html[data-skin="aurora"] .status-banner.success { background: rgba(52, 211, 153, 0.06); border-color: rgba(52, 211, 153, 0.16); }
+html[data-skin="aurora"] .status-banner.warning { background: rgba(251, 191, 36, 0.06); border-color: rgba(251, 191, 36, 0.18); }
+html[data-skin="aurora"] .status-banner.danger { background: rgba(251, 113, 133, 0.06); border-color: rgba(251, 113, 133, 0.18); }
+html[data-skin="aurora"] .status-banner.info { background: rgba(96, 165, 250, 0.055); border-color: rgba(96, 165, 250, 0.16); }
+
+html[data-skin="aurora"] :where(.pill, .status-chip) {
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+html[data-skin="aurora"] .warning-box,
+html[data-skin="aurora"] .danger-box {
+  border-radius: var(--r-2);
+  border-color: var(--stroke);
+  background: rgba(251, 191, 36, 0.055);
+}
+html[data-skin="aurora"] .danger-box { background: rgba(251, 113, 133, 0.055); }
+
+html[data-skin="aurora"] .progress-line { gap: 7px; }
+html[data-skin="aurora"] .progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.085);
+  box-shadow: none;
+}
+html[data-skin="aurora"] .progress-strong {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6 62%, #a78bfa 100%);
+  box-shadow: none;
+}
+html[data-skin="aurora"] .progress-strong::after { display: none; }
+html[data-skin="aurora"] .progress-echo {
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.45);
+}
+html[data-skin="aurora"] .progress-text { font-size: 11.5px; color: var(--text-4); }
+html[data-skin="aurora"] .overview-primary .progress-track { height: 6px; }
+
+/* -- 25.11 运行记录：宽屏回到「真表格」，窄屏仍是卡片列表 ------------------- */
+
+html[data-skin="aurora"] .console-shell { gap: 16px; }
+html[data-skin="aurora"] .account-console-list { gap: 10px; }
+html[data-skin="aurora"] .account-console {
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--r-2);
+  background: rgba(255, 255, 255, 0.024);
+}
+html[data-skin="aurora"] .account-console > summary { padding: 13px 16px; }
+html[data-skin="aurora"] .account-console-body { padding: 14px 16px 16px; }
+html[data-skin="aurora"] .target-record {
+  padding: 10px 12px;
+  border-radius: var(--r-1);
+}
+html[data-skin="aurora"] .target-record + .target-record { border-top: 1px solid var(--stroke-soft); }
+html[data-skin="aurora"] .target-meta,
+html[data-skin="aurora"] .target-reason { font-size: 11.5px; color: var(--text-3); }
+html[data-skin="aurora"] .target-message { font-size: 12.5px; color: var(--text-2); }
+
+/* 1281 以上：七列足够宽，卡片列表反而把 20 轮记录拉成 20 张卡（一屏只看得到四行）。
+   恢复成表格：表头一次给全，行与行之间一条发丝线，扫视成本立刻降下来。
+   1081-1280 之间仍是卡片列表 —— 那里七列会挤成一条条竖排文字。 */
+@media (min-width: 1281px) {
+  html[data-skin="aurora"] #run-history .table-shell {
+    overflow: visible;
+    border: 1px solid var(--stroke);
+    border-radius: var(--r-2);
+    background: rgba(255, 255, 255, 0.018);
+  }
+  html[data-skin="aurora"] #run-history table { display: table; width: 100%; border-collapse: collapse; }
+  html[data-skin="aurora"] #run-history thead { display: table-header-group; }
+  html[data-skin="aurora"] #run-history thead th {
+    position: static;
+    padding: 10px 16px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    color: var(--text-4);
+    text-transform: none;
+    background: transparent;
+    border-bottom: 1px solid var(--stroke);
+  }
+  html[data-skin="aurora"] #run-history tbody { display: table-row-group; }
+  html[data-skin="aurora"] #run-history tbody tr {
+    display: table-row;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    background-image: none;
+    box-shadow: none;
+  }
+  html[data-skin="aurora"] #run-history tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+  html[data-skin="aurora"] #run-history tbody tr.is-selected { background: rgba(124, 131, 255, 0.09); }
+  html[data-skin="aurora"] #run-history tbody tr.is-selected td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+  html[data-skin="aurora"] #run-history tbody td {
+    display: table-cell;
+    padding: 11px 16px;
+    border: 0;
+    border-bottom: 1px solid var(--stroke-soft);
+    font-size: 12.5px;
+    color: var(--text-2);
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  html[data-skin="aurora"] #run-history tbody tr:last-child td { border-bottom: 0; }
+  /* 表头回来了，格子自己的小标签就该消失 */
+  html[data-skin="aurora"] #run-history tbody td::before { content: none; display: none; }
+  html[data-skin="aurora"] #run-history tbody td:nth-child(1) a { color: var(--text); font-weight: 550; }
+  html[data-skin="aurora"] #run-history tbody td:nth-child(6),
+  html[data-skin="aurora"] #run-history tbody td:nth-child(7) { font-variant-numeric: tabular-nums; }
+  html[data-skin="aurora"] #run-history tbody tr.muted {
+    display: table-row;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+  html[data-skin="aurora"] #run-history tbody tr.muted td {
+    padding: 6px 16px 12px;
+    border-left: 0;
+    font-size: 11.5px;
+    color: var(--text-4);
+  }
+  html[data-skin="aurora"] #run-history tbody tr.muted td::before { content: none; }
+}
+
+/* -- 25.12 日志页：终端是终端，工具条是工具条 ----------------------------- */
+
+html[data-skin="aurora"] .logs-toolbar {
+  padding: 10px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-2);
+  background: var(--surface-1);
+  box-shadow: none;
+}
+html[data-skin="aurora"] .logs-code {
+  padding: 16px 18px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-2);
+  background: rgba(4, 6, 11, 0.86);
+  font-size: 12.5px;
+  line-height: 1.65;
+  box-shadow: none;
+}
+html[data-skin="aurora"] .panel {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-skin="aurora"] .panel-header h2 { font-size: 16px; font-weight: 620; }
+html[data-skin="aurora"] .panel-header h2::after { display: none; }
+
+/* -- 25.13 登录页与对话框 ------------------------------------------------- */
+
+html[data-skin="aurora"] .login-card {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-4);
+  background: linear-gradient(180deg, rgba(18, 20, 31, 0.96), rgba(10, 12, 20, 0.98));
+  box-shadow: var(--elev-3);
+  backdrop-filter: blur(24px) saturate(120%);
+  -webkit-backdrop-filter: blur(24px) saturate(120%);
+}
+html[data-skin="aurora"] .login-card::before { opacity: 0.8; }
+html[data-skin="aurora"] .login-brand-copy h1 { font-weight: 640; letter-spacing: -0.015em; }
+html[data-skin="aurora"] .login-features li { font-size: 12.5px; color: var(--text-3); }
+html[data-skin="aurora"] .confirm-dialog {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-3);
+  background: #10121b;
+  box-shadow: var(--elev-3);
+}
+
+/* -- 25.14 浅色：白瓷 + 灰蓝底，靠描边和阴影分层，不靠底色深浅 ------------- */
+
+html[data-theme="light"][data-skin="aurora"] {
+  --surface-1:      #ffffff;
+  --surface-2:      #f6f8fd;
+  --surface-3:      #eef1f9;
+  --surface-sunken: #f4f6fc;
+  --surface-card:   #ffffff;
+  --surface-page:   #eaeef7;
+  --table-head:     #f4f6fc;
+
+  --stroke:         rgba(21, 28, 56, 0.1);
+  --stroke-strong:  rgba(21, 28, 56, 0.18);
+  --stroke-soft:    rgba(21, 28, 56, 0.07);
+
+  --elev-1: 0 1px 2px rgba(21, 28, 56, 0.06), 0 10px 24px -20px rgba(21, 28, 56, 0.3);
+  --elev-2: 0 2px 4px rgba(21, 28, 56, 0.07), 0 18px 40px -26px rgba(21, 28, 56, 0.34);
+  --elev-3: 0 30px 70px -40px rgba(21, 28, 56, 0.42), 0 2px 8px -4px rgba(21, 28, 56, 0.16);
+}
+
+html[data-theme="light"][data-skin="aurora"] .aurora-scene::before {
+  background:
+    radial-gradient(112% 82% at 10% -8%, rgba(186, 214, 252, 0.55) 0%, rgba(186, 214, 252, 0) 56%),
+    radial-gradient(96% 72% at 92% 2%, rgba(219, 208, 250, 0.44) 0%, rgba(219, 208, 250, 0) 52%),
+    linear-gradient(180deg, #f3f5fb 0%, #eaeef7 52%, #f2f4fa 100%);
+}
+html[data-theme="light"][data-skin="aurora"] .aurora-blob { opacity: 0.18; }
+html[data-theme="light"][data-skin="aurora"] .aurora-grid {
+  background-image:
+    linear-gradient(rgba(21, 28, 56, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(21, 28, 56, 0.028) 1px, transparent 1px);
+}
+html[data-theme="light"][data-skin="aurora"] .aurora-vignette {
+  background: radial-gradient(132% 110% at 50% 36%, rgba(255, 255, 255, 0) 46%, rgba(21, 28, 56, 0.07) 100%);
+}
+
+html[data-theme="light"][data-skin="aurora"] .sidebar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 254, 0.94));
+  border-color: rgba(21, 28, 56, 0.09);
+}
+html[data-theme="light"][data-skin="aurora"] .nav-item { color: #55607e; }
+html[data-theme="light"][data-skin="aurora"] .nav-item:hover {
+  background: rgba(21, 28, 56, 0.05);
+  color: #10142a;
+}
+html[data-theme="light"][data-skin="aurora"] .nav-item.active {
+  background: rgba(91, 99, 232, 0.1);
+  color: #232a63;
+  box-shadow: inset 0 0 0 1px rgba(91, 99, 232, 0.16);
+}
+html[data-theme="light"][data-skin="aurora"] .nav-item.active svg.lucide { color: var(--accent); }
+
+html[data-theme="light"][data-skin="aurora"] .dashboard-section,
+html[data-theme="light"][data-skin="aurora"] .overview-strip,
+html[data-theme="light"][data-skin="aurora"] .login-card {
+  background: linear-gradient(180deg, #ffffff, #fdfdff);
+  border-color: rgba(21, 28, 56, 0.09);
+}
+html[data-theme="light"][data-skin="aurora"] .metric-card,
+html[data-theme="light"][data-skin="aurora"] .account-card {
+  background: #ffffff;
+  border-color: rgba(21, 28, 56, 0.09);
+}
+html[data-theme="light"][data-skin="aurora"] .collapsible-section,
+html[data-theme="light"][data-skin="aurora"] :where(.time-editor, .message-editor, .proxy-editor, .friend-picker),
+html[data-theme="light"][data-skin="aurora"] .account-console {
+  background: #f6f8fd;
+  border-color: rgba(21, 28, 56, 0.07);
+}
+html[data-theme="light"][data-skin="aurora"] .collapsible-section[open] { background: #ffffff; }
+html[data-theme="light"][data-skin="aurora"] .table-shell { background: transparent; }
+html[data-theme="light"][data-skin="aurora"] .table-shell thead th { background: #f4f6fc; }
+html[data-theme="light"][data-skin="aurora"] #run-history .table-shell { background: #ffffff; }
+html[data-theme="light"][data-skin="aurora"] #run-history tbody tr:hover { background: #f7f9fd; }
+html[data-theme="light"][data-skin="aurora"] #run-history tbody tr.is-selected { background: #eef1fd; }
+html[data-theme="light"][data-skin="aurora"] .status-banner { background: #ffffff; border-color: rgba(21, 28, 56, 0.09); }
+html[data-theme="light"][data-skin="aurora"] .button-quiet {
+  background: #ffffff;
+  border-color: rgba(21, 28, 56, 0.12);
+}
+html[data-theme="light"][data-skin="aurora"] .button-quiet:hover:not(:disabled) {
+  background: #f6f8fd;
+  border-color: rgba(21, 28, 56, 0.2);
+}
+html[data-theme="light"][data-skin="aurora"] :where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]),
+  textarea,
+  select
+) {
+  background: #ffffff;
+  border-color: rgba(21, 28, 56, 0.14);
+}
+html[data-theme="light"][data-skin="aurora"] .logs-code {
+  background: #f8fafd;
+  border-color: rgba(21, 28, 56, 0.09);
+}
+html[data-theme="light"][data-skin="aurora"] .progress-track { background: rgba(21, 28, 56, 0.09); }
+html[data-theme="light"][data-skin="aurora"] .confirm-dialog { background: #ffffff; }
+html[data-theme="light"][data-skin="aurora"] .account-card[data-account-state="attention"],
+html[data-theme="light"][data-skin="aurora"] .account-card[data-account-state="blocked"] {
+  border-color: rgba(21, 28, 56, 0.09);
+}
+
+/* -- 25.15 键盘可达与降级 ------------------------------------------------ */
+
+html[data-skin="aurora"] a:focus-visible,
+html[data-skin="aurora"] button:focus-visible,
+html[data-skin="aurora"] summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin="aurora"] .metric-card:hover,
+  html[data-skin="aurora"] .button-quiet:hover:not(:disabled) { transform: none; }
+}
