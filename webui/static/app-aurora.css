@@ -3158,6 +3158,9 @@ html.dsf-page-enter .mobile-topbar {
 
 /* 减少动效：`*` 管不到 view-transition 的伪元素，得单独停一次。 */
 @media (prefers-reduced-motion: reduce) {
+  html[data-skin="aurora"] .progress-track > i::after { animation: none !important; }
+  html[data-skin="aurora"] :is(.button, .button-soft, .button-quiet, .button-danger,
+    .icon-button, .section-link, .nav-item):hover { transform: none; translate: none; }
   ::view-transition-group(*),
   ::view-transition-old(*),
   ::view-transition-new(*) { animation: none !important; }
@@ -5042,14 +5045,12 @@ html[data-skin="aurora"] .dashboard-section :is(.table-shell, .logs-code, .maint
 html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet, .button-danger,
   .icon-button, .nav-item, .segment-button, .toggle-track, .pill, .status-chip,
   .section-link, .status-banner-dismiss) {
-  transition-duration: var(--dur-1) !important;
   transition-timing-function: var(--ease-out) !important;
 }
 html[data-skin="aurora"] :is(.metric-card, .account-card, .dashboard-section, .panel,
   .collapsible-section, .overview-strip, .overview-cell, .table-shell, .table-shell tbody tr,
   .logs-code, .account-console, .time-editor, .message-editor, .proxy-editor, .friend-picker,
   .confirm-dialog, input, select, textarea) {
-  transition-duration: var(--dur-2) !important;
   transition-timing-function: var(--ease-out) !important;
 }
 html[data-skin="aurora"] .confirm-dialog {
@@ -5154,7 +5155,7 @@ html[data-theme="light"][data-skin="aurora"] :is(.table-shell, #run-history) tbo
   background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 html[data-skin="aurora"] :is(.table-shell, #run-history) tbody:has(tr:hover) tr:not(:hover) {
-  opacity: 0.9;
+  opacity: 1;
 }
 
 /* 导航项也走同一条梯子（原来是 13px 的孤例） */
@@ -5176,10 +5177,144 @@ html[data-skin="aurora"] dialog.confirm-dialog::backdrop {
   backdrop-filter: blur(2px) saturate(0.96);
 }
 
+/* == 27 回春：动势、光泽、能抬起来的地方都抬起来 =========================
+   26 把曲率、时长、曲线收成一套，方向没错，但代价是"太安静"：
+   * 层 24 有条 .metric-card:hover, .account-card:hover, .nav-item:hover,
+     .button:hover { transform: none } —— 所有抬升被它按住；
+   * 26.5 又用 !important 把每段过渡压到 120/180ms，连 520ms 的滑块、
+     620ms 的进度都被拍平，页面从"有呼吸"变成"没反应"。
+   这一层把呼吸找回来，但不在曲率和档位上另起一套：
+     1) --spring 恢复回弹、时长拉回 160/240/420/620；
+     2) 层 24 的 transform: none 用更高特异性顶掉（只顶真要动的几族）；
+     3) 抬起的表面补一道光谱顶线，hover 用强调色投影而不是灰影；
+     4) 压暗退回"几乎察觉不到"：卡片组 0.90，表格行改高亮自己。       */
+
+html[data-skin="aurora"] {
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --speed: 220ms;
+  --dur-1: 160ms;
+  --dur-2: 240ms;
+  --dur-3: 420ms;
+  --dur-4: 620ms;
+  --dim-soft: 0.90;
+  --glow-accent: color-mix(in srgb, var(--c2) 52%, transparent);
+  --hairline-spectrum: linear-gradient(90deg,
+    transparent,
+    color-mix(in srgb, var(--c1) 62%, transparent) 16%,
+    color-mix(in srgb, var(--c2) 62%, transparent) 46%,
+    color-mix(in srgb, var(--c3) 58%, transparent) 76%,
+    transparent);
+}
+
+/* -- 27.1 抬升回来：-2px + 强调色投影 + 顶光 ---------------------------- */
+/* 抬升必须写在 translate 上：层 24/25 用 .metric-card:hover{transform:none} 按住过
+   transform，而 transform 又是入场动画独占的属性；translate 是独立属性，谁也不抢。 */
+html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell) {
+  transition: translate var(--dur-2) var(--spring), box-shadow var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out);
+}
+html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
+  translate: 0 -2px;
+  border-color: var(--stroke-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 16px 36px -20px rgba(99, 102, 241, 0.52),
+    0 2px 4px -2px rgba(2, 4, 12, 0.55);
+  z-index: 1;
+}
+html[data-skin="aurora"] :is(.button, .button-soft, .button-quiet, .button-danger,
+  .icon-button, .section-link):hover:not(:disabled) {
+  translate: 0 -1px;
+}
+html[data-skin="aurora"] :is(.button-quiet, .button-soft):hover:not(:disabled) {
+  box-shadow: 0 10px 24px -18px var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+html[data-skin="aurora"] .button-primary {
+  transition: transform var(--dur-2) var(--spring), box-shadow var(--dur-2) var(--ease-out),
+    background-position var(--dur-4) var(--ease-out);
+}
+html[data-skin="aurora"] .button-primary:hover:not(:disabled) {
+  box-shadow: 0 18px 40px -16px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* -- 27.2 表面顶线：一道只在顶端出现的光谱，1px，别铺满 ------------------ */
+html[data-skin="aurora"] :is(.dashboard-section, .account-card, .login-card) {
+  position: relative;
+}
+html[data-skin="aurora"] :is(.dashboard-section, .account-card, .login-card)::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  border-radius: inherit;
+  background: var(--hairline-spectrum);
+  opacity: 0.5;
+  pointer-events: none;
+}
+html[data-skin="aurora"] .account-card:hover::after { opacity: 0.85; }
+html[data-skin="aurora"] .dashboard-section > * { position: relative; z-index: 1; }
+
+/* -- 27.3 导航回到药丸；当前项带一层强调色描边 ---------------------------- */
+html[data-skin="aurora"] .nav-item {
+  border-radius: var(--radius-pill);
+  transition: translate var(--dur-2) var(--spring), background-color var(--dur-2) var(--ease-out),
+    color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+html[data-skin="aurora"] .nav-item:hover { translate: 0 -1px; }
+html[data-skin="aurora"] .nav-item.active {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07), 0 10px 26px -20px var(--accent-glow);
+}
+
+/* -- 27.4 进度条：一道扫光（唯一常驻动效，3.6s 一轮，幅度压得很低） ------ */
+html[data-skin="aurora"] .progress-track > i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 22%, rgba(255, 255, 255, 0.42) 50%, transparent 78%);
+  background-size: 220% 100%;
+  animation: dsf-sheen 3600ms var(--ease-in-out) infinite;
+  pointer-events: none;
+}
+@keyframes dsf-sheen {
+  from { background-position: 170% 0; }
+  to { background-position: -70% 0; }
+}
+
+/* -- 27.5 数字：留一点晕，别发光成霓虹 -------------------------------- */
+/* 4404 层 23 有 html[data-skin="aurora"] .metric-card .metric-value { text-shadow: none }
+   (0,3,1)，这里必须跟它同特异性且更靠后，否则被它按住。 */
+html[data-skin="aurora"] .metric-card .metric-value,
+html[data-skin="aurora"] .overview-primary .overview-value {
+  text-shadow: 0 0 26px rgba(139, 147, 255, 0.26);
+}
+html[data-theme="light"][data-skin="aurora"] .metric-card .metric-value,
+html[data-theme="light"][data-skin="aurora"] .overview-primary .overview-value {
+  text-shadow: none;
+}
+html[data-skin="aurora"] .brand-mark {
+  box-shadow: 0 12px 30px -16px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+/* -- 27.6 浅色：顶线和投影换一套轻的 ---------------------------------- */
+html[data-theme="light"][data-skin="aurora"] {
+  --glow-accent: color-mix(in srgb, var(--c2) 26%, transparent);
+  --dim-soft: 0.94;
+}
+html[data-theme="light"][data-skin="aurora"] :is(.dashboard-section, .account-card, .login-card)::after {
+  opacity: 0.75;
+}
+html[data-theme="light"][data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
+  box-shadow: inset 0 1px 0 #ffffff, 0 16px 34px -22px rgba(21, 28, 56, 0.22),
+    0 2px 4px -2px rgba(21, 28, 56, 0.10);
+}
+
 @media (prefers-reduced-motion: reduce) {
   html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
     transform: none;
+    translate: none;
   }
+  html[data-skin="aurora"] .progress-track > i::after { animation: none !important; }
+  html[data-skin="aurora"] :is(.button, .button-soft, .button-quiet, .button-danger,
+    .icon-button, .section-link, .nav-item):hover { transform: none; }
   ::view-transition-group(*),
   ::view-transition-old(*),
   ::view-transition-new(*) { animation: none !important; }
