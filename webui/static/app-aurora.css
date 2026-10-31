@@ -2587,6 +2587,14 @@ html[data-theme="light"] .progress-track {
 
 /* == 20 动效降级 ========================================================= */
 
+/* 状态横幅左侧色条跟着发光，一眼看出"这一条是活的" */
+html[data-skin="aurora"] .status-banner {
+  box-shadow: inset 3px 0 12px -6px currentColor;
+}
+html[data-theme="light"][data-skin="aurora"] .status-banner {
+  box-shadow: inset 3px 0 10px -6px currentColor;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after {
@@ -5305,6 +5313,76 @@ html[data-theme="light"][data-skin="aurora"] :is(.dashboard-section, .account-ca
 html[data-theme="light"][data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
   box-shadow: inset 0 1px 0 #ffffff, 0 16px 34px -22px rgba(21, 28, 56, 0.22),
     0 2px 4px -2px rgba(21, 28, 56, 0.10);
+}
+
+/* == 28 受光面：一块面板要能看出光从哪来 =================================
+   27 把动势找回来了，但静态看还是"平"——因为每块面板都是同一个均匀底色，
+   只有描边和投影在区分层次。成熟面板的做法是给面一个受光方向：
+   顶边微亮、往下迅速衰减，眼睛立刻读出"这是一块抬起来的板"。
+   这一层只加受光和一道发光，不动几何、不动动效档位。                */
+
+html[data-skin="aurora"] :is(.dashboard-section, .overview-strip, .account-card,
+  .collapsible-section, .login-card, .maintenance-result) {
+  background-image: radial-gradient(150% 95% at 50% -48%,
+    rgba(139, 147, 255, 0.16), rgba(139, 147, 255, 0) 64%);
+}
+html[data-theme="light"][data-skin="aurora"] :is(.dashboard-section, .overview-strip,
+  .account-card, .collapsible-section, .login-card, .maintenance-result) {
+  background-image: radial-gradient(150% 95% at 50% -48%,
+    rgba(99, 102, 241, 0.07), rgba(99, 102, 241, 0) 62%);
+}
+
+/* 主标题与头号数字回到光谱字：大字才有资格做渐变，小字继续用实体色 */
+html[data-skin="aurora"] .page-heading h1 {
+  background-image: linear-gradient(96deg, #ffffff 0%, #e4e8ff 56%, #c2caff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+html[data-skin="aurora"] .overview-primary .overview-value:not(.overview-value--prose):not(.overview-value--short) {
+  background-image: linear-gradient(96deg, #dbe1ff 0%, #a5b4fc 42%, #c084fc 76%, #f0abfc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  text-shadow: none;
+}
+html[data-theme="light"][data-skin="aurora"] .page-heading h1 {
+  background-image: linear-gradient(96deg, #10142a 0%, #2a3193 58%, #4c1d95 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+html[data-theme="light"][data-skin="aurora"] .overview-primary .overview-value:not(.overview-value--prose):not(.overview-value--short) {
+  background-image: linear-gradient(96deg, #1e1b4b 0%, #4338ca 46%, #7e22ce 80%, #be185d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* 进度条本身发光：5/5 那种满格线，亮起来才像"通电" */
+html[data-skin="aurora"] .progress-track > i {
+  box-shadow: 0 0 12px rgba(124, 131, 255, 0.5), 0 0 32px rgba(124, 131, 255, 0.22);
+}
+html[data-theme="light"][data-skin="aurora"] .progress-track > i {
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.28);
+}
+html[data-skin="aurora"] .progress-track {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+html[data-theme="light"][data-skin="aurora"] .progress-track {
+  box-shadow: inset 0 1px 2px rgba(21, 28, 56, 0.12);
+}
+
+/* 侧栏品牌块与当前导航项各加一层同色微光，和主区的光是同一个方向 */
+html[data-skin="aurora"] .nav-item.active {
+  background-image: linear-gradient(180deg, rgba(139, 147, 255, 0.16), rgba(139, 147, 255, 0.04));
+}
+html[data-theme="light"][data-skin="aurora"] .nav-item.active {
+  background-image: linear-gradient(180deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.03));
 }
 
 @media (prefers-reduced-motion: reduce) {
