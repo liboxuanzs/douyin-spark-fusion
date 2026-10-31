@@ -4930,3 +4930,259 @@ html[data-theme="light"][data-skin="aurora"] .table-shell thead th {
 @media print {
   html[data-skin="aurora"] .overview-primary .overview-value { font-size: 20pt; }
 }
+
+/* == 26 几何与调焦：一套曲率、一套动效、只在焦点周围压暗 =====================
+   数值不再自己编，全部取自三家在用的面板/UI 系统默认值：
+   * Radix Themes 3.2.1 —— 圆角梯子 3/4/6/8/12/16、对话框遮罩 black-a6(浅)/a8(深)、
+     入场 200ms cubic-bezier(.16,1,.3,1)、阴影 = ring + 环境光 + 近距投影。
+   * shadcn/ui dialog  —— 遮罩 bg-black/50、面板 duration-200、进场 fade-in + zoom-in-95。
+   * Tailwind v4 默认主题 —— 圆角 4/6/8/12/16/24、ease-out(0,0,.2,1)、
+     ease-in-out(.4,0,.2,1)、blur 4/8/12/16/24。
+   落到这个面板只做三件事，别的都不动：
+     1) 曲率收成一条梯子（6 / 8 / 12 / 16 / 胶囊），散在十几处的 9px、10px、11px、
+        13px、14px、15px、22px、26px、30px 全部改指过来；
+     2) 动效收成一条曲线 + 四档时长，带弹性的 --spring 也并进来；
+     3) 层级靠"焦点之外压暗"：弹层压整页、卡片组压兄弟、表格压其他行，
+        焦点自己不加发光，只加深一道描边。                                    */
+
+html[data-skin="aurora"] {
+  /* -- 26.1 曲率梯子 ---------------------------------------------------- */
+  --radius-1: 6px;    /* 徽标 / 复选框 / 小内嵌 */
+  --radius-2: 8px;    /* 控件：按钮、输入框、图标按钮 */
+  --radius-3: 12px;   /* 区块：KPI 卡、表格壳、终端、字段组、对话框 */
+  --radius-4: 16px;   /* 面板：dashboard-section、账号卡、登录卡 */
+  --radius-pill: 999px;
+
+  /* 旧令牌全部改指到梯子上 —— 一条梯子，没有第二套 */
+  --radius-xs: var(--radius-1);
+  --radius-sm: var(--radius-2);
+  --radius: var(--radius-3);
+  --radius-lg: var(--radius-4);
+  --radius-xl: var(--radius-4);
+  --r-1: var(--radius-2);
+  --r-2: var(--radius-3);
+  --r-3: var(--radius-4);
+
+  /* -- 26.2 动效：一条曲线，四档时长 ------------------------------------ */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease: var(--ease-out);
+  --spring: var(--ease-out);   /* 回弹曲线并进来：面板不做弹簧 */
+  --speed: 180ms;
+  --dur-1: 120ms;              /* 指针反馈：hover / press */
+  --dur-2: 180ms;              /* 状态切换：选中、展开、聚焦 */
+  --dur-3: 240ms;              /* 面板与弹层入场 */
+  --dur-4: 400ms;              /* 整页渐显 / 背景光 */
+
+  /* -- 26.3 压暗与高度 --------------------------------------------------- */
+  --scrim: rgba(3, 5, 12, 0.5);
+  --dim: 0.7;                  /* 弹层打开时，环境亮度 */
+  --dim-soft: 0.82;            /* 组内焦点之外，兄弟亮度 */
+  --elev-1: 0 0 0 1px var(--stroke-soft), 0 1px 2px rgba(2, 4, 12, 0.5);
+  --elev-2: 0 0 0 1px var(--stroke), 0 2px 4px -2px rgba(2, 4, 12, 0.55),
+            0 10px 24px -16px rgba(2, 4, 12, 0.6);
+  --elev-3: 0 0 0 1px var(--stroke), 0 12px 32px -12px rgba(2, 4, 12, 0.65),
+            0 32px 64px -32px rgba(2, 4, 12, 0.7);
+
+  /* 间距也收成一条 4 的倍数梯子，卡片内外节奏一致 */
+  --pad-1: 6px;
+  --pad-2: 10px;
+  --pad-3: 14px;
+  --pad-4: 20px;
+}
+
+html[data-theme="light"][data-skin="aurora"] {
+  --scrim: rgba(12, 16, 34, 0.32);
+  --dim: 0.88;
+  --dim-soft: 0.92;
+  --elev-1: 0 0 0 1px var(--stroke-soft), 0 1px 2px rgba(21, 28, 56, 0.06);
+  --elev-2: 0 0 0 1px var(--stroke), 0 2px 6px -2px rgba(21, 28, 56, 0.1),
+            0 12px 24px -18px rgba(21, 28, 56, 0.22);
+  --elev-3: 0 0 0 1px var(--stroke), 0 16px 40px -20px rgba(21, 28, 56, 0.28),
+            0 32px 64px -40px rgba(21, 28, 56, 0.24);
+}
+
+/* -- 26.4 圆角只从梯子上取 ----------------------------------------------- */
+html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet, .button-danger,
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea,
+  .icon-button, .section-link, .logs-toolbar, .nav-item.active::before) {
+  border-radius: var(--radius-2);
+}
+html[data-skin="aurora"] :is(.metric-card, .table-shell, #run-history .table-shell, .logs-code,
+  .account-console, .target-record, .warning-box, .danger-box, .flash, .status-banner,
+  .empty-state, .time-editor, .message-editor, .proxy-editor, .friend-picker,
+  .login-qr-panel, .code-box, .maintenance-result, .account-streak, .account-stats,
+  .message-preview, .logs-empty, .login-features li) {
+  border-radius: var(--radius-3);
+}
+html[data-skin="aurora"] :is(.dashboard-section, .panel, .collapsible-section, .account-card,
+  .overview-strip, .login-card) {
+  border-radius: var(--radius-4);
+}
+html[data-skin="aurora"] :is(.confirm-dialog, .login-qr-panel) {
+  border-radius: var(--radius-3);
+}
+html[data-skin="aurora"] :is(.pill, .status-chip, .progress-track, .progress-track > i,
+  .progress-strong, .progress-echo, .toggle-track, .account-avatar, .user-avatar,
+  .brand-mark, .status-banner-dismiss, .maintenance-tags > *) {
+  border-radius: var(--radius-pill);
+}
+
+/* 卡片里的字段组落在面 2 上，比所在卡片再退一档：16 - 4 = 12，两条弧同心 */
+html[data-skin="aurora"] .account-card :is(.time-editor, .message-editor, .proxy-editor,
+  .friend-picker, .account-console, .account-stats, .target-record) {
+  border-radius: var(--radius-3);
+}
+html[data-skin="aurora"] .dashboard-section :is(.table-shell, .logs-code, .maintenance-result) {
+  border-radius: var(--radius-3);
+}
+
+/* -- 26.5 动效统一：同一族元素用同一档时长，不再各写各的 ------------------ */
+html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet, .button-danger,
+  .icon-button, .nav-item, .segment-button, .toggle-track, .pill, .status-chip,
+  .section-link, .status-banner-dismiss) {
+  transition-duration: var(--dur-1) !important;
+  transition-timing-function: var(--ease-out) !important;
+}
+html[data-skin="aurora"] :is(.metric-card, .account-card, .dashboard-section, .panel,
+  .collapsible-section, .overview-strip, .overview-cell, .table-shell, .table-shell tbody tr,
+  .logs-code, .account-console, .time-editor, .message-editor, .proxy-editor, .friend-picker,
+  .confirm-dialog, input, select, textarea) {
+  transition-duration: var(--dur-2) !important;
+  transition-timing-function: var(--ease-out) !important;
+}
+html[data-skin="aurora"] .confirm-dialog {
+  transition-duration: var(--dur-3) !important;
+}
+
+/* 指针停上去只抬 1px + 深一档投影（Stripe / Linear 的幅度），不再 -2px、-3px 各写各的 */
+html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
+  transform: translateY(-1px);
+  border-color: var(--stroke-strong);
+  box-shadow: var(--elev-2);
+}
+
+/* -- 26.6 焦点之外压暗环境：这才是层级，不是给焦点加发光 ------------------ */
+/* (1) 弹层打开：整页退到后面。dialog 在 body 里、.app-shell 之外，
+       所以压暗 shell 不会连带压暗对话框本身。 */
+html[data-skin="aurora"] :is(.app-shell, .mobile-topbar) {
+  transition: filter var(--dur-3) var(--ease-out);
+}
+html[data-skin="aurora"]:has(dialog[open]) :is(.app-shell, .mobile-topbar) {
+  filter: brightness(var(--dim)) saturate(0.94);
+}
+html[data-skin="aurora"] dialog.confirm-dialog::backdrop {
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(2px) saturate(0.92);
+  backdrop-filter: blur(2px) saturate(0.92);
+}
+html[data-skin="aurora"] dialog.confirm-dialog[open] {
+  box-shadow: 0 0 0 1px var(--stroke), 0 24px 64px -24px rgba(0, 0, 0, 0.78);
+}
+
+/* (2) 卡片组：鼠标停在哪张，哪张留在光里，兄弟退半档 */
+html[data-skin="aurora"] :is(.metric-grid, .overview-strip) > * {
+  transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out) !important;
+}
+html[data-skin="aurora"] .metric-grid:has(> :hover) > :not(:hover),
+html[data-skin="aurora"] .overview-strip:has(> :hover) > :not(:hover) {
+  opacity: var(--dim-soft);
+}
+html[data-skin="aurora"] .page-body:has(.account-card:hover) .account-card:not(:hover) {
+  opacity: var(--dim-soft);
+}
+html[data-skin="aurora"] :is(.table-shell, #run-history) tbody:has(tr:hover) tr:not(:hover) {
+  opacity: 0.86;
+}
+
+/* (3) 键盘焦点落在某个折叠卡里，同页其它卡也退半档 */
+html[data-skin="aurora"] .page-body:has(> .dashboard-section:focus-within) > .dashboard-section:not(:focus-within) {
+  opacity: 0.94;
+}
+
+/* -- 26.7 数字与字距：比例数字会让表格里的数字左右跳 ---------------------- */
+html[data-skin="aurora"] :is(.metric-value, .overview-value, .summary-value, .progress-text,
+  .progress-echo, .account-stats, #run-history td, .code-box, .streak-item) {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+html[data-skin="aurora"] :is(.page-heading h1, .section-title, .account-title strong,
+  .brand-title, .panel-header h2) {
+  letter-spacing: -0.015em;
+}
+
+/* -- 26.9 收口：压暗的力度、表面的顶光、行的高亮 --------------------------
+   26.6 的第一版压得太狠（brightness .7 + scrim .5 + blur 2px 三层叠加），
+   背景几乎读不出来 —— 那不是"不经意"，那是关灯。按 Radix 的 black-a8 折一半，
+   再给每块抬起的表面补一道 1px 顶光，层级靠"上面亮一点点"而不是靠发光。    */
+
+html[data-skin="aurora"] {
+  --scrim: rgba(4, 6, 14, 0.40);
+  --dim: 0.88;
+  --dim-soft: 0.86;
+}
+html[data-theme="light"][data-skin="aurora"] {
+  --scrim: rgba(16, 20, 42, 0.20);
+  --dim: 0.95;
+  --dim-soft: 0.94;
+}
+html[data-skin="aurora"] dialog.confirm-dialog::backdrop {
+  -webkit-backdrop-filter: blur(3px) saturate(0.95);
+  backdrop-filter: blur(3px) saturate(0.95);
+}
+
+/* 抬起的表面：顶边 1px 高光 + 一档投影（浅色下高光是白边，正合适） */
+html[data-skin="aurora"] :is(.dashboard-section, .metric-card, .account-card, .overview-strip,
+  .table-shell, .login-card, .target-record) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), var(--elev-1);
+}
+html[data-theme="light"][data-skin="aurora"] :is(.dashboard-section, .metric-card, .account-card,
+  .overview-strip, .table-shell, .login-card, .target-record) {
+  box-shadow: inset 0 1px 0 #ffffff, var(--elev-1);
+}
+
+/* 表格行：自己亮一点，比把别的行压暗更像成熟面板的做法 */
+html[data-skin="aurora"] :is(.table-shell, #run-history) tbody tr {
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+html[data-skin="aurora"] :is(.table-shell, #run-history) tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+html[data-theme="light"][data-skin="aurora"] :is(.table-shell, #run-history) tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+html[data-skin="aurora"] :is(.table-shell, #run-history) tbody:has(tr:hover) tr:not(:hover) {
+  opacity: 0.9;
+}
+
+/* 导航项也走同一条梯子（原来是 13px 的孤例） */
+html[data-skin="aurora"] .nav-item { border-radius: var(--radius-3); }
+
+/* 对话框：图标瓦片改成中性玻璃（原来的琥珀 soft 在深色下偏橄榄，像脏色），
+   面板补一道更强的描边把自己从被压暗的背景里拎出来 */
+html[data-skin="aurora"] .confirm-icon {
+  border-radius: var(--radius-3);
+  border: 1px solid var(--stroke);
+  background: var(--glass-2);
+  color: var(--text-2);
+}
+html[data-skin="aurora"] .confirm-dialog[open] {
+  box-shadow: 0 0 0 1px var(--stroke-strong), 0 40px 90px -40px rgba(0, 0, 0, 0.92);
+}
+html[data-skin="aurora"] dialog.confirm-dialog::backdrop {
+  -webkit-backdrop-filter: blur(2px) saturate(0.96);
+  backdrop-filter: blur(2px) saturate(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
+    transform: none;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+  html.dsf-page-enter .app-shell,
+  html.dsf-page-enter .mobile-topbar { animation: none !important; }
+}
