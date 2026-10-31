@@ -4145,8 +4145,8 @@ html[data-skin="aurora"] .aurora-scene::before {
 
 /* 三段极光只剩「冷蓝 / 靛 / 淡紫」一条色相带：色相不再跨到青和粉。 */
 html[data-skin="aurora"] .aurora-blob {
-  opacity: 0.24;
-  filter: blur(132px) saturate(0.86);
+  opacity: 0.33;
+  filter: blur(116px) saturate(0.94);
 }
 html[data-skin="aurora"] .aurora-blob--a {
   background: radial-gradient(circle at 34% 34%, rgba(59, 130, 246, 0.5), rgba(59, 130, 246, 0) 62%);
@@ -4790,7 +4790,7 @@ html[data-theme="light"][data-skin="aurora"] .aurora-scene::before {
     radial-gradient(96% 72% at 92% 2%, rgba(219, 208, 250, 0.44) 0%, rgba(219, 208, 250, 0) 52%),
     linear-gradient(180deg, #f3f5fb 0%, #eaeef7 52%, #f2f4fa 100%);
 }
-html[data-theme="light"][data-skin="aurora"] .aurora-blob { opacity: 0.18; }
+html[data-theme="light"][data-skin="aurora"] .aurora-blob { opacity: 0.24; }
 html[data-theme="light"][data-skin="aurora"] .aurora-grid {
   background-image:
     linear-gradient(rgba(21, 28, 56, 0.028) 1px, transparent 1px),
