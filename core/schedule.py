@@ -77,6 +77,14 @@ DEFAULT_JITTER_MINUTES = 15
 #: 保留成常量是为了让部署期测试和面板文案有个不言自明的基准值。
 TICK_MINUTES = 5
 
+#: **派发节奏**（分钟）：`deploy/douyin-spark-fusion-daily.timer` 里是 `OnCalendar=*:0/5`，
+#: docker 那边是 `*/N * * * *`，N 默认取 `TICK_MINUTES`（见 `docker/entrypoint-cron.sh`）。
+#: 与 `TICK_MINUTES` 同值不是巧合 —— `tests/test_deploy_units.py` 与
+#: `tests/test_entrypoint_cron.py` 都钉着"两边相等"，改一个必须改另一个。
+#: 单独立一个名字是因为**语义不同**：`TICK_MINUTES` 说的是"抖动多大该敲多勤"，
+#: 这里说的是"今天最后一次敲在第几分钟"（见 `last_dispatch_minute()`）。
+DISPATCH_MINUTES = TICK_MINUTES
+
 #: 派发间隔的上下限。上限 10 分钟：再稀就会让"设定 08:00"变成"08:10 之后才可能发"，
 #: 用户填的时间点就没意义了。下限 1 分钟：`OnCalendar` 最细也就到分钟。
 TICK_MIN = 1
@@ -89,6 +97,19 @@ TICK_MAX = 10
 #: 记录留着、状态仍是 skipped，用户重新扫码（`retract_mark` 会把计数归零）
 #: 之后当天照样补发。0 = 不限制，退回从前的"一直重试"。
 DEFAULT_SKIP_RETRY_MAX = 6
+
+
+def last_dispatch_minute(cadence=None):
+    """当天最后一次派发落在第几分钟（0 点起算）。
+
+    `OnCalendar=*:0/N` / `*/N * * * *` 的刻度是 0、N、2N…，**60 不一定被 N 整除**，
+    所以不能写死 `60 - N`：N=7 时 `60 - 7 = 53` 就不在刻度上，那之后到 23:59
+    再没有一次派发，落在 53~56 分的账号当天一条都发不出去。取 60 以内最大的刻度点
+    （N=5 → 55、N=7 → 56、N=10 → 50）。
+    """
+    step = int(cadence if cadence is not None else DISPATCH_MINUTES) or TICK_MINUTES
+    step = max(TICK_MIN, min(59, step))
+    return (59 // step) * step
 
 
 def tick_minutes(jitter=None):
@@ -250,15 +271,16 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
     hour, minute = (int(part) for part in final.split(":"))
     due = when.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(minutes=offset)
     # 抖动只允许把到点时刻在**当天**范围里挪，一头一尾都要夹：
-    # 往后：systemd 门铃最后一次是 23:55（`*:0/5`），推过零点之后当天每一次门铃
-    #   看到的都是「还没到点」，而下一次门铃已经是第二天、又按新的一天重算 ——
-    #   这个账号当天一条都发不出去，日志里还一声不吭。挤回当天最后一次门铃：
+    # 往后：systemd 门铃最后一次是 `last_dispatch_minute()`（`*:0/5` → 23:55），
+    #   推过零点之后当天每一次门铃看到的都是「还没到点」，而下一次门铃已经是第二天、
+    #   又按新的一天重算 —— 这个账号当天一条都发不出去，日志里还一声不吭。
+    #   挤回当天最后一次门铃：
     #   宁可早几分钟，也不能整天不发。
     # 往前：设定 00:05、抖动 -10 会落到昨天 23:55 —— 昨天的门铃早过去了，
     #   而 `select()` 拿"今天"的日期去比一个昨天的时刻，直接变成"永远没到点"。
     #   同理挤回当天 00:00，让当天第一个门铃就发。
     day_start = when.replace(hour=0, minute=0, second=0, microsecond=0)
-    last_tick = when.replace(hour=23, minute=60 - TICK_MINUTES, second=0, microsecond=0)
+    last_tick = when.replace(hour=23, minute=last_dispatch_minute(), second=0, microsecond=0)
     if due < day_start:
         due = day_start
     elif due > last_tick:

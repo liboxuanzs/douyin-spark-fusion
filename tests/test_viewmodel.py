@@ -22,7 +22,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from core import msg_preview, schedule, streak as streak_core  # noqa: E402
-from webui import viewmodel  # noqa: E402
+from webui import store, viewmodel  # noqa: E402
 
 
 def _iso(moment: datetime) -> str:
@@ -1737,6 +1737,62 @@ class NewestRoundBannerTests(unittest.TestCase):
                          started_text="2026-10-31 20:30:00", status="error", status_text="出错")
         view = self._view([latest, self._good()])
         self.assertEqual([b for b in view["banners"] if b["kind"] == "newest"], [])
+
+
+class SelectedMissingBannerTests(unittest.TestCase):
+    """点了一个已经滚出窗口的轮次，页面不许静默换成别的轮次。
+
+    运行记录只读最近 `store.MAX_RECORDS`(20) 轮。用户从旧链接/旧标签页点进来、
+    或者记录攒过 20 轮之后点早先那条，`selected` 找不到就回落到"最新一条带账号的
+    记录"——KPI、账号卡、"上一轮"全变成别的轮次，页面上却一个字都不提。
+    """
+
+    def _view(self, records, *, selected=None, requested=""):
+        return viewmodel.build(
+            records=records,
+            accounts=[],
+            lock=_FakeLock(),
+            rate_limit=_FakeRate(),
+            cfg={"message_template": "你好", "schedule_text": "12:30"},
+            schedules=["12:30"],
+            quiet={"active": False},
+            missing_browser=[],
+            default_dry_run="off",
+            selected=selected,
+            selected_requested=requested,
+            per_account=False,
+        )
+
+    def _record(self, run_id, started_text):
+        return _record(
+            accounts=[_account(sent_ok=1, entries=[_entry()])],
+            run_id=run_id,
+            started_text=started_text,
+        )
+
+    def test_滚动出窗口的轮次要有一条横幅说清楚(self):
+        latest = self._record("20261031-203000", "2026-10-31 20:30:00")
+        older = self._record("20261031-173000", "2026-10-31 17:30:00")
+        view = self._view([latest, older], selected=latest, requested="20261020-173000")
+        banners = [b for b in view["banners"] if b["kind"] == "selected_missing"]
+        self.assertEqual(len(banners), 1, view["banners"])
+        text = banners[0]["text"]
+        self.assertIn("20261020-173000", text, "要说清是哪一轮找不到")
+        self.assertIn(f"最近 {store.MAX_RECORDS} 轮", text)
+        self.assertIn("不是它", text)
+        self.assertTrue(view["summary"]["selected_missing"])
+
+    def test_正常选中时不多嘴(self):
+        latest = self._record("20261031-203000", "2026-10-31 20:30:00")
+        view = self._view([latest], selected=latest, requested="20261031-203000")
+        self.assertEqual([b for b in view["banners"] if b["kind"] == "selected_missing"], [])
+        self.assertFalse(view["summary"]["selected_missing"])
+
+    def test_没有点名要看哪一轮时不多嘴(self):
+        latest = self._record("20261031-203000", "2026-10-31 20:30:00")
+        view = self._view([latest])
+        self.assertEqual([b for b in view["banners"] if b["kind"] == "selected_missing"], [])
+        self.assertFalse(view["summary"]["selected_missing"])
 
 
 class MaintenanceViewTests(unittest.TestCase):

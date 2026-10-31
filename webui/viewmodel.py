@@ -1308,6 +1308,7 @@ def _banners(
     last_skip: str = "",
     last_skip_until: str = "",
     newest_note: str = "",
+    selected_missing: str = "",
     streak_labels: Sequence[str] = (),
     proxy_shared: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -1392,6 +1393,17 @@ def _banners(
                 "level": "warning",
                 "title": "最新一轮没发出去",
                 "text": newest_note,
+                "until": "",
+                "secondsLeft": 0,
+            }
+        )
+    if selected_missing:
+        banners.append(
+            {
+                "kind": "selected_missing",
+                "level": "info",
+                "title": "找不到你点的那一轮",
+                "text": selected_missing,
                 "until": "",
                 "secondsLeft": 0,
             }
@@ -1513,6 +1525,7 @@ def build(
     cooldown_minutes: str = "",
     paths: Optional[Dict[str, str]] = None,
     selected: Any = None,
+    selected_requested: str = "",
     per_account: bool = False,
     streak: Optional[Dict[str, Any]] = None,
     proxy_state: Optional[Dict[str, Any]] = None,
@@ -1538,6 +1551,17 @@ def build(
     # 瞬间变成「还没跑过」。代价是 KPI 可能来自更早那一轮 —— 所以必须在这里补一句
     # 话，明说"最新一轮什么都没发、下面这些数字不是它的"（2026-10 审计：事故②⑦）。
     latest = records[0] if records else None
+    # 用户点名要看某一轮、而那一轮已经滚出窗口（只读最近 store.MAX_RECORDS 轮）时，
+    # 上面的回落会**静默**换成别的轮次：页面数字全变，却没有任何一个字说明这件事。
+    # 这里记下来，由 `_banners()` 明说一句（2026-10 审计）。
+    requested = _text(selected_requested)
+    selected_missing = ""
+    if requested and _text(_get(selected, "run_id")) != requested:
+        selected_missing = (
+            f"运行记录只留最近 {store.MAX_RECORDS} 轮，你点的那一轮（{requested}）"
+            "已经不在里面了；下面显示的是别的轮次，不是它。要翻更早的记录，"
+            "去「日志」页下载运行记录文件。"
+        )
     newest_note = ""
     if latest is not None and latest is not selected:
         latest_counts = _get(latest, "counts") or {}
@@ -1580,6 +1604,7 @@ def build(
     summary["run_count"] = len(card_runs)
     summary["newest_run_id"] = _text(_get(latest, "run_id"))
     summary["newest_is_selected"] = bool(latest is not None and latest is selected)
+    summary["selected_missing"] = bool(selected_missing)
     summary["mixed_runs"] = bool(per_account and len(card_runs) > 1)
     if summary["mixed_runs"]:
         summary["run_id"] = ""
@@ -1660,6 +1685,7 @@ def build(
             last_skip=_text(_get(selected, "skip_reason")),
             last_skip_until=_text(_get(selected, "skip_until")),
             newest_note=newest_note,
+            selected_missing=selected_missing,
             streak_labels=broken_labels,
             proxy_shared=proxy_shared,
         ),

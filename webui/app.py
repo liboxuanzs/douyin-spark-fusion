@@ -235,6 +235,8 @@ def build_context(
         next_due=due,
         default_dry_run=default_dry_run,
         selected=selected,
+        # 点名要看的那一轮滚出窗口时，视图模型要靠它说一句"这不是它"
+        selected_requested=str(selected_run_id or "").strip(),
         per_account=per_account_records,
         streak=streak_view,
         proxy_state=proxy_state,

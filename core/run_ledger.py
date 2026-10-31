@@ -297,8 +297,16 @@ def lock_info(now_dt=None, path=None):
         stale, reason = False, "alive"
     elif age is None:
         stale, reason = False, "unknown_age"   # 时间读不出来 → 保守当作"还在跑"
+    elif age > STUCK_LOCK_SECONDS:
+        # 走到这里说明 pid **探不出来**（`_pid_alive` 回了 None：Windows 上 OpenProcess
+        # 因权限以外的原因失败、或 os.kill 抛了预料之外的 OSError）。判不了就当还在跑 ——
+        # 按 STALE_LOCK_SECONDS(2h) 判残留会删掉一个可能真在跑的锁，两个 Chromium 同时
+        # 登录同一个账号会互踢，那是本项目最怕的事故。但也不能无限期占着：超过
+        # STUCK_LOCK_SECONDS(6h) 就与"活着但卡死"同等处理，否则发送会静默停摆到
+        # 有人登机器 rm 锁为止。
+        stale, reason = True, "unknown_pid_too_long"
     else:
-        stale, reason = age > STALE_LOCK_SECONDS, "age"
+        stale, reason = False, "unknown_pid"
     out = dict(rec)
     out.update({"age_seconds": int(age) if age is not None else None,
                 "pid_alive": alive, "stale": bool(stale), "stale_reason": reason})

@@ -244,6 +244,39 @@ class LockTests(_TempFiles):
             with self.assertRaises(rl.RunLocked):
                 rl.RunLock(path=self.lock).acquire()
 
+    def test_undeterminable_pid_is_not_reclaimed_at_the_two_hour_mark(self):
+        """判不出 pid ≠ 进程死了：2 小时那条线只适用于"确定已经不在了"的锁。
+
+        真实坏情况：Windows 上 OpenProcess 因权限以外的原因失败，`_pid_alive` 回
+        None，而挡在前面的分支只认 `alive is True`。旧写法落到按时间的
+        `age > STALE_LOCK_SECONDS`(2h)，于是一个**可能真在跑**的锁在 2 小时后被删掉重抢
+        —— 两个 Chromium 同时登录同一个账号，正是本项目最怕的事故。
+        """
+        with open(self.lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": 999999999, "token": "t",
+                       "started_at": iso(now() - timedelta(hours=3))}, f)
+        with mock.patch.object(rl, "_pid_alive", return_value=None):
+            info = rl.lock_info(path=self.lock)
+            self.assertFalse(info["stale"])
+            self.assertEqual(info["stale_reason"], "unknown_pid")
+            self.assertTrue(rl.is_running(path=self.lock))
+            with self.assertRaises(rl.RunLocked):
+                rl.RunLock(path=self.lock).acquire()
+
+    def test_undeterminable_pid_is_reclaimed_after_the_stuck_window(self):
+        """但也不能无限期占着：超过 STUCK_LOCK_SECONDS 与"活着但卡死"同等处理。"""
+        with open(self.lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": 999999999, "token": "t",
+                       "started_at": iso(now() - timedelta(hours=7))}, f)
+        with mock.patch.object(rl, "_pid_alive", return_value=None):
+            info = rl.lock_info(path=self.lock)
+            self.assertTrue(info["stale"])
+            self.assertEqual(info["stale_reason"], "unknown_pid_too_long")
+            lk = rl.RunLock(path=self.lock)
+            lk.acquire()
+            self.assertEqual(rl.lock_info(path=self.lock)["token"], lk.token)
+            lk.release()
+
     def test_lock_info_on_missing_or_broken_file(self):
         self.assertIsNone(rl.lock_info(path=self.lock))
         with open(self.lock, "w", encoding="utf-8") as f:

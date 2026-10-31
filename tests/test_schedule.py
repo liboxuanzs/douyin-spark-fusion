@@ -207,6 +207,43 @@ class TickMinutesTests(unittest.TestCase):
                 self.assertLessEqual(value, schedule.TICK_MAX)
 
 
+class LastDispatchMinuteTests(unittest.TestCase):
+    """当天最后一次派发必须落在**派发节奏的刻度上**。
+
+    `plan_for()` 用它把抖出当天的 `due_at` 夹回来。旧写法是写死的 `60 - TICK_MINUTES`
+    （= 55），只在"N 能整除 60"时成立：把 timer 改成 `*:0/7`，刻度是 0/7/14…/56，
+    夹到 53 分之后当天再没有一次派发，账号当天一条都发不出去。
+    """
+
+    def test_default_cadence_matches_the_shipped_constant(self):
+        self.assertEqual(schedule.DISPATCH_MINUTES, schedule.TICK_MINUTES)
+        self.assertEqual(schedule.last_dispatch_minute(), 55)
+
+    def test_result_is_always_on_the_cadence_grid(self):
+        for step in range(schedule.TICK_MIN, 60):
+            with self.subTest(step=step):
+                minute = schedule.last_dispatch_minute(step)
+                self.assertLess(minute, 60)
+                self.assertEqual(minute % step, 0)
+                self.assertGreater(minute, 59 - step)   # 60 以内最大的那个刻度点
+
+    def test_nonsense_cadence_is_clamped(self):
+        # 0 = 没给（回落默认节奏）；负数夹到 TICK_MIN，过大夹到 59
+        self.assertEqual(schedule.last_dispatch_minute(0), schedule.last_dispatch_minute())
+        self.assertEqual(schedule.last_dispatch_minute(-5), schedule.last_dispatch_minute(1))
+        self.assertEqual(schedule.last_dispatch_minute(1000), 59)
+
+    def test_plan_clamps_late_due_onto_the_last_dispatch(self):
+        """抖到次日 00:13 的`due_at`必须挤回最后一个刻度点，且仍在当天。"""
+        when = _at("2026-10-07 00:00:00")
+        with mock.patch.object(schedule, "jitter_minutes", return_value=15):
+            plan = schedule.plan_for({"unique_id": "11223344556", "time": "23:58"},
+                                     when=when, fallback="20:30", jitter=15)
+        self.assertEqual(plan["due_at"], when.replace(hour=23,
+                                                      minute=schedule.last_dispatch_minute()))
+        self.assertEqual(plan["due_at"].date(), when.date())
+
+
 class JitterEnvTests(unittest.TestCase):
     def test_bad_values_fall_back_to_the_default(self):
         for bad in ("", "  ", "abc", None):
