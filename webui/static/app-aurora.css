@@ -4869,6 +4869,14 @@ html[data-skin="aurora"] summary:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   html[data-skin="aurora"] .metric-card:hover,
   html[data-skin="aurora"] .button-quiet:hover:not(:disabled) { transform: none; }
+  /* 跨文档转场在这里再停一次：本块是文件里最后一个 reduced-motion 块，
+     层 22 那份写在更前面，会被这里的层叠顺序盖到后面判断；转场伪元素
+     又不吃普通选择器，只认它自己的名字，所以必须并列写出来。 */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+  html.dsf-page-enter .app-shell,
+  html.dsf-page-enter .mobile-topbar { animation: none !important; }
 }
 
 /* == 25.16 可读性收口：小字够亮、主数字够大 ==============================
