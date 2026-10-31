@@ -4870,3 +4870,50 @@ html[data-skin="aurora"] summary:focus-visible {
   html[data-skin="aurora"] .metric-card:hover,
   html[data-skin="aurora"] .button-quiet:hover:not(:disabled) { transform: none; }
 }
+
+/* == 25.16 可读性收口：小字够亮、主数字够大 ==============================
+   25 层之前的分区把「概览标签」「表头」「.muted」压在 --text-4（#4d5570）上，
+   在 #06070d 的深色画布上只有 2.6～2.7:1 —— 小字看不清。这里统一抬到
+   --text-3（深色 4.75:1、浅色 4.59:1），并让概览条的主数字回到百位尺寸。
+   非交互、不改结构，只调颜色与字号。                                       */
+
+html[data-skin="aurora"] :where(.overview-label, .progress-text) {
+  color: var(--text-3);
+}
+html[data-skin="aurora"] .table-shell thead th {
+  color: var(--text-3);
+  font-weight: 600;
+}
+html[data-skin="aurora"] :where(.muted) {
+  color: var(--text-3);
+}
+
+/* 概览条左侧那块是整页的「今天怎么样」，数字要压得住进度条；
+   单元格里的数字维持 15px，别抢主位。 */
+html[data-skin="aurora"] .overview-primary .overview-value {
+  font-size: clamp(26px, 2.2vw + 12px, 36px);
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+}
+html[data-skin="aurora"] .overview-primary .overview-value--short {
+  font-size: 24px !important;
+  letter-spacing: -0.01em;
+}
+html[data-skin="aurora"] .overview-primary .overview-value--prose {
+  font-size: 15px !important;
+  line-height: 1.5;
+}
+
+html[data-theme="light"][data-skin="aurora"] :where(.overview-label, .progress-text) {
+  color: var(--text-3);
+}
+html[data-theme="light"][data-skin="aurora"] :where(.muted) {
+  color: var(--text-3);
+}
+html[data-theme="light"][data-skin="aurora"] .table-shell thead th {
+  color: var(--text-3);
+}
+
+@media print {
+  html[data-skin="aurora"] .overview-primary .overview-value { font-size: 20pt; }
+}
