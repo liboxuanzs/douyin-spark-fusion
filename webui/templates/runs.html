@@ -79,12 +79,11 @@
       {% if not view.has_records %}
       还没有跑过任务。点上面的「立即运行」试跑一轮，或者等定时任务自动执行。
       {% else %}
-      本轮结论：已送达 <b data-run-value="confirmed">{{ summary.confirmed }}</b>
+      {% if run %}{{ run.started_text }} 那一轮 · 模式 {{ run.dry_run_text }} · 来源 {{ run.source_text }}：{% endif %}已送达 <b data-run-value="confirmed">{{ summary.confirmed }}</b>
       · 可能已送达 <b data-run-value="pageEcho">{{ summary.pageEcho }}</b>
       · 发送失败 <b data-run-value="attention">{{ summary.attention }}</b>
       · 待发送 <b data-run-value="pending">{{ summary.pending }}</b>
-      <span class="muted">（已发送 {{ summary.sent }}/{{ summary.total }}）</span>
-      {%- if run %}（{{ run.started_text }} 一轮，模式 {{ run.dry_run_text }}，来源 {{ run.source_text }}）{% endif %}
+      <span class="muted">已发送 {{ summary.sent }}/{{ summary.total }}</span>
       {% endif %}
     </span></strong>
   </div>
@@ -198,7 +197,7 @@
             <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
             <span class="account-name">
               <strong>{{ account.username }}</strong>
-              <small>{% if account.run_missing %}这一轮没有它{% else %}{{ account.state_label }}{% endif %}{% if account.gate_text %} · 登录状态 {{ account.gate_text }}{% endif %}</small>
+              <small>{% if account.run_missing %}这一轮没有它{% else %}{{ account.state_label }}{% endif %}{% if account.gate_text and account.gate_text != "正常" %} · {{ account.gate_text }}{% endif %}</small>
             </span>
           </span>
           <span class="account-console-metrics">
