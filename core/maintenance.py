@@ -777,10 +777,10 @@ def auto_prune_status(*, now_ts: Optional[float] = None, state_file: Any = None)
     if not auto_prune_enabled():
         next_text = "已关闭（MAINTENANCE_AUTO_PRUNE_HOURS=0）"
     elif not last:
-        next_text = "下一次门铃就会清"
+        next_text = "下一次定时检查就会清"
     else:
         remain = max(0.0, hours * 3600.0 - (now - last))
-        next_text = "下一次门铃就会清" if remain <= 0 else f"约 {human_duration(remain)} 后"
+        next_text = "下一次定时检查就会清" if remain <= 0 else f"约 {human_duration(remain)} 后"
     return {
         "enabled": auto_prune_enabled(),
         "hours": hours,

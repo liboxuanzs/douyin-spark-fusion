@@ -115,7 +115,7 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     if args.check:
         print(f"[webui] 配置校验通过：host={host} port={port}")
-        print(f"[webui] 账本={config.ledger_file()}")
+        print(f"[webui] 运行记录={config.ledger_file()}")
         print(f"[webui] 运行锁={config.run_lock_file()}")
         print(f"[webui] 冷却状态={config.rate_limit_file()}")
         print(f"[webui] 日志={config.log_file()}")

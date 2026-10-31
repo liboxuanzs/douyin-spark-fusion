@@ -99,8 +99,8 @@
       <strong><i data-lucide="alarm-clock"></i>定时时间对不上</strong>
       <ul>
         <li>系统定时器是 <code>{{ view.schedule.timerTimes|join('、') }}</code>，`.env` 里写的是 <code>{{ view.schedule.times|join('、') }}</code>。</li>
-        <li>定时器决定"门铃什么时候响"，`.env` 的 <code>TASK_SCHEDULE_TIMES</code> 决定每个账号"该发"的时刻；两边对不上时，账号可能到点也发不出去。</li>
-        <li>要一致：把定时器改成 <code>*:0/5</code> 这种派发器写法（每 5 分钟敲门、各账号按自己的时间发），或者把两边的时间改成一样。</li>
+        <li>系统定时器负责「多久检查一次」，配置里的 <code>TASK_SCHEDULE_TIMES</code> 负责「每个账号几点发」；两边对不上时，账号到点也不会发出去。</li>
+        <li>要让两边一致：把系统定时器改成 <code>*:0/5</code>（每 5 分钟检查一次，到点的账号才发），或者把两边写成同一个时间。</li>
       </ul>
     </div>
     {% endif %}
@@ -122,8 +122,8 @@
     <div class="overview-primary">
       <div class="overview-head">
         <span class="overview-label">今日发送进度</span>
-        {# 空跑标记必须能被 10 秒轮询重画：原来由 {% if %} 决定在不在页面上，首屏打开时
-           档位是 off 就永远不出现 —— 之后切到「输入后清空」跑一轮，页面安安静静地把
+        {# 试运行标记必须能被 10 秒轮询重画：原来由 {% if %} 决定在不在页面上，首屏打开时
+           模式是 off 就永远不出现 —— 之后切到「输入后清空」跑一轮，页面安安静静地把
            排练讲成了发送（2026-10-18 issue #9）。元素常驻，只切 hidden。 #}
         <span class="pill warning" data-overview-dry-run {% if not (summary.dry_run and summary.dry_run != "off") %}hidden{% endif %}>{{ summary.dry_run_text }}</span>
       </div>
@@ -136,8 +136,8 @@
         <span class="progress-text" data-overview-value="progressPercent">{{ summary.sent_pct }}%</span>
       </div>
       <div class="overview-help">
-        强确认 <b data-overview-value="confirmed">{{ summary.confirmed }}</b>
-        · 弱证据 <b data-overview-value="weakSent">{{ summary.weak }}</b>
+        已送达 <b data-overview-value="confirmed">{{ summary.confirmed }}</b>
+        · 可能已送达 <b data-overview-value="weakSent">{{ summary.weak }}</b>
         · <span data-overview-value="accounts">{{ summary.accounts_text }}</span>，共 <b data-overview-value="total">{{ summary.total }}</b> 个目标
       </div>
       {# 这一块必须在轮询里能出现/消失：账号是不是各跑各的、跑了几轮，每一轮都可能变，
@@ -145,28 +145,28 @@
          决定露不露，轮数单独挂一个槽（2026-10-17 前端审计：原来由 {% if %} 决定存在
          与否，多账号各自跑过之后轮询一刷这块就永远不见了）。 #}
       <div class="overview-help" data-overview-mixed-runs {% if not summary.mixed_runs %}hidden{% endif %}>
-        每个账号按自己的发送时间分开跑，上面是<strong>各账号各自最近一次</strong>的结果（共 <span data-overview-mixed-runs-count>{{ summary.run_count }}</span> 轮）。
+        每个账号按各自的时间发送；这里的数字是<strong>各账号最近一次</strong>的结果（共 <span data-overview-mixed-runs-count>{{ summary.run_count }}</span> 轮）。
       </div>
-      {# 与药丸同一个毛病、同一套修法：两种说明都常驻，靠 hidden 显隐，档位文字单独挂
+      {# 与药丸同一个毛病、同一套修法：两种说明都常驻，靠 hidden 显隐，模式文字单独挂
          一个槽（data-overview-dry-run-text）。文案只写在模板这一处，轮询只切显隐与那个槽。 #}
       <div
         class="overview-help"
         data-overview-dry-run-hint="mixed"
         {% if summary.dry_run != "mixed" %}hidden{% endif %}
       >
-        各账号的档位不一致：有的真发、有的只是<strong>空跑</strong>排练 —— 每张账号卡上写着自己那一轮的档位。
+        各账号的模式不一样：有的真的发出去了，有的只是<strong>试运行</strong>。每张账号卡上标着自己那一轮用的模式。
       </div>
       <div
         class="overview-help"
         data-overview-dry-run-hint="single"
         {% if not (summary.dry_run and summary.dry_run != "off" and summary.dry_run != "mixed") %}hidden{% endif %}
       >
-        这是<strong>空跑</strong>的数字（<span data-overview-dry-run-text>{{ summary.dry_run_text }}</span>），一条都没真发出去。
+        这是<strong>试运行</strong>的数字（<span data-overview-dry-run-text>{{ summary.dry_run_text }}</span>），一条都没真发出去。
       </div>
     </div>
     <div class="overview-cell">
       <div class="overview-label">下次自动触发</div>
-      {# 值槽是给"0/5"这种一行数字准备的 26px 大字：派发器模式喂它的是「谁 · 几点」
+      {# 值槽是给"0/5"这种一行数字准备的 26px 大字：定时任务模式喂它的是「谁 · 几点」
          短句，收一号字（--short）；只有整句话可用时才用 --prose。两个类名与
          app.js 里轮询时的那套判断必须一致，否则每 10 秒刷一次字号会跳。 #}
       {% set due_short = view.schedule.nextTriggerShort if view.schedule.armed else "" %}
@@ -186,7 +186,7 @@
         {# 值槽已经写了"谁、几点"（due_short）时，这行只说"到点之后会发生什么"；
            没有短句时值槽放的是整句话，这里就只交代机制，别把同一句话抄两遍 #}
         {%- if due_short -%}
-        到点后的下一次门铃就会发它
+        到点后 5 分钟内会自动发出
         {%- elif view.schedule.nextTriggerText -%}
         按各账号自己的时间发
         {%- else -%}
@@ -198,22 +198,22 @@
       </div>
     </div>
     <div class="overview-cell">
-      <div class="overview-label">最近强确认</div>
+      <div class="overview-label">最近已送达</div>
       <div class="overview-value" data-overview-value="lastConfirmedAt">
         {{ summary.lastConfirmedAt or "-" }}
       </div>
       <div class="overview-help" data-overview-help="lastConfirmedAt">
         {# 措辞必须与 app.js 轮询时那句逐字一致，也必须描述真实判据：判定里收件人
-           校验不过只是把证据降级成"弱证据"（core/strict_verify.py 里 ok 仍为 True），
+           校验不过只是把证据降级成"可能已送达"（core/strict_verify.py 里 ok 仍为 True），
            说成"双确认"听起来比实际更严 —— 而这句话是用户判断"这条到底算不算发出去"
            的唯一依据。轮数挂一个槽，供轮询把"共 N 轮"重画出来。 #}
-        {%- if summary.lastConfirmedAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}回执 ok 且能点名收件人（发送后就停在目标会话）的目标
-        {%- elif summary.lastWeakAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}只有弱证据（拿到页面回显，没拿到回执），不算强确认
+        {%- if summary.lastConfirmedAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}服务器确认已发出，并且确认发给了本人的目标
+        {%- elif summary.lastWeakAt %}{{ '各账号各自最近一次合计，' if summary.mixed_runs else '上一轮' }}只看到页面上的痕迹，没拿到服务器回执
         {%- else %}{{ '最近这些轮次里' if summary.mixed_runs else '上一轮' }}没有确认成功的目标{% endif -%}
       </div>
     </div>
     <div class="overview-cell">
-      <div class="overview-label">需要处理</div>
+      <div class="overview-label">发送失败</div>
       <div class="overview-value" data-overview-value="attention">{{ summary.attention }}</div>
       <div class="overview-help">失败、选中失败或被账号状态阻断</div>
     </div>
@@ -224,33 +224,33 @@
      "本轮已发送" 上面那条进度条里已经有（已发送 N/M 与百分比），不重复占位。 #}
   <section class="metric-grid" aria-label="今日状态分布">
     <article class="metric-card success">
-      <div class="metric-label">确认成功</div>
+      <div class="metric-label">已送达</div>
       <div class="metric-value" data-overview-value="confirmed">{{ summary.confirmed }}</div>
       <div class="metric-help">
-        回执 ok 且能点名收件人（发送后就停在目标会话） · 另有
-        <b data-overview-value="pageEcho">{{ summary.pageEcho }}</b> 个弱证据
+        服务器确认已发出，并且确认发给了本人 · 另有
+        <b data-overview-value="pageEcho">{{ summary.pageEcho }}</b> 个可能已送达
       </div>
     </article>
     <article class="metric-card warning">
-      <div class="metric-label">弱证据</div>
+      <div class="metric-label">可能已送达</div>
       <div class="metric-value" data-overview-value="pageEcho">{{ summary.pageEcho }}</div>
-      <div class="metric-help">只拿到页面回显或网络信号，不能算强确认</div>
+      <div class="metric-help">只在页面上看到痕迹，没拿到服务器回执</div>
     </article>
     <article class="metric-card danger">
-      <div class="metric-label">失败或阻断</div>
+      <div class="metric-label">发送失败</div>
       <div class="metric-value" data-overview-value="attention">{{ summary.attention }}</div>
       <div class="metric-help">
         {% if summary.accounts_blocked %}
         {{ summary.accounts_blocked }} 个账号本轮被阻断
         {% else %}
-        目标级失败：下一轮重新扫描时还会再试一次
+        这些目标下一轮会再试一次
         {% endif %}
       </div>
     </article>
     <article class="metric-card info">
-      <div class="metric-label">未尝试</div>
+      <div class="metric-label">待发送</div>
       <div class="metric-value" data-overview-value="pending">{{ summary.pending }}</div>
-      <div class="metric-help">{{ '各账号自己最近一轮里还没轮到的目标（下一次轮到它的时候处理）' if summary.mixed_runs else '还没有尝试过的目标（下一轮会处理）' }}</div>
+      <div class="metric-help">{{ '各账号最近一轮还没轮到的目标，下一轮会处理' if summary.mixed_runs else '还没轮到的目标，下一轮会处理' }}</div>
     </article>
   </section>
 
@@ -316,7 +316,7 @@
           <strong data-account-name>{{ account.username }}</strong>
           <small class="muted">
             抖音号 {{ account.unique_id or "—" }}
-            {%- if account.fingerprint %} · 指纹 {{ account.fingerprint }}{% endif %}
+            {%- if account.fingerprint %} · 设备标识 {{ account.fingerprint }}{% endif %}
             {%- if account.orphan %} · 不在 TASKS 里
             {%- elif account.cookie_configured %} · cookie {{ account.cookie_names|length }} 项
             {%- else %} · <span class="danger-text">cookie 缺失</span>{% endif %}
@@ -362,13 +362,13 @@
               data-disable-while-running
               {% if view.task.running %}disabled{% endif %}
               data-confirm-title="补发今天"
-              data-confirm="会先花十几秒确认这个账号的登录还活着，然后撤掉「{{ account.username }}」今天的记账，让门铃在今天剩下的时间里补发一次。今天已经成功发过的话不会撤（避免一天发两遍）；登录已经失效的话也不撤 —— 那会白跑一轮，请去「扫码登录」重登。确认继续吗？"
+              data-confirm="会先花十几秒确认这个账号的登录还有效，然后清掉「{{ account.username }}」今天「已发过」的记录，让它今天再发一次。今天已经成功发过的不会清（避免一天发两遍）；登录已经失效也不会清 —— 那样只会白跑一轮，请先去「扫码登录」重新登录。确认继续吗？"
               data-confirm-accept="撤回并补发"
             >
               <i data-lucide="send"></i><span>补发今天</span>
             </button>
           </form>
-          {# 停用 ≠ 移除：停用只写 TASKS[].enabled=false，昵称、好友、时间、指纹、cookie
+          {# 停用 ≠ 移除：停用只写 TASKS[].enabled=false，昵称、好友、时间、设备标识、cookie
              全部留着，点「启用」就恢复；移除会把 cookie 一起删掉，想再发得重新扫码。
              停下去这件事必须回头能看见，所以卡片本身还有一条"已停用"的说明。 #}
           <form method="post" action="/ops/account/enabled">
@@ -424,32 +424,32 @@
       <p class="notice-inline" data-account-stopped>
         <i data-lucide="pause-circle"></i>
         <span>这个账号已停用：到点不会自动发送（好友、内容、发送时间、cookie 都还留着）。
-          想让它照常发，点上面的「启用」—— 今天还没发过的话，下一次门铃就会补上。</span>
+          想让它照常发，点上面的「启用」—— 今天还没发过的话，下一次定时检查就会补上。</span>
       </p>
       {% endif %}
 
       {% if account.orphan %}
       <p class="notice-inline" data-account-orphan>
         <i data-lucide="history"></i>
-        <span>这个账号已经不在 <code>TASKS</code> 里了，下面这些只是它上一轮留下的记录 —— 下一轮不会再处理它，
-          所以也没有「移除」可点。想让它重新发，得先把抖音号加回 <code>.env</code> 的 <code>TASKS</code>。</span>
+        <span>这个账号已经从配置里移除了，下面只是它上一轮留下的记录 —— 下一轮不会再处理它，
+          所以也没有「移除」可点。想让它重新发，得先把抖音号加回配置。</span>
       </p>
       {% endif %}
 
       <div class="account-stats">
-        <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>强确认</small></span>
-        <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>需处理</small></span>
-        <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>未尝试</small></span>
+        <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>已送达</small></span>
+        <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>发送失败</small></span>
+        <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>待发送</small></span>
         <div class="progress-line">
           <span class="progress-track">
             <i class="progress-strong" style="width:{{ account.strong_pct }}%" data-account-progress></i>
             <i class="progress-echo" style="width:{{ account.weak_pct }}%" data-account-progress-echo></i>
           </span>
-          <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }}{% if account.dry_run and account.dry_run != "off" %} · 上一轮是空跑（{{ account.dry_run_text }}）{% endif %}</span>
+          <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }}{% if account.dry_run and account.dry_run != "off" %} · 上一轮是试运行（{{ account.dry_run_text }}）{% endif %}</span>
         </div>
       </div>
 
-      {# 火花连续天数（issue #15）：只用账本算，空跑与失败都不计。断签单独上色 ——
+      {# 火花连续天数（issue #15）：只用运行记录算，试运行与失败都不计。断签单独上色 ——
          连续天数断了不会自己恢复，这是这张卡里最该一眼看见的一行。 #}
       {% if account.streak %}
       <div class="account-streak" data-account-streak>
@@ -504,9 +504,9 @@
           </div>
           <small class="muted">
             <span class="time-state time-state-{{ account.send_state }}" data-time-state="{{ account.send_state }}">{{ account.send_state_text }}</span>
-            {%- if not account.send_time_custom %} · 现在跟全局默认 <code>TASK_SCHEDULE_TIMES</code>{% endif %}
-            · 一天只发一次，实际时刻在设定时间前后 <code>SCHEDULE_JITTER_MINUTES</code> 分钟内浮动；
-            留空 = 跟全局默认。过了点没发是正常的：下一个门铃（每 5 分钟）会补发。
+            {%- if not account.send_time_custom %} · 现在跟全局默认时间走{% endif %}
+            · 一天只发一次；实际发送时间会在这个时间前后浮动（默认 15 分钟，可在「运行配置」里改）。
+            留空 = 跟全局默认。过了点还没发不用管，5 分钟内会自动补发。
           </small>
         </form>
       </div>
@@ -533,8 +533,8 @@
                     aria-label="发给这个账号目标好友的内容"
                     placeholder="{{ view.message_template }}">{{ account.message }}</textarea>
           <small class="muted">
-            留空 = 用全局模板 <code>MESSAGE_TEMPLATE</code>。<code>[API]</code> 照样换成每日一言，
-            而且是<strong>每个好友各取一次</strong>；换行照原样发出。保存前自动备份 <code>.env</code>。
+            留空就用全局模板。模板里的 <code>[API]</code> 会换成每日一句，
+            <strong>每个好友各取一条</strong>；换行照原样发出。保存前会自动备份配置。
           </small>
           {# issue #17：预览按「这个账号这一轮用哪份模板」算，一言位置用示例顶着、不联网 #}
           <div class="message-preview" data-message-preview-block>
@@ -573,7 +573,7 @@
             {% if account.proxy_mask %}
             <form method="post" action="/ops/account/proxy"
                   data-confirm-title="改回全局出口"
-                  data-confirm="「{{ account.username }}」会改用全局 PROXY_ADDRESS（那里没配就是直接连）。出口 IP 一变，下次发送有可能要重新扫码。确认改回吗？"
+                  data-confirm="「{{ account.username }}」会改用全局出口设置（那里没配就是直连）。出口 IP 一变，下次发送可能要重新扫码登录。确认改回吗？"
                   data-confirm-accept="确认改回">
               <input type="hidden" name="unique_id" value="{{ account.unique_id }}">
               <input type="hidden" name="clear" value="1">
@@ -590,8 +590,8 @@
           <button class="button button-soft" type="submit"><i data-lucide="save"></i><span>保存出口</span></button>
         </form>
         <small class="muted">
-          只影响这个账号（发送与扫码都走它）；留空 = 跟全局 <code>PROXY_ADDRESS</code>。
-          地址里可以带口令，页面和日志一律只显示 host:port。
+          只影响这个账号（发送和扫码都走它）；留空就用全局设置。
+          地址里可以带账号口令，页面和日志只显示主机和端口。
           <span class="proxy-check" data-proxy-check-text>{{ account.proxy_check_text }}</span>
         </small>
       </div>
@@ -819,8 +819,8 @@
     {% endif %}
 
     <form class="stack-form" method="post" action="/ops/run-now" data-dry-run-group data-segment-owner>
-      <div class="field-label">空跑档位</div>
-      <div class="segmented-control" role="tablist" aria-label="空跑档位">
+      <div class="field-label">运行模式</div>
+      <div class="segmented-control" role="tablist" aria-label="运行模式">
         {% for level in view.dry_run.levels %}
         <button
           class="segment-button {% if level == view.dry_run.default %}active{% endif %}"
@@ -848,11 +848,11 @@
           {% if not view.can_run %}disabled{% endif %}
         >
           <i data-lucide="play"></i>
-          <span data-run-now-label>{{ view.dry_run.labels[view.dry_run.default] }}</span>
+          <span data-run-now-label>{{ '立即发送' if view.dry_run.default == 'off' else '开始试运行' }}</span>
         </button>
         <span class="muted compact">
-          本轮剩余 <b data-overview-value="remaining">{{ summary.pending }}</b> 个目标未尝试
-          {%- if view.last_run %} · 上一轮 {{ view.last_run.run_text }}{% endif %}
+          本轮还有 <b data-overview-value="remaining">{{ summary.pending }}</b> 个目标没发出去
+          {%- if view.last_run and view.last_run.run_text %} · 上一轮 {{ view.last_run.run_text }}{% endif %}
         </span>
       </div>
     </form>

@@ -77,36 +77,36 @@
        data-today-summary>
     <strong><i data-lucide="clipboard-check"></i><span>
       {% if not view.has_records %}
-      还没有跑过任务。上面点「立即运行」空跑一轮，或者等定时任务触发。
+      还没有跑过任务。点上面的「立即运行」试跑一轮，或者等定时任务自动执行。
       {% else %}
-      本轮结论：强确认 <b data-run-value="confirmed">{{ summary.confirmed }}</b>
-      · 弱证据 <b data-run-value="pageEcho">{{ summary.pageEcho }}</b>
-      · 需处理 <b data-run-value="attention">{{ summary.attention }}</b>
-      · 未尝试 <b data-run-value="pending">{{ summary.pending }}</b>
+      本轮结论：已送达 <b data-run-value="confirmed">{{ summary.confirmed }}</b>
+      · 可能已送达 <b data-run-value="pageEcho">{{ summary.pageEcho }}</b>
+      · 发送失败 <b data-run-value="attention">{{ summary.attention }}</b>
+      · 待发送 <b data-run-value="pending">{{ summary.pending }}</b>
       <span class="muted">（已发送 {{ summary.sent }}/{{ summary.total }}）</span>
-      {%- if run %}（{{ run.started_text }} 一轮，档位 {{ run.dry_run_text }}，来源 {{ run.source_text }}）{% endif %}
+      {%- if run %}（{{ run.started_text }} 一轮，模式 {{ run.dry_run_text }}，来源 {{ run.source_text }}）{% endif %}
       {% endif %}
     </span></strong>
   </div>
 
   <section class="metric-grid" aria-label="本轮状态分布">
     <article class="metric-card success">
-      <div class="metric-label">强确认</div>
+      <div class="metric-label">已送达</div>
       <div class="metric-value" data-run-value="confirmed">{{ summary.confirmed }}</div>
-      <div class="metric-help">回执 ok 且能点名收件人（发送后就停在目标会话）</div>
+      <div class="metric-help">服务器确认已发出，并且确认发给了本人</div>
     </article>
     <article class="metric-card warning">
-      <div class="metric-label">弱证据</div>
+      <div class="metric-label">可能已送达</div>
       <div class="metric-value" data-run-value="pageEcho">{{ summary.pageEcho }}</div>
-      <div class="metric-help">只拿到页面回显或网络信号，不能算强确认</div>
+      <div class="metric-help">只在页面上看到痕迹，没拿到服务器回执</div>
     </article>
     <article class="metric-card danger">
-      <div class="metric-label">需处理</div>
+      <div class="metric-label">发送失败</div>
       <div class="metric-value" data-run-value="attention">{{ summary.attention }}</div>
       <div class="metric-help">失败、选中失败或不在会话列表里</div>
     </article>
     <article class="metric-card info">
-      <div class="metric-label">未尝试</div>
+      <div class="metric-label">待发送</div>
       <div class="metric-value" data-run-value="pending">{{ summary.pending }}</div>
       <div class="metric-help">这一轮没有走到的目标</div>
     </article>
@@ -117,7 +117,7 @@
     <div class="section-header">
       <div>
         <h2 class="section-title">历史轮次</h2>
-        <p class="muted compact">账本里最近 {{ view.runs|length }} 轮，点一行看那一轮的明细。</p>
+        <p class="muted compact">最近 {{ view.runs|length }} 轮运行记录，点一行看那一轮的明细。</p>
       </div>
     </div>
     {% if view.runs %}
@@ -126,7 +126,7 @@
         <thead>
           <tr>
             <th scope="col">开始</th>
-            <th scope="col">档位</th>
+            <th scope="col">模式</th>
             <th scope="col">来源</th>
             <th scope="col">结果</th>
             <th scope="col">账号</th>
@@ -164,7 +164,7 @@
       </table>
     </div>
     {% else %}
-    <div class="empty-state">账本还是空的。跑一轮之后这里会出现明细。</div>
+    <div class="empty-state">还没有运行记录。跑一轮之后这里会出现明细。</div>
     {% endif %}
   </section>
 
@@ -175,7 +175,7 @@
         <h2 class="section-title">目标明细</h2>
         <p class="muted compact">
           {% if run %}
-          {{ run.started_text }} 那一轮 · 档位 {{ run.dry_run_text }} · 来源 {{ run.source_text }}
+          {{ run.started_text }} 那一轮 · 模式 {{ run.dry_run_text }} · 来源 {{ run.source_text }}
           {% else %}还没有可看的轮次{% endif %}
         </p>
       </div>
@@ -198,16 +198,16 @@
             <span class="account-avatar">{{ (account.username or "A")[:1] }}</span>
             <span class="account-name">
               <strong>{{ account.username }}</strong>
-              <small>{{ account.state_label }}{% if account.gate_text %} · 门禁 {{ account.gate_text }}{% endif %}</small>
+              <small>{{ account.state_label }}{% if account.gate_text %} · 登录状态 {{ account.gate_text }}{% endif %}</small>
             </span>
           </span>
           <span class="account-console-metrics">
             <span class="status-chip {{ account.chip }}">
-              成功 {{ account.confirmed }} · 弱 {{ account.weak }} · 需处理 {{ account.failed }} · 未尝试 {{ account.pending }}
+              已送达 {{ account.confirmed }} · 可能已送达 {{ account.weak }} · 发送失败 {{ account.failed }} · 待发送 {{ account.pending }}
             </span>
-            <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>强确认</small></span>
-            <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>需处理</small></span>
-            <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>未尝试</small></span>
+            <span class="summary-value"><strong data-account-confirmed>{{ account.confirmed }}</strong><small>已送达</small></span>
+            <span class="summary-value"><strong data-account-attention>{{ account.attention }}</strong><small>发送失败</small></span>
+            <span class="summary-value"><strong data-account-pending>{{ account.pending }}</strong><small>待发送</small></span>
           </span>
           <i class="summary-chevron" data-lucide="chevron-down"></i>
         </summary>
@@ -235,10 +235,10 @@
           <div class="account-meta-strip">
             <span>目标 {{ account.total }} 个</span>
             <span>本轮 {{ account.run_text or "—" }}</span>
-            {% if account.dry_run != "off" %}<span class="pill warning">空跑：{{ account.dry_run_text }}</span>{% endif %}
+            {% if account.dry_run != "off" %}<span class="pill warning">试运行：{{ account.dry_run_text }}</span>{% endif %}
             {% if account.cookie_names %}
             {# 只报数量：56 个变量名铺在页面上是一面墙，需要时鼠标停上去看 #}
-            <span title="{{ account.cookie_names|join('、') }}">已配置 {{ account.cookie_names|length }} 项 cookie</span>
+            <span title="{{ account.cookie_names|join('、') }}">已配置 {{ account.cookie_names|length }} 项登录凭证</span>
             {% endif %}
           </div>
 
@@ -251,10 +251,10 @@
               <i class="progress-strong" style="width:{{ account.strong_pct }}%" data-account-progress></i>
               <i class="progress-echo" style="width:{{ account.weak_pct }}%" data-account-progress-echo></i>
             </span>
-            <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }} · 强确认 {{ account.confirmed }}</span>
+            <span class="progress-text" data-account-progress-text>已发送 {{ account.sent }}/{{ account.total }} · 已送达 {{ account.confirmed }}</span>
           </div>
 
-          <div class="segmented-control" role="tablist" aria-label="{{ account.username }} 的目标档位">
+          <div class="segmented-control" role="tablist" aria-label="{{ account.username }} 的目标模式">
             {% for seg in view.segments %}
             <button
               class="segment-button {% if loop.first %}active{% endif %}"
@@ -289,7 +289,7 @@
                 {% endif %}
                 <span class="target-meta">
                   {%- if row.bucket == "pending" %}这一轮没有走到
-                  {%- elif row.dry_run and row.dry_run != "off" %}空跑（没有真的发送）
+                  {%- elif row.dry_run and row.dry_run != "off" %}试运行（没有真的发送）
                   {%- elif row.ok %}已发送
                   {%- else %}未发送{% endif %}
                   {%- if row.rate_limited %} · 命中风控关键词{% endif %}
@@ -298,14 +298,14 @@
               {% endfor %}
             </div>
             {% else %}
-            <div class="empty-state">{{ seg.label }}档位没有目标。</div>
+            <div class="empty-state">{{ seg.label }}：没有目标。</div>
             {% endif %}
           </div>
           {% endfor %}
         </div>
       </details>
       {% else %}
-      <div class="empty-state">没有账号。先在 <code>.env</code> 的 <code>TASKS</code> 里配置账号。</div>
+      <div class="empty-state">没有账号。先在配置文件里添加账号。</div>
       {% endfor %}
     </div>
   </section>

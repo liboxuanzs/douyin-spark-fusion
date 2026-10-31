@@ -65,7 +65,7 @@ DRY_RUN_LABELS = {
 
 
 def normalize_dry_run(value) -> str:
-    """把面板传来的档位归一成 off / select / full。
+    """把面板传来的模式归一成 off / select / full。
 
     分段控件的挂点叫 `dry-off`/`dry-select`/`dry-full`（同一个前缀还要配对下面的
     说明面板），前端一度把这个带前缀的值直接塞进隐藏域 → 服务端只认光秃秃的三档，
@@ -157,15 +157,15 @@ def build_context(
     selected_run_id: str = "",
     per_account_records: bool = True,
 ) -> Dict[str, Any]:
-    """一次请求内把所有只读数据装好（账本只读一遍，避免重复 IO）。
+    """一次请求内把所有只读数据装好（运行记录只读一遍，避免重复 IO）。
 
     ``per_account_records``：账号卡是否各取各的最近一轮。总览页要（每个账号有自己的
-    发送时间，"全局最近一轮"里通常只有一两个账号，拿它当所有账号的成绩会谎报"未尝试"）；
+    发送时间，"全局最近一轮"里通常只有一两个账号，拿它当所有账号的成绩会谎报"待发送"）；
     运行记录页不要 —— 那一页讲的就是"选中的那一轮"，必须所有账号共用同一条记录。
     """
     tz = config.load_timezone()
-    # 账本读**整段尾部**（默认只留最近 20 轮给页面），因为火花连续天数必须看到更早的日子：
-    # 只拿最近 20 轮算出来的"连续 10 天"其实是"账本只给到 10 天前"—— 数字偏小，断签还可能
+    # 运行记录读**整段尾部**（默认只留最近 20 轮给页面），因为火花连续天数必须看到更早的日子：
+    # 只拿最近 20 轮算出来的"连续 10 天"其实是"运行记录只给到 10 天前"—— 数字偏小，断签还可能
     # 整个落在窗口外看不见。归一化仍然只做最近 MAX_RECORDS 条（记录页只显示这些）。
     ledger = store.read_ledger(limit=0)
     records = [store.normalize_run(raw, tz) for raw in ledger.records[: store.MAX_RECORDS]]
@@ -178,7 +178,7 @@ def build_context(
     tail = logtail.read_tail_with_fallback(config.log_file_candidates(), lines)
     tz_name = config.default_timezone()
     next_run = config.next_run_at()
-    # 有派发器时 timer 的心跳说明不了任何事，面板要显示的是"下一个发出去的账号"。
+    # 有定时任务时 timer 的心跳说明不了任何事，面板要显示的是"下一个发出去的账号"。
     due = viewmodel.next_due(accounts)
     missing = missing_browser_modules()
 
@@ -198,12 +198,12 @@ def build_context(
     if selected_run_id:
         selected = next((r for r in records if r.run_id == selected_run_id), None)
 
-    # 火花连续天数（issue #15）：从**整份账本**算，与"选中的那一轮"无关，所以在这里算一次、
-    # 传给视图模型。账本行要用归一化前的 record.raw —— store 归一化时会丢掉 entry 的
+    # 火花连续天数（issue #15）：从**整份运行记录**算，与"选中的那一轮"无关，所以在这里算一次、
+    # 传给视图模型。运行记录行要用归一化前的 record.raw —— store 归一化时会丢掉 entry 的
     # conv_id（好友改名后还得靠它认出是同一个人），而连续天数正是按 conv_id 归天的。
     try:
         # 用**未经 MAX_RECORDS 裁剪**的原始行：归一化后的 records 只有最近 20 轮，
-        # 拿它算连续天数会把"账本只给到 10 天前"当成"连续 10 天"。
+        # 拿它算连续天数会把"运行记录只给到 10 天前"当成"连续 10 天"。
         streak_view = streak_mod.compute(
             [raw for raw in ledger.records if isinstance(raw, dict)],
             targets_by_account={
@@ -239,13 +239,13 @@ def build_context(
         streak=streak_view,
         proxy_state=proxy_state,
         paths={
-            "运行账本": str(ledger.file or config.ledger_file()),
+            "运行记录": str(ledger.file or config.ledger_file()),
             "运行锁": str(config.run_lock_file()),
             "冷却文件": str(config.rate_limit_file()),
             "面板日志": tail.path,
         },
     )
-    # 扫码登录那一段是面板自己的状态（浏览器会话），不属于账本视图
+    # 扫码登录那一段是面板自己的状态（浏览器会话），不属于运行记录视图
     view["login"] = login_view()
     # 账号卡要把"目标好友勾选"一起带上：同一批账号在页面上只出现一次
     view["account_cards"] = merge_account_rows(
@@ -422,7 +422,7 @@ def run_once(run_id: str, dry_run: str, force: bool = False) -> Dict[str, Any]:
         os.environ["DRY_RUN"] = dry_run  # core 侧若支持 DRY_RUN 环境变量即可读到
     try:
         # 按签名传参（而不是 try/except TypeError —— 万一 runTasks 内部抛 TypeError，
-        # 兜底会把整轮任务再跑一遍）。账本里的 source 因此会是 webui。
+        # 兜底会把整轮任务再跑一遍）。运行记录里的 source 因此会是 webui。
         import inspect
 
         try:
@@ -483,12 +483,12 @@ def _log(message: str) -> None:
 
 
 def _ledger_marker() -> str:
-    """账本最后一条的指纹，用来判断这一轮到底有没有留下记录。"""
+    """运行记录最后一条的设备标识，用来判断这一轮到底有没有留下记录。"""
     try:
         from core import run_ledger
 
         runs = run_ledger.read_runs(limit=1)
-    except Exception:  # noqa: BLE001 - 读不到就当"没有账本"，下面会走补记分支
+    except Exception:  # noqa: BLE001 - 读不到就当"没有运行记录"，下面会走补记分支
         return ""
     if not runs:
         return ""
@@ -497,10 +497,10 @@ def _ledger_marker() -> str:
 
 
 def _record_failed_run(run_id: str, dry_run: str, result: Dict[str, Any], before: str) -> None:
-    """这一轮连账本都没写进去时，替 core 补一条失败记录。
+    """这一轮连运行记录都没写进去时，替 core 补一条失败记录。
 
     面板点「立即运行」后立刻回 202/303，任务在后台线程里跑。以前线程出事
-    （比如 runTasks 抛异常）只在日志里留一行，**账本一个字都没有** —— 页面于是
+    （比如 runTasks 抛异常）只在日志里留一行，**运行记录一个字都没有** —— 页面于是
     显示"还没有可查看的轮次"，看起来像什么都没发生过。这里补上，让面板和
     实际一致：点过一次就是一轮，失败也是轮次。
     """
@@ -519,19 +519,19 @@ def _record_failed_run(run_id: str, dry_run: str, result: Dict[str, Any], before
             "source": "webui",
             "status": "error",
             "error": str(result.get("error") or "任务没有跑起来")[:500],
-            "note": "面板触发的一轮没能跑起来（core 连账本都没来得及写）",
+            "note": "这一轮没能跑起来（还没来得及写入运行记录）",
             "accounts": [],
         }
         if run_ledger.append_run(record):
             _log(f"已补记失败轮次（run_id={run_id}）：{record['error']}")
         else:
-            _log(f"补记失败轮次时账本写不进去（run_id={run_id}）")
+            _log(f"补记失败轮次时运行记录写不进去（run_id={run_id}）")
     except Exception as exc:  # noqa: BLE001 - 补记失败绝不能把线程带崩
         _log(f"补记失败轮次时出错（run_id={run_id}）：{type(exc).__name__}: {exc}")
 
 
 def run_in_thread(run_id: str, dry_run: str, force: bool = False) -> Dict[str, Any]:
-    """线程入口：**无论成功、失败还是崩掉，都要在账本里留下一条记录。**
+    """线程入口：**无论成功、失败还是崩掉，都要在运行记录里留下一条记录。**
 
     ``run_once`` 已经把异常兜成了返回值，这里再兜一层，是为了防它自己在
     兜底代码里出事（那样线程会静默死掉，面板还在说"已开始"）。
@@ -707,7 +707,7 @@ def _safe_next(value: str) -> str:
 #: （见 `webui/password.py`），并发打几次就能把这个进程占满 —— 面板连不上事小，
 #: 正在跑的那一轮发消息被拖慢事大。内存记账就够：进程重启本来就要重新登录。
 #:
-#: 记账本身也必须有上界，否则"换 IP 猜口令"就是一条内存泄漏（旧版按 IP 只增不减）。
+#: 记运行记录身也必须有上界，否则"换 IP 猜口令"就是一条内存泄漏（旧版按 IP 只增不减）。
 #: 现在三层一起管：
 #:   * 表最多记 `_LOGIN_FAIL_TRACK_MAX` 个来源，超了淘汰"最久没更新"的那些；
 #:   * 罚站一到期就不再拦人（`_login_wait_left` 立刻回 0），一条记账在
@@ -965,7 +965,7 @@ def flash_from_query(params: Any) -> Optional[Dict[str, str]]:
         label = DRY_RUN_LABELS.get(level, level)
         return {
             "level": "success",
-            "message": f"已开始一轮任务（run_id={started}，档位={label}）。"
+            "message": f"已开始一轮任务（run_id={started}，模式={label}）。"
             "任务在后台跑，本页每 10 秒自动刷新。",
         }
     warn = (params.get("warn") or "").strip()
@@ -1248,12 +1248,12 @@ def _profile_in_use(path: Any, *, skip_login: str = "", skip_friend: str = "") -
 
 
 def _dispatcher_accounts() -> set:
-    """派发器当前这一轮正在处理哪些账号（没在跑 / 读不到锁 → 空集合）。
+    """定时任务当前这一轮正在处理哪些账号（没在跑 / 读不到锁 → 空集合）。
 
-    ★ 2026-10-17 审计：面板的扫码登录/读好友列表 与 派发器发送之间原本**没有**
-    账号级互斥 —— 同一个账号能被两只 Chromium 同时打开（两份设备指纹、同一个资料
-    目录），登录成功还会在派发器跑着的时候把 `.env` 里的 cookie 换掉。这里做"看得
-    见"的那半边：派发器把本轮账号写进运行锁（`core.run_ledger.RunLock(accounts=…)`），
+    ★ 2026-10-17 审计：面板的扫码登录/读好友列表 与 定时任务发送之间原本**没有**
+    账号级互斥 —— 同一个账号能被两只 Chromium 同时打开（两份设备标识、同一个资料
+    目录），登录成功还会在定时任务跑着的时候把 `.env` 里的 cookie 换掉。这里做"看得
+    见"的那半边：定时任务把本轮账号写进运行锁（`core.run_ledger.RunLock(accounts=…)`），
     面板起会话前先查一遍。
     """
     try:
@@ -1266,18 +1266,18 @@ def _dispatcher_accounts() -> set:
 
 
 def _dispatcher_blocks(unique_id: str) -> str:
-    """派发器正在处理这个账号？返回人话原因（不忙返回空串）。"""
+    """定时任务正在处理这个账号？返回人话原因（不忙返回空串）。"""
     uid = str(unique_id or "").strip()
     if not uid:
         return ""
     if uid in _dispatcher_accounts():
-        return ("派发器正在跑这个账号（同一个资料目录不能开两只浏览器），"
+        return ("定时任务正在跑这个账号（同一个账号不能同时开两个浏览器），"
                 "等这一轮结束再试")
     return ""
 
 
 def _panel_busy_reason() -> str:
-    """面板上有没有正在进行的扫码/读好友会话？有就别让派发器起跑。
+    """面板上有没有正在进行的扫码/读好友会话？有就别让定时任务起跑。
 
     与 `_dispatcher_accounts()` 是同一件事的两半：反方向也要拦，否则"先点扫码、
     再点立即运行"照样能撞上同一个账号。
@@ -1511,12 +1511,12 @@ def _requeue_after_relogin(unique_id: str, *, dry_run: bool = False) -> Dict[str
 def _probe_login_before_requeue(unique_id: str) -> Dict[str, Any]:
     """撤账之前先探一次登录态（2026-10-30 wheat 事故）。
 
-    那天 21:42 面板上的「补发」把记账撤了，21:45 门铃开浏览器才发现登录早已失效 ——
-    白跑一轮、账本多一条 `login_dead`，人还在等补发。**撤账前先问一句**才治本：
+    那天 21:42 面板上的「补发」把记账撤了，21:45 定时检查开浏览器才发现登录早已失效 ——
+    白跑一轮、运行记录多一条 `login_dead`，人还在等补发。**撤账前先问一句**才治本：
     `EXPIRED` / `NOT_LOGGED_IN` 就不撤，直接把人引到「扫码登录」。
 
     两个前置拦截（都属于"这个账号现在不能开浏览器"）：
-    * 派发器正在跑它（同一个账号不能开两只浏览器）；
+    * 定时任务正在跑它（同一个账号不能开两只浏览器）；
     * 面板正在给它扫码登录 / 读好友列表（同一个资料目录不能开两个 Chromium）。
 
     返回 `{"state", "detail", "blocked", "elapsed"}`；`blocked=True` 表示**没探成**，
@@ -1545,7 +1545,7 @@ def _probe_login_before_requeue(unique_id: str) -> Dict[str, Any]:
 #: 「补发」被拒绝时给用户的原话（判定结果在 `core/schedule.requeue_after_relogin`）。
 REQUEUE_REFUSALS = {
     "already-sent": "今天已经成功发过这个账号了，不撤账、不补发（避免一天发两遍）。",
-    "no-run-today": "今天还没有跑过这个账号，门铃本来就会发它，不需要补发。",
+    "no-run-today": "今天还没跑过这个账号，定时任务本来就会发它，不用补发。",
     "no-mark": "今天没有可撤回的记账（可能刚刚已经被撤过）。",
 }
 
@@ -1577,7 +1577,7 @@ def start_login_session(
     # 先清掉卡死的旧会话，否则下面两条"正在进行"的判断会把账号永久锁死。
     _forget_old_sessions()
 
-    # 派发器正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
+    # 定时任务正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
     blocked = _dispatcher_blocks(unique_id)
     if blocked:
         return {"ok": False, "error": blocked}
@@ -1885,7 +1885,7 @@ def friend_picker(saved, scanned, *, scan_active: bool = False) -> Dict[str, Any
 
 
 def merge_account_rows(cards, rows) -> List[Dict[str, Any]]:
-    """把「扫码登录」那份账号行（cookie 状态 / 指纹 / 目标好友选择器）合进总览账号卡。
+    """把「扫码登录」那份账号行（cookie 状态 / 设备标识 / 目标好友选择器）合进总览账号卡。
 
     两边的账号都来自 `TASKS`，所以正常是一一对应；这样页面上同一批账号只出现一次，
     一个账号的"状态 + 目标好友"在同一张卡里，不用上下对着看。
@@ -1908,7 +1908,7 @@ def merge_account_rows(cards, rows) -> List[Dict[str, Any]]:
         item["has_login_row"] = bool(row)
         merged.append(item)
 
-    # 只在 TASKS 里、账本里还没出现过的账号：也要给一张卡，否则它的好友勾不了
+    # 只在 TASKS 里、运行记录里还没出现过的账号：也要给一张卡，否则它的好友勾不了
     for row in by_id.values():
         item = viewmodel.build_account(row)
         for key in ("cookie_configured", "cookie_names", "cookie_message",
@@ -1964,7 +1964,7 @@ def start_friend_scan(*, unique_id: str = "", fingerprint: str = "",
     # 同扫码登录：先清掉卡死的旧会话，别让账号被一条永远 active 的记录锁住。
     _forget_old_friend_sessions()
 
-    # 派发器正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
+    # 定时任务正在发这个账号时不许再开浏览器（见 `_dispatcher_blocks`）。
     blocked = _dispatcher_blocks(unique_id)
     if blocked:
         return {"ok": False, "error": blocked}
@@ -2264,7 +2264,7 @@ def create_app() -> FastAPI:
                     entry for account in record.accounts for entry in account.get("entries", [])
                 ]
                 return JSONResponse(payload, headers={"Cache-Control": "no-store"})
-        return JSONResponse({"ok": False, "error": f"账本里没有这一轮：{run_id}"}, status_code=404)
+        return JSONResponse({"ok": False, "error": f"运行记录里没有这一轮：{run_id}"}, status_code=404)
 
     @app.get("/healthz")
     def healthz() -> Response:
@@ -2399,7 +2399,7 @@ def create_app() -> FastAPI:
         run_id = new_run_id()
         # 这里**故意不写运行锁**：锁由 core.runTasks 自己用 O_EXCL 原子建，它才是
         # 唯一的持锁者。webui 若先写一把，runTasks 会把自己人当外人 →
-        # [IM] ⛔ 已有一轮任务在运行 —— 本轮跳过，页面上"立即运行"永远空跑。
+        # [IM] ⛔ 已有一轮任务在运行 —— 本轮跳过，页面上"立即运行"永远试运行。
         start_run_thread(level, run_id)
         _log(f"手动触发一轮任务：run_id={run_id} dry_run={level}")
         if as_html:
@@ -2841,9 +2841,9 @@ def create_app() -> FastAPI:
         """停用 / 启用一个账号（账号卡上的「停用」「启用」）。
 
         ★ 停用只写 `TASKS[].enabled = false`：不派发、不自动发，但昵称、好友、
-          发送时间、指纹和 cookie 全留着 —— 和「移除」是两件事（那个连 cookie 一起删，
+          发送时间、设备标识和 cookie 全留着 —— 和「移除」是两件事（那个连 cookie 一起删，
           想再发就得重新扫码）。当天已经发过的记录**不动**：恢复后如果今天还没发，
-          下一次门铃就会补上（不需要手动补发）。
+          下一次定时检查就会补上（不需要手动补发）。
 
         表单里的 `enabled` 用 "1"/"0"：HTML 的 checkbox 不勾就不提交，两个都当按钮
         提交更省事，也不用在模板里写隐藏域兜底。
@@ -3002,10 +3002,10 @@ def create_app() -> FastAPI:
 
     @app.post("/ops/account/requeue")
     def ops_account_requeue(request: Request, unique_id: str = Form("")) -> Response:
-        """手动撤掉"今天已经办过"的记账，让当天的门铃补发一次。
+        """手动撤掉"今天已经办过"的记账，让当天的定时检查补发一次。
 
         为什么要有这条**明路**（2026-10-18 issue #12）：账号当天掉登录之后，时间表把
-        `error` 也当成办过（当天不再重试，否则坏 cookie 一天被门铃踹 288 次），人要补发
+        `error` 也当成办过（当天不再重试，否则坏 cookie 一天被定时检查踹 288 次），人要补发
         只能靠"重新登录"这个动作顺带撤账。两条登录路径现在都会自动撤账，但要是哪条都没
         走到（登录窗口没抓到抖音号、cookie 是手工贴的……），用户唯一的办法是手改
         `logs/schedule_state.json` —— 一个内部状态文件，文档里没有面向用户的说明。
@@ -3014,9 +3014,9 @@ def create_app() -> FastAPI:
         所以这个按钮造不出"一天发两遍"。
 
         ★ 2026-10-30 起，撤账之前**先探一次登录态**（`core/login_probe.py`）：那天
-        21:42 点了这个按钮、记账被撤，21:45 门铃开浏览器才发现登录早已被踢 ——
-        白跑一轮、账本多一条 `login_dead`，人还在等补发。现在登录已死就**不撤账**，
-        直接把话说完并把人引到「扫码登录」；探不出来（浏览器起不来、派发器正忙）
+        21:42 点了这个按钮、记账被撤，21:45 定时检查开浏览器才发现登录早已被踢 ——
+        白跑一轮、运行记录多一条 `login_dead`，人还在等补发。现在登录已死就**不撤账**，
+        直接把话说完并把人引到「扫码登录」；探不出来（浏览器起不来、定时任务正忙）
         只当"没结论"，照旧撤 —— 探不了不等于登录死了，不能因此把人卡住。
         """
         as_html = wants_html(request)
@@ -3052,7 +3052,7 @@ def create_app() -> FastAPI:
         result = _requeue_after_relogin(unique_id)
         reason = str(result.get("reason") or "")
         if result.get("requeued"):
-            message = ("已撤回今天的记账 —— 下一次门铃（≤5 分钟）会补发；"
+            message = ("已撤回今天的记录 —— 5 分钟内会自动补发；"
                        "想马上发就点「立即运行」。")
             if state == "LOGGED_IN":
                 message += f"（已确认登录有效：{probe.get('detail') or '页面已登录'}）"

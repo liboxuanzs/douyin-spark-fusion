@@ -148,7 +148,7 @@ def _serialized(func):
 
     return wrapper
 
-# 指纹种子的取值范围，与 cloakbrowser 的 --fingerprint= 一致
+# 设备标识种子的取值范围，与 cloakbrowser 的 --fingerprint= 一致
 FINGERPRINT_MIN = 10000
 FINGERPRINT_MAX = 99999
 
@@ -715,7 +715,7 @@ def save_cookie(unique_id, cookies_json, *, path=None, expect_login=True) -> dic
 # 写：账号清单
 # ---------------------------------------------------------------------------
 def _fingerprint_from(value) -> int:
-    """把调用方给的指纹种子变成能写进 TASKS 的整数。
+    """把调用方给的设备标识种子变成能写进 TASKS 的整数。
 
     只接受范围内（FINGERPRINT_MIN..FINGERPRINT_MAX）的整数或数字字符串；
     给了但读不出来（写错、超范围）就当作没给，随机补一个 —— 宁可换一个随机种子，
@@ -740,7 +740,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
 
     只动给出的字段：`username` 为空就保留原值，`targets` 为 None 就保留原列表，
     `message` / `send_time` / `enabled` 为 None 就保留原值。
-    fingerprint 只在账号**还没有**指纹时生效（读不出来就随机补一个）；已有指纹
+    fingerprint 只在账号**还没有**设备标识时生效（读不出来就随机补一个）；已有设备标识
     一律保留 —— 它是"这个账号固定用哪台设备"的锚，必须写进文件、以后每次都读
     同一份，不能让浏览器每次自己随机，也不能被顺手传进来的值悄悄换掉。
 
@@ -838,8 +838,8 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
         elif "proxy" in entry:
             entry.pop("proxy", None)
             changed = True
-    # 指纹是"这个账号固定用哪台设备"的锚，一旦定下就不许漂。
-    # 传进来的种子只在**账号还没有指纹**时生效；已有指纹时保留原值，
+    # 设备标识是"这个账号固定用哪台设备"的锚，一旦定下就不许漂。
+    # 传进来的种子只在**账号还没有设备标识**时生效；已有设备标识时保留原值，
     # 免得面板/命令行顺手传一个值就把账号悄悄换成"另一台设备"。
     kept = ""
     current = str(entry.get("fingerprint") or "").strip()
@@ -860,7 +860,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
                   "message": "TASKS 里已经是这个账号，没有改动"}
         if kept:
             result["fingerprint_kept"] = kept
-            result["message"] += f"（指纹保持 {kept}）"
+            result["message"] += f"（设备标识保持 {kept}）"
         return result
 
     # 最后一道闸：不管上面哪条路径改的，序列化出来的那一行只要会被 dotenv
@@ -894,7 +894,7 @@ def upsert_account(unique_id, *, username="", fingerprint=None, targets=None,
     }
     if kept:
         result["fingerprint_kept"] = kept
-        result["message"] += f"（指纹保持 {kept}）"
+        result["message"] += f"（设备标识保持 {kept}）"
     return result
 
 
@@ -1104,7 +1104,7 @@ def set_account_time(unique_id, time_text, *, path=None) -> dict:
 def set_account_enabled(unique_id, enabled, *, path=None) -> dict:
     """停用 / 启用一个账号（面板账号卡上的「停用」「启用」）。
 
-    ★ 停用只是**不自动发**：TASKS 里的昵称、目标好友、发送时间、指纹和
+    ★ 停用只是**不自动发**：TASKS 里的昵称、目标好友、发送时间、设备标识和
       `COOKIES_*` 全部留着，点「启用」就恢复原样 —— 这正是它和
       `remove_account` 的区别（那个连 cookie 一起删，想再发就得重新扫码）。
 
@@ -1121,7 +1121,7 @@ def set_account_enabled(unique_id, enabled, *, path=None) -> dict:
     if result.get("ok"):
         result["enabled"] = bool(enabled)
         result["message"] = (
-            "已启用：到点后照常自动发送（今天还没发过的话，下一次门铃就会补上）"
+            "已启用：到点后照常自动发送（今天还没发过的话，下一次定时检查就会补上）"
             if enabled else
             "已停用：不再自动发送；配置、cookie、好友都还留着，随时可以启用"
         )

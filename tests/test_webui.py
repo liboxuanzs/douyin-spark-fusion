@@ -534,7 +534,7 @@ class WebUITestCase(unittest.TestCase):
             overview = client.get("/api/overview")
         self.assertNotIn("SUPER-SECRET-COOKIE-VALUE", page.text)
         self.assertNotIn("SUPER-SECRET-COOKIE-VALUE", overview.text)
-        self.assertIn("已配置 1 项 cookie", page.text, "应当只回报配置了几项")
+        self.assertIn("已配置 1 项登录凭证", page.text, "应当只回报配置了几项")
 
     # ============================================================ 4. 账本容错
 
@@ -555,7 +555,7 @@ class WebUITestCase(unittest.TestCase):
         # 账本为空时总览页照常渲染（账号来自配置，计数全 0），不能 500。
         self.assertIn(ACCOUNT_NAME, page.text)
         self.assertEqual(runs_page.status_code, 200)
-        self.assertIn("账本还是空的", runs_page.text)
+        self.assertIn("还没有运行记录", runs_page.text)
 
     def test_坏_json_行被跳过仍返回_200(self) -> None:
         os.environ["WEBUI_PASSWORD"] = PASSWORD
@@ -668,7 +668,7 @@ class WebUITestCase(unittest.TestCase):
         self.assertIn("各账号各自最近一次", page.text, "数字来自不止一轮时必须说出来")
         self.assertIn("各账号各自最近一次合计", page.text, "「最近强确认」那格不能再说「上一轮」")
         self.assertIn(
-            "各账号自己最近一轮里还没轮到的目标",
+            "各账号最近一轮还没轮到的目标",
             page.text,
             "「未尝试」那格的解释也得跟着换口径",
         )
@@ -3762,8 +3762,8 @@ class FrontendAgreementTests(unittest.TestCase):
     def test_空跑标记前后端用同一句话(self) -> None:
         template = self._read("webui", "templates", "dashboard.html")
         script = self._read("webui", "static", "app.js")
-        self.assertIn("上一轮是空跑", template)
-        self.assertIn("上一轮是空跑", script, "轮询会覆盖进度文案，这句必须一起写进 JS")
+        self.assertIn("上一轮是试运行", template)
+        self.assertIn("上一轮是试运行", script, "轮询会覆盖进度文案，这句必须一起写进 JS")
 
     def test_不会自动跑这句话前端也要认(self) -> None:
         template = self._read("webui", "templates", "dashboard.html")
@@ -3793,7 +3793,7 @@ class FrontendAgreementTests(unittest.TestCase):
         提交给服务端的必须是没有前缀的 off/select/full。
 
         回归（2026-10 审计发现 1）：原样提交挂点值 → 服务端 400 →「立即运行」点了没反应；
-        而且 `const real = value === "off"` 恒假，真实发送档位下按钮仍是柔和色 + 写着「开始空跑」。
+        而且 `const real = value === "off"` 恒假，真实发送模式按下按钮仍是柔和色 + 写着「开始试运行」。
         """
         script = self._read("webui", "static", "app.js")
         self.assertIn('raw.replace(/^dry-/, "")', script)
@@ -4112,7 +4112,7 @@ class ScheduleTimerWebUITestCase(WebUITestCase):
         类名 —— 不然每 10 秒刷一次，字号和句式就跳一次。"""
         self._with_next_due({"at": "2026-10-07T23:59:00+08:00", "name": "甲",
                              "due_text": "23:59", "imminent": True,
-                             "text": "下一个 甲：已过 23:59，等下一次敲门就发"})
+                             "text": "下一个 甲：已过 23:59，下一次自动检查就会发"})
         page = self._page_with_timer("enabled", dispatch=5)
         self.assertIn("甲 · 已过 23:59", page, "值槽要短句，不是整句话")
         self.assertIn("overview-value--short", page)
@@ -4424,7 +4424,7 @@ class SkinWebUITestCase(unittest.TestCase):
             "scroll-padding-top: 104px;",
         ):
             self.assertIn(token, layer, f"版式层缺了 {token}")
-        for label in ("开始", "档位", "来源", "结果", "账号", "成功 / 失败", "耗时"):
+        for label in ("开始", "模式", "来源", "结果", "账号", "成功 / 失败", "耗时"):
             self.assertIn(f'content: "{label}";', layer, f"运行记录卡片列表缺「{label}」这一列的小标签")
         self.assertRegex(layer, r"\.overview-primary \{[^}]*grid-column: 1 / -1;", "概览主卡要独占一行")
         self.assertRegex(layer, r"\.login-page \{[^}]*flex-direction: column;", "登录页要收成居中单列")

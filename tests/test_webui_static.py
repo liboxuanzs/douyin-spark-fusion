@@ -307,7 +307,7 @@ class StrongConfirmWordingTests(unittest.TestCase):
     而这句话是用户判断"这条到底算不算发出去"的唯一依据。
     """
 
-    CANON = "回执 ok 且能点名收件人（发送后就停在目标会话）"
+    CANON = "服务器确认已发出，并且确认发给了本人"
 
     def test_三处说的是同一句话(self) -> None:
         for rel in (

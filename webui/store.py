@@ -1,11 +1,11 @@
-"""仪表盘的**只读**数据层：账本 / 冷却状态 / 运行锁 / 账号与配置快照。
+"""仪表盘的**只读**数据层：运行记录 / 冷却状态 / 运行锁 / 账号与配置快照。
 
 硬规矩（会被验收）：
 
 * 本模块**只读**，一个字节都不写。运行锁由 `core.run_ledger.RunLock` 自己用
   `O_CREAT|O_EXCL` 原子创建 —— 面板**不许**替它先写一把：那样 `runTasks`
   会把面板自己当成"另一个正在跑的任务"而跳过整轮（2026-09-30 真机踩过）。
-* 账本可能不存在、可能是半行、可能混着坏 JSON —— 一律容忍：坏行跳过并计数，绝不抛异常。
+* 运行记录可能不存在、可能是半行、可能混着坏 JSON —— 一律容忍：坏行跳过并计数，绝不抛异常。
 * ``utils.config.get_userData()`` / ``get_config()`` 只在**函数内部**惰性调用
   （``core.tasks`` 是模块级快照，import 即求值，这里必须绕开）。
 * **cookie 的值永远不出现在任何返回值里** —— 只返回"配置了几项 / 缺哪几项"。
@@ -225,7 +225,7 @@ def status_label(value: Any) -> str:
 
 
 def is_truthy_skip(skipped: Any) -> bool:
-    """``skipped`` 非空即表示整轮被跳过（账本里它可能是字符串，也可能是对象）。"""
+    """``skipped`` 非空即表示整轮被跳过（运行记录里它可能是字符串，也可能是对象）。"""
     if skipped is None or skipped is False:
         return False
     if isinstance(skipped, str):
@@ -560,12 +560,12 @@ def read_rate_limit(path: Optional[Path] = None) -> RateLimitState:
     return state
 
 
-# ---------------------------------------------------------------- 运行账本
+# ---------------------------------------------------------------- 运行记录
 
 
 @dataclass
 class LedgerRead:
-    """账本读取结果：``records`` 倒序（最新在前），``file`` 为 None 表示没找到文件。"""
+    """运行记录读取结果：``records`` 倒序（最新在前），``file`` 为 None 表示没找到文件。"""
 
     records: List[Dict[str, Any]] = field(default_factory=list)
     bad_lines: int = 0
@@ -592,9 +592,9 @@ def _ledger_candidates(path: Optional[Path] = None) -> List[Path]:
 def read_ledger(
     path: Optional[Path] = None, *, limit: int = MAX_RECORDS, tail_bytes: int = 4 * 1024 * 1024
 ) -> LedgerRead:
-    """从**尾部**读账本，最多 ``limit`` 条；坏行跳过并计数。
+    """从**尾部**读运行记录，最多 ``limit`` 条；坏行跳过并计数。
 
-    只读文件末尾若干 MB：账本可能长到几百 MB，全读进来毫无必要。
+    只读文件末尾若干 MB：运行记录可能长到几百 MB，全读进来毫无必要。
     """
     result = LedgerRead()
     target = None
@@ -647,7 +647,7 @@ def read_ledger(
 
 @dataclass
 class RunRecord:
-    """账本一条记录归一化后的视图（UI 直接渲染这个）。"""
+    """运行记录一条记录归一化后的视图（UI 直接渲染这个）。"""
 
     run_id: str = ""
     started_at: str = ""
@@ -724,7 +724,7 @@ def _skip_info(skipped: Any) -> Tuple[str, str]:
 
 
 def normalize_run(raw: Dict[str, Any], tz=None) -> RunRecord:
-    """把账本里的一行归一化成 UI 视图。所有字段都做类型防御。"""
+    """把运行记录里的一行归一化成 UI 视图。所有字段都做类型防御。"""
     record = RunRecord(raw=raw if isinstance(raw, dict) else {})
     raw = record.raw
     record.run_id = _text(raw.get("run_id"))
@@ -760,7 +760,7 @@ def normalize_run(raw: Dict[str, Any], tz=None) -> RunRecord:
     accounts = raw.get("accounts")
     account_views: List[Dict[str, Any]] = []
     totals = {"sent_ok": 0, "sent_fail": 0, "missing": 0, "select_failed": 0, "entries": 0}
-    # 账本自己写的 status=error 必须算失败：面板替 core 补记"这一轮没跑起来"
+    # 运行记录自己写的 status=error 必须算失败：面板替 core 补记"这一轮没跑起来"
     # 的记录里 accounts 是空的，只看账号就永远推不出"有失败"，会被显示成成功。
     raw_status = (_text(raw.get("status")) or "").lower()
     failed = raw_status == "error"
@@ -839,7 +839,7 @@ def normalize_run(raw: Dict[str, Any], tz=None) -> RunRecord:
         # 也会落到这里 —— 页面直说"没有账号结果"，不去猜原因。
         record.status = "empty"
     elif all(item["status"] == "skipped" for item in account_views) and totals["entries"] == 0:
-        # 每个账号都被门禁拦下（登录失效 / 掉登录 / 超时），一条也没尝试过：
+        # 每个账号都被登录状态拦下（登录失效 / 掉登录 / 超时），一条也没尝试过：
         # 以前这里显示绿色的「成功」，属于同一类"默认值太乐观"。
         record.status = "blocked"
     else:
@@ -853,7 +853,7 @@ def normalize_run(raw: Dict[str, Any], tz=None) -> RunRecord:
         "ok": "成功",
     }[record.status]
 
-    # 账本自己写的 note 优先（"面板触发的一轮没能跑起来"、清理历史条目时补的说明…）。
+    # 运行记录自己写的 note 优先（"面板触发的一轮没能跑起来"、清理历史条目时补的说明…）。
     # 不再给"没有账号结果"的轮次猜原因：那句"账号凭据可能未配置"会把线程崩溃、
     # 被清掉的历史条目统统说成"你没配 cookie"，而状态本身已经把话说清楚了。
     record.note = _text(raw.get("note"))
@@ -989,7 +989,7 @@ class AccountSnapshot:
     last_run_text: str = ""
     status: str = ""
     status_text: str = "未运行"
-    # 只出现在上一轮账本里、`TASKS` 里已经没有它了（用户删了账号，或临时改过 .env）。
+    # 只出现在上一轮运行记录里、`TASKS` 里已经没有它了（用户删了账号，或临时改过 .env）。
     # 面板要把它和"配置里的账号"区分开：它不会被下一轮处理，也没有可移除的配置。
     orphan: bool = False
     # `TASKS[].enabled=false` = 人把它**停用**了（缺键 = 启用）。停用的账号照样有
@@ -1033,7 +1033,7 @@ class AccountSnapshot:
 def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[AccountSnapshot]:
     """合并"配置里的账号"与"最近一次有结果的运行"，生成账号卡数据。
 
-    以最近一条**带账号结果**的运行为准（整轮被跳过的记录不含有效门禁信息，跳过它往前找）。
+    以最近一条**带账号结果**的运行为准（整轮被跳过的记录不含有效登录状态信息，跳过它往前找）。
     """
     # 先按 .env 的现状刷新一次环境再读 TASKS：`read_tasks_env` 读的是
     # `os.getenv`，而 `_load_userdata()` 内部（`webui/store.py:885`）才调
@@ -1062,9 +1062,9 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
                 if not key or key in by_unique:
                     continue
                 # 每个账号记**自己**的最近一次：一个账号可能只出现在一部分轮次里
-                # （每个账号可以有自己的发送时间，见 core/schedule.py，派发器每 5
+                # （每个账号可以有自己的发送时间，见 core/schedule.py，定时任务每 5
                 # 分钟只为当时到点的账号跑一轮）。原来这里是"第一条带账号的记录"
-                # 然后 break，于是没赶上最近那一轮的账号，门禁/状态/上次运行全空 ——
+                # 然后 break，于是没赶上最近那一轮的账号，登录状态/状态/上次运行全空 ——
                 # 2026-10-07 线上 示例号 那张卡就这么成了"未运行"。
                 by_unique[key] = account
                 own_run[key] = dict(stamp)
@@ -1139,7 +1139,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
         unique_id = _text(account.get("unique_id"))
         if key in seen or unique_id in seen or username in seen:
             continue
-        # 账本里这一条也带 targets，但它是**上一轮跑过的**目标，不是现在要发的；
+        # 运行记录里这一条也带 targets，但它是**上一轮跑过的**目标，不是现在要发的；
         # 面板上不再给它勾选入口，所以这里只带名字、不带目标。
         snapshot = build(username, unique_id, "", [])
         # 它不在 TASKS 里 —— 下一轮根本不会处理它，面板必须说清楚，
@@ -1149,7 +1149,7 @@ def account_snapshots(records: Optional[Iterable[RunRecord]] = None) -> List[Acc
             snapshot.cookie_message = "只在上一轮的运行记录里，TASKS 里已经没有它了"
         snapshots.append(snapshot)
 
-    # 3) 回填上次运行的门禁与计数
+    # 3) 回填上次运行的登录状态与计数
     for snapshot in snapshots:
         key = snapshot.unique_id or snapshot.username
         account = by_unique.get(key) or by_unique.get(snapshot.username)
@@ -1305,9 +1305,9 @@ def _parse_on_calendar(text: str) -> List[str]:
 
 
 def _parse_dispatch(text: str) -> int:
-    """``OnCalendar=*:0/5`` → ``5``（分钟）；不是派发器写法就返回 0。
+    """``OnCalendar=*:0/5`` → ``5``（分钟）；不是定时任务写法就返回 0。
 
-    新架构里 timer 只负责敲门，**几点发由应用按每个账号的时间判定**
+    新架构里 timer 只负责检查，**几点发由应用按每个账号的时间判定**
     （`core/schedule.py`）。面板必须分得清这两种 timer，否则会把
     "每 5 分钟一次的心跳"当成"每天的发车时间"画给用户看。
     """
@@ -1408,7 +1408,7 @@ def timer_state(
         "activeState": "",
         "onCalendar": [],
         "jitterText": "",
-        # `OnCalendar=*:0/5`（每 5 分钟敲一次门的**派发器**）→ 5；认不出来是 0。
+        # `OnCalendar=*:0/5`（每 5 分钟敲一次门的**定时任务**）→ 5；认不出来是 0。
         # 与 onCalendar 是两种互斥写法：前者代表"几点发由应用决定"，
         # 后者代表"timer 自己就是那个时间"（旧架构）。
         "dispatchMinutes": 0,

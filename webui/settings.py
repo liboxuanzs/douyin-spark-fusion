@@ -67,11 +67,11 @@ class Setting(NamedTuple):
 SETTINGS: Tuple[Setting, ...] = (
     Setting(
         "DRY_RUN",
-        "默认空跑档位",
+        "默认运行模式",
         KIND_SELECT,
         options=("off", "select", "full"),
         default="off",
-        hint="面板上「立即运行」选的档位优先于这里；认不出来的值会回落到 off（真发）",
+        hint="面板上「立即运行」选的模式优先于这里；认不出来的值会按 off（真发）处理",
     ),
     Setting(
         "MESSAGE_TEMPLATE",
@@ -94,7 +94,7 @@ SETTINGS: Tuple[Setting, ...] = (
         minimum=0,
         maximum=600,
         default="8",
-        hint="秒；0/0 表示完全保持浏览器自带的拟人节奏。空跑时不会等待",
+        hint="秒；0/0 表示完全保持浏览器自带的拟人节奏。试运行时不会等待",
     ),
     Setting(
         "SEND_INTERVAL_MAX_SECONDS",
@@ -132,7 +132,7 @@ SETTINGS: Tuple[Setting, ...] = (
         minimum=0,
         maximum=120,
         default="0",
-        hint="秒；门禁通过后先在会话列表里滚 N 秒再发（只滚不点，失败不影响发送）；"
+        hint="秒；登录成功后先在好友列表里滚 N 秒再发（只滚不点，失败不影响发送）；"
              "0 = 关闭（默认）",
     ),
     Setting(
@@ -184,7 +184,7 @@ SETTINGS: Tuple[Setting, ...] = (
     ),
     Setting(
         "SCHEDULE_JITTER_MINUTES",
-        "发送时间抖动",
+        "发送时间浮动",
         KIND_INT,
         minimum=0,
         maximum=180,
@@ -222,7 +222,7 @@ SETTINGS: Tuple[Setting, ...] = (
         default="error",
         hint=(
             "error = 只在有账号没发成、或命中风控熔断时推一条（默认）；"
-            "always = 每轮真发都推；off = 关掉（地址留着也不发）。空跑（dry-run）永远不推"
+            "always = 每轮真发都推；off = 关掉（地址留着也不发）。试运行（dry-run）永远不推"
         ),
     ),
     Setting(

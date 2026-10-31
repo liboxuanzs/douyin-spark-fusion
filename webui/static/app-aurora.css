@@ -2950,7 +2950,7 @@ html[data-theme="light"] .logs-code .logs-meta { color: #6b7288; }
     color: var(--text-4);
   }
   #run-history tbody td:nth-child(1)::before { content: "开始"; }
-  #run-history tbody td:nth-child(2)::before { content: "档位"; }
+  #run-history tbody td:nth-child(2)::before { content: "模式"; }
   #run-history tbody td:nth-child(3)::before { content: "来源"; }
   #run-history tbody td:nth-child(4)::before { content: "结果"; }
   #run-history tbody td:nth-child(5)::before { content: "账号"; }

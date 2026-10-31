@@ -428,7 +428,7 @@
 })();
 
 (() => {
-  // 模板上挂的是 `data-segment-owner`（dashboard 的「空跑档位」、runs 的「目标档位」）。
+  // 模板上挂的是 `data-segment-owner`（dashboard 的「运行模式」、runs 的「目标模式」）。
   // 这里原来只找 `data-segment-group` —— 全仓没有这个属性，于是整段是死代码：
   // 点了不切 .active、不切 aria-selected、不切面板的 hidden，`#dry-run-value`
   // 永远停在服务端默认档（2026-10-17 前端审计）。两个选择器都认，兼容旧写法。
@@ -712,11 +712,11 @@
           node.style.width = `${weakPct}%`;
         });
         row.querySelectorAll("[data-account-progress-text]").forEach((node) => {
-          // 与服务端模板保持同一句话：空跑必须标出来，不然轮询一刷就看不出来了。
-          // "强确认 N" 不重复写 —— 左边那三个数字里已经有了。
+          // 与服务端模板保持同一句话：试运行必须标出来，不然轮询一刷就看不出来了。
+          // "已送达 N" 不重复写 —— 左边那三个数字里已经有了。
           const dry =
             account.dryRun && account.dryRun !== "off"
-              ? ` · 上一轮是空跑（${account.dryRunText || account.dryRun}）`
+              ? ` · 上一轮是试运行（${account.dryRunText || account.dryRun}）`
               : "";
           node.textContent = `已发送 ${strongCount + weakCount}/${accountTotal}${dry}`;
         });
@@ -796,7 +796,7 @@
       `${sentPct}%`,
     );
     setText("[data-overview-value='weakSent']", weakCount);
-    // 今日进度条：和服务端渲染的宽度算法一致（强确认橙段 + 弱证据黄段）。
+    // 今日进度条：和服务端渲染的宽度算法一致（已送达橙段 + 可能已送达黄段）。
     document.querySelectorAll("[data-overview-bar-strong]").forEach((node) => {
       node.style.width = `${strongPct}%`;
     });
@@ -809,15 +809,15 @@
     );
     // 这一格的说明必须跟着值一起换：值显示"-"却说一项核对通过的目标，等于自己打脸。
     // 措辞还必须与服务端首屏逐字一致，且描述真实判据：判定里收件人校验不过只是把证据
-    // 降级成"弱证据"（core/strict_verify.py 里 ok 仍为 True），说成"双确认"听起来比
+    // 降级成"可能已送达"（core/strict_verify.py 里 ok 仍为 True），说成"双确认"听起来比
     // 实际更严 —— 而这句话是用户判断"这条到底算不算发出去"的唯一依据。
     const lastConfirmedScope = summary.mixedRuns ? "各账号各自最近一次合计，" : "上一轮";
     setText(
       "[data-overview-help='lastConfirmedAt']",
       summary.lastConfirmedAt
-        ? `${lastConfirmedScope}回执 ok 且能点名收件人（发送后就停在目标会话）的目标`
+        ? `${lastConfirmedScope}服务器确认已发出，并且确认发给了本人的目标`
         : summary.lastWeakAt
-          ? `${lastConfirmedScope}只有弱证据（拿到页面回显，没拿到回执），不算强确认`
+          ? `${lastConfirmedScope}只看到页面上的痕迹，没拿到服务器回执`
           : `${
               summary.mixedRuns ? "最近这些轮次里" : "上一轮"
             }没有确认成功的目标`,
@@ -831,10 +831,10 @@
         count.textContent = summary.runCount || 0;
       });
     });
-    // 空跑档位（"排练还是真发"）：药丸与两种说明也必须由轮询决定在不在页面上 ——
-    // 档位会变（首页切档 → 立即运行），而首屏那一支是按"打开页面那一刻"的档位渲染的，
+    // 试运行模式（"排练还是真发"）：药丸与两种说明也必须由轮询决定在不在页面上 ——
+    // 模式会变（首页切档 → 立即运行），而首屏那一支是按"打开页面那一刻"的模式渲染的，
     // 轮询不重画，排练就被页面安安静静讲成了发送（2026-10-18 issue #9）。
-    // 文案只写在模板里，这里只切 hidden 与那个档位文字槽。
+    // 文案只写在模板里，这里只切 hidden 与那个模式文字槽。
     const dryRun = summary.dryRun || "off";
     const dryOn = dryRun !== "off";
     document.querySelectorAll("[data-overview-dry-run]").forEach((node) => {
@@ -842,7 +842,7 @@
       node.textContent = summary.dryRunText || "";
     });
     document.querySelectorAll("[data-overview-dry-run-hint]").forEach((node) => {
-      // mixed：各账号档位不一致（每张卡自己写着）；single：整页只有一个档位。
+      // mixed：各账号模式不一致（每张卡自己写着）；single：整页只有一个模式。
       const mixed = node.dataset.overviewDryRunHint === "mixed";
       node.hidden = mixed ? dryRun !== "mixed" : !(dryOn && dryRun !== "mixed");
     });
@@ -851,12 +851,12 @@
     // 不然页面每 2 秒就被前端改回一个骗人的时间点。
     const schedule = data.schedule || {};
     const armed = schedule.armed !== false;
-    // 派发器模式（各账号按自己的发送时间分开跑）：pending 讲的是"上一轮还剩几个
+    // 定时任务模式（各账号按自己的发送时间分开跑）：pending 讲的是"上一轮还剩几个
     // 目标没走到"，拿它当"下次触发还有活干"就会谎报 —— 那时候真话是
     // schedule.nextTriggerText（"下一个 示例号：今天 17:20" / "今天该发的都发完了"），
     // 服务端首屏写的也是它，轮询不能把它改回一个光秃秃的时间。
     const dueText = schedule.nextTriggerText || "";
-    // 值槽那一行：派发器模式下服务端给的是短句（"示例号 · 已过 17:20"），这里必须
+    // 值槽那一行：定时任务模式下服务端给的是短句（"示例号 · 已过 17:20"），这里必须
     // 用同一套回落顺序和同样两个类名，否则轮询一刷字号/句式就跟首屏不一样了。
     const dueShort = schedule.nextTriggerShort || "";
     const dueValue = armed
@@ -879,7 +879,7 @@
       schedule.label || "-",
     );
     // 判断顺序必须与服务端首屏**逐字同序**：先"定时器启用着但 systemd 里已经挂了"
-    // 的完整诊断，再"定时器没启用"，再派发器那几种情况。定时器真挂了的时候首屏给的是
+    // 的完整诊断，再"定时器没启用"，再定时任务那几种情况。定时器真挂了的时候首屏给的是
     // 坏在哪，轮询要是跳过了第一个分支，10 秒后同样的位置就只剩一句废话。
     setText(
       "[data-overview-value='nextTriggerHint']",
@@ -889,7 +889,7 @@
           ? "只能手动点「立即运行」"
           : schedule.dispatcher
             ? dueShort
-              ? "到点后的下一次门铃就会发它"
+              ? "到点后 5 分钟内会自动发出"
               : dueText
                 ? "按各账号自己的时间发"
                 : "今天该发的都发完了"
@@ -918,7 +918,7 @@
     });
   };
 
-  // 轮询：同一时刻只允许一个请求在飞（后端在读账本时单次可能超过 10 秒，
+  // 轮询：同一时刻只允许一个请求在飞（后端在读运行记录时单次可能超过 10 秒，
   // 旧写法会让下一个 tick 再发一个，旧响应后到还会覆盖新响应）；失败按
   // 10→20→40 秒退避（成功复位）；401 要说"登录已过期"，不能只说"更新延迟"
   // —— 会话过期后整页数字会一直停在旧值，用户却以为只是网络慢（2026-10-17 前端审计）。
@@ -981,7 +981,7 @@
 
 // ---------------------------------------------------------------- 融合补充
 // 以下两段是 C（DouYinSparkFlow）独有的能力，B 的分段控件与轮询里没有对应实现：
-//   1) dry-run 档位：B 的分段控件只切换面板显隐，这里把它同步进表单；
+//   1) dry-run 模式：B 的分段控件只切换面板显隐，这里把它同步进表单；
 //   2) 熔断冷却 / 禁跑窗口的倒计时。
 // 其余部分（主题、移动端导航、确认框、分段控件、10 秒总览轮询）与 B 原版一致。
 
@@ -998,13 +998,13 @@
     const level = raw.replace(/^dry-/, "");
     if (input) input.value = level;
     if (submit) {
-      // 真实发送是不可撤回的动作，用实心红的主按钮（button-send）；空跑用柔和色。
-      // 注意：这里是按档位**重画**按钮类的唯一位置 —— 只改模板里的 class 会被这段覆盖，
+      // 真实发送是不可撤回的动作，用实心红的主按钮（button-send）；试运行用柔和色。
+      // 注意：这里是按模式**重画**按钮类的唯一位置 —— 只改模板里的 class 会被这段覆盖，
       // 所以两处必须写同一个类名（tests/test_webui.py 有契约测试钉住）。
       const real = level === "off";
       submit.className = real ? "button button-send" : "button button-soft";
       const label = submit.querySelector("[data-run-now-label]");
-      if (label) label.textContent = real ? "立即发送" : "开始空跑";
+      if (label) label.textContent = real ? "立即发送" : "开始试运行";
     }
   };
   group.addEventListener("click", () => window.setTimeout(apply, 0));
@@ -1699,7 +1699,7 @@ window.addEventListener("DOMContentLoaded", renderIcons);
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(() => placeAll(false)).catch(() => {});
     }
-    // 切 .active 的是另外两段脚本（分段控件、空跑档位同步），一个在冒泡里直接切、
+    // 切 .active 的是另外两段脚本（分段控件、试运行模式同步），一个在冒泡里直接切、
     // 一个用 setTimeout(…, 0)；这里一律等一拍再量，才量得到新的当前项。
     document.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest(".segment-button") : null;

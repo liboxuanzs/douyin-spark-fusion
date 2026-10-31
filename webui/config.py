@@ -18,7 +18,7 @@ WEBUI_SESSION_SECRET             （随机）                     签名 cookie 
 WEBUI_SESSION_MAX_AGE            2592000（30 天）             登录保持时长（秒），上限 400 天
 WEBUI_COOKIE_NAME                dsf_webui_session            会话 cookie 名
 WEBUI_TZ                         Asia/Shanghai                展示用时区
-RUN_LEDGER_FILE                  logs/runs.jsonl              运行账本（每行一条 JSON）
+RUN_LEDGER_FILE                  logs/runs.jsonl              运行记录（每行一条 JSON）
 RATE_LIMIT_FILE                  logs/rate_limit.json         熔断/冷却状态
 RUN_LOCK_FILE                    logs/run.lock                运行锁
 OPS_LOG_FILE                     logs/app.log                 日志文件（与 utils.logger 同一份）
@@ -73,7 +73,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 日志默认落在 utils/logger.py 写的那一份（logs/app.log），这样仪表盘的"日志尾部"
 # 看到的就是任务真实输出。C 的 Docker 部署把这个目录挂到 /app/logs。
 DEFAULT_LOG_FILE = "logs/app.log"
-# 与 core/schedule.py 的 DEFAULT_TIME 对齐：派发器模式下账号没写 time 时按 20:30 发，
+# 与 core/schedule.py 的 DEFAULT_TIME 对齐：定时任务模式下账号没写 time 时按 20:30 发，
 # 面板的"下次定时"预览若还按 09:00 算，用户会看到一个永远不会发生的时刻。
 DEFAULT_SCHEDULE_TIMES = "20:30"
 
@@ -336,7 +336,7 @@ def preflight(host: Optional[str] = None, auth_mode: Optional[str] = None) -> Li
 
 
 def ledger_file() -> Path:
-    """运行账本（每行一条 JSON）。"""
+    """运行记录（每行一条 JSON）。"""
     return resolve_path(_getenv("RUN_LEDGER_FILE", "logs/runs.jsonl"))
 
 

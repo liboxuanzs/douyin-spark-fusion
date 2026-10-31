@@ -410,7 +410,7 @@ class AutoPruneTests(unittest.TestCase):
         self.assertTrue(before["enabled"])
         self.assertEqual(before["hours"], 168.0)
         self.assertEqual(before["last_ago_text"], "还没清过")
-        self.assertIn("下一次门铃", before["next_text"])
+        self.assertIn("下一次定时检查", before["next_text"])
         make_profile(self.root, "11223344556", cache_mb=64)
         self._run(ids=["11223344556"])
         after = mt.auto_prune_status(now_ts=self.now + 86400, state_file=self.state)

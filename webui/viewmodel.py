@@ -7,7 +7,7 @@
 ``[data-overview-value]`` / ``[data-account-overview]`` 那些节点。键名对不上，页面不会报错，
 只会静静地停在初始值 —— 这种 bug 非常难查。
 
-所以把「C 的账本/配置 → B 的键」这一步收进本模块：纯函数、可离线单测，
+所以把「C 的运行记录/配置 → B 的键」这一步收进本模块：纯函数、可离线单测，
 模板和 JSON 接口共用同一份视图模型，两边永远一致。
 
 键名契约（改动前先看 ``static/app.js`` 的 ``render()``）
@@ -34,8 +34,8 @@ C 与 B 的口径差异（务必保持诚实，不许凑数）
   C **没有**这种成功 —— 回执在 C 里只是证据之一，归属不明时判失败。
   故 ``receiptOnly`` 恒为 0，页面上也不给它渲染卡片。
 * B 有「已处理但未确认」（``unprocessed``）：账号级阻断导致本轮根本没试。
-  C 每轮对每个目标都是「试了并给出裁决」，没试的目标直接算「未尝试」，
-  故 ``unprocessed`` 恒为 0，未尝试的目标全部计入 ``pending``（不重复计数）。
+  C 每轮对每个目标都是「试了并给出裁决」，没试的目标直接算「待发送」，
+  故 ``unprocessed`` 恒为 0，待发送的目标全部计入 ``pending``（不重复计数）。
 * 因此每个目标恰好落在 ``confirmed`` / ``pageEcho`` / ``attention`` / ``pending`` 之一。
 """
 
@@ -81,7 +81,7 @@ __all__ = [
 
 # ---------------------------------------------------------------- 常量
 
-#: 空跑三档 —— 取值必须与 ``core.douyin_im`` 的 ``DRY_RUN_OFF/SELECT/FULL`` 一致。
+#: 试运行三档 —— 取值必须与 ``core.douyin_im`` 的 ``DRY_RUN_OFF/SELECT/FULL`` 一致。
 DRY_RUN_LEVELS: Tuple[str, ...] = ("off", "select", "full")
 
 DRY_RUN_LABELS: Dict[str, str] = {
@@ -91,7 +91,7 @@ DRY_RUN_LABELS: Dict[str, str] = {
 }
 
 DRY_RUN_HINTS: Dict[str, str] = {
-    "off": "真把消息发出去 —— 唯一会改变对方会话状态的档位。",
+    "off": "真的把消息发出去，会改变对方的聊天记录。",
     "select": "只走到「选中好友」为止，验证会话能不能定位，不发消息。",
     "full": "把消息真的敲进编辑器、读回校验，然后清空草稿，唯独不点发送。",
 }
@@ -135,7 +135,7 @@ REASON_LABELS: Dict[str, str] = {
     "session_kicked": "会话被服务端踢下线（要重新扫码登录）",
 }
 
-#: 账本里「整轮跳过」的 ``skip_reason``（`core/tasks.py::_skip()` 的那几个码）。
+#: 运行记录里「整轮跳过」的 ``skip_reason``（`core/tasks.py::_skip()` 的那几个码）。
 #: 与 REASON_LABELS 分开：那套是「某条消息为什么没发出去」，这套是「这一轮为什么
 #: 根本没干活」。原来面板直接打印英文码，中文界面里冒出一句
 #: 「整轮跳过：already_sent」—— 用户看不懂，也不知道该不该管。
@@ -158,7 +158,7 @@ VIA_LABELS: Dict[str, str] = {
     "http+dom": "HTTP 回执 + 会话回显",
     "http": "HTTP 回执（会话回显没等到）",
     "dom": "仅会话回显（没拿到 HTTP 回执）",
-    "dry-run": "空跑：输入后清空",
+    "dry-run": "试运行：输入后清空",
     # 被拦下的那两条（输入框清不干净 / 发现上一条的残留）从来没点过发送，
     # 所以既没有回执也没有回显 —— 别让页面上只显示一个 "none"。
     "none": "没发送（先拦下了）",
@@ -166,17 +166,17 @@ VIA_LABELS: Dict[str, str] = {
 
 #: 证据级别（``core.strict_verify`` 的 ``LEVEL_*``）。
 LEVEL_LABELS: Dict[str, str] = {
-    "strong": "强确认",
-    "medium": "弱证据",
+    "strong": "已送达",
+    "medium": "可能已送达",
     "conflict": "反证",
     "none": "无证据",
 }
 
 SEGMENTS: Tuple[Tuple[str, str], ...] = (
     ("success", "成功"),
-    ("weak", "弱证据"),
-    ("failed", "需处理"),
-    ("pending", "未尝试"),
+    ("weak", "可能已送达"),
+    ("failed", "发送失败"),
+    ("pending", "待发送"),
 )
 
 #: C 的四种账号状态。B 的 CSS 只给 ``.account-console`` 写了三档配色
@@ -184,7 +184,7 @@ SEGMENTS: Tuple[Tuple[str, str], ...] = (
 #: ``state-healthy`` 绿），这里映射过去，不新增 B 没有的类名。
 STATE_LABELS: Dict[str, str] = {
     "healthy": "正常",
-    "attention": "需处理",
+    "attention": "发送失败",
     "blocked": "账号阻断",
     "idle": "尚未运行",
     "orphan": "已不在配置里",
@@ -215,7 +215,7 @@ STATE_CHIP: Dict[str, str] = {
 _LEVEL_STRONG = "strong"
 _LEVEL_MEDIUM = "medium"
 
-#: 门禁通过时的状态码（见 ``core.douyin_im`` 的 ``STATUS_*``）。
+#: 登录状态通过时的状态码（见 ``core.douyin_im`` 的 ``STATUS_*``）。
 _GATE_OK = "READY"
 
 #: "重新登录后会自动补发"的统一说法。补发由 ``webui/app.py::_requeue_after_relogin`` 做，
@@ -251,10 +251,10 @@ def _int(value: Any, default: int = 0) -> int:
 
 
 def _jsonable(info: Any) -> Dict[str, Any]:
-    """``quiet_window.check()`` 的结果里带 ``datetime.time`` 元组，不能直接进 JSON/账本。
+    """``quiet_window.check()`` 的结果里带 ``datetime.time`` 元组，不能直接进 JSON/运行记录。
 
     ``core.quiet_window.summary()`` 已经是白名单版本；这里再兜一层，
-    免得将来 ``check()`` 多出别的不可序列化字段时又在写账本那一步炸掉。
+    免得将来 ``check()`` 多出别的不可序列化字段时又在写运行记录那一步炸掉。
     """
     if not isinstance(info, dict):
         return {}
@@ -278,14 +278,14 @@ def percent(part: Any, total: Any) -> int:
 
 
 def progress_pair(confirmed: Any, sent: Any, total: Any) -> Tuple[int, int]:
-    """返回 ``(强确认百分比, 弱证据百分比)``；两段加起来不超过 100。"""
+    """返回 ``(已送达百分比, 可能已送达百分比)``；两段加起来不超过 100。"""
     strong = percent(confirmed, total)
     weak = max(0, percent(sent, total) - strong)
     return strong, weak
 
 
 def entry_bucket(entry: Dict[str, Any]) -> str:
-    """一条发送明细归到哪个档位：``success`` / ``weak`` / ``failed``。"""
+    """一条发送明细归到哪个模式：``success`` / ``weak`` / ``failed``。"""
     if not bool(entry.get("ok")):
         return "failed"
     return "success" if _text(entry.get("level")) == _LEVEL_STRONG else "weak"
@@ -382,10 +382,10 @@ def _account_state(
 ) -> str:
     """账号整体状态。判定顺序就是「先看能不能跑，再看跑得怎么样」。
 
-    * ``blocked`` —— 根本没法干活：没 cookie、门禁没过（登录失效等）、
+    * ``blocked`` —— 根本没法干活：没 cookie、登录状态没过（登录失效等）、
       上一轮被整账号跳过，或者失败了但**一条都没发出去**（浏览器没起来之类）。
     * ``attention`` —— 干了活但有失败的目标，或者整轮异常结束（error）。
-    * ``healthy`` —— 有成功（强确认或弱证据）。
+    * ``healthy`` —— 有成功（已送达或可能已送达）。
     * ``idle`` —— 还没跑过。
     """
     if not ready:
@@ -412,11 +412,11 @@ def _account_state(
 
 def _account_state_for(data: Dict[str, Any], *, ready: bool, gate: str, status: str,
                        attempted: int, failed: int, login_lost: bool = False) -> str:
-    """和 ``_account_state`` 一样，只是先认「只在账本里、配置里已经没了」这一档。"""
+    """和 ``_account_state`` 一样，只是先认「只在运行记录里、配置里已经没了」这一档。"""
     if data.get("orphan"):
         return "orphan"
     # 运行期掉登录：页面上一切正常、发送却永远拿不到回执，最后一条都没发出去。
-    # 这既不是"干了活有几个失败"（attention），也不是门禁没过（gate 仍是 READY），
+    # 这既不是"干了活有几个失败"（attention），也不是登录状态没过（gate 仍是 READY），
     # 而是**根本上没法干活** —— 按 blocked 处理，卡片给出重新扫码的指引。
     if login_lost:
         return "blocked"
@@ -451,10 +451,10 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None,
             "send_due": "", "send_state": "unknown", "send_state_text": "没有抖音号，无法排期",
             "send_sent_at": "",
         }
-    # ★ jitter 必须跟派发器用同一个来源（`core/tasks.py` 传的是
+    # ★ jitter 必须跟定时任务用同一个来源（`core/tasks.py` 传的是
     # `config["scheduleJitterMinutes"]`，落盘就是 `SCHEDULE_JITTER_MINUTES`）。
     # 不传的话 `plan_for` 吃默认 15 分钟，而 `core/schedule.py` 把 span 算进了
-    # 抖动哈希 —— 只要用户把抖动调成别的值，面板写的时刻就和真正发送的时刻
+    # 浮动哈希 —— 只要用户把浮动调成别的值，面板写的时刻就和真正发送的时刻
     # 对不上（默认值恰好相等，所以这个 bug 平时隐身）。
     plan = schedule.plan_for(
         {"unique_id": uid, "time": _text(send_time)},
@@ -476,11 +476,11 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None,
     record = schedule.entry_for(state, uid, when)
     status = str((record or {}).get("status") or "")
     if record and status == schedule.STATUS_SKIPPED:
-        # 「跳过」= 门禁没过 / 命中风控，一条都没发出去，当天名额还在，
-        # 下一次门铃会再试（见 core.schedule.select）。文案必须和「已发」区分开，
+        # 「跳过」= 登录状态没过 / 命中风控，一条都没发出去，当天名额还在，
+        # 下一次定时检查会再试（见 core.schedule.select）。文案必须和「已发」区分开，
         # 否则用户以为今天已经发过了，其实一条都没有。
         #
-        # ★ 但"下一次门铃会重试"只到**试满上限**为止（`SCHEDULE_SKIP_RETRY_MAX`，
+        # ★ 但"下一次定时检查会重试"只到**试满上限**为止（`SCHEDULE_SKIP_RETRY_MAX`，
         #   默认 6 次）：到上限后 `select()` 当天不再踹它，面板再写"会重试"就是骗人。
         #   判定一律复用 `schedule.skip_retry_exhausted()`（上限可能被 env 改，
         #   别在这里比数字）；老记录没有 `attempts` 字段 → 它按"没到上限"处理，
@@ -494,21 +494,21 @@ def schedule_fields(unique_id: str, send_time: str = "", *, when=None,
                 # 计数写坏时显示上限值：能走到这个分支说明判定已经认为"到上限了"。
                 tries = schedule.skip_retry_max_env()
             state_text = (
-                f"今天 {clock} 起已经试到上限（{tries} 次），今天不再自动重试；"
-                "明天自动再来，现在重新扫码登录可以立即补发"
+                f"今天 {clock} 起已经试了 {tries} 次都没发出去，今天不再自动重试；"
+                "明天会照常重试，现在重新扫码登录可以马上补发"
             )
         else:
-            state_text = f"今天 {clock} 试过但没发出去（跳过），下一次门铃会重试"
+            state_text = f"今天 {clock} 试过一次但没发出去，5 分钟内会自动重试"
     elif record:
         clock = str(record.get("sent_at") or "")[11:16]
         label = schedule.STATUS_LABELS.get(status, "已处理")
         state_key = "sent"
         state_text = f"今天 {clock} {label}（{record.get('source') or '手动'}）"
     elif when >= plan["due_at"]:
-        # 到点了但还没发：只有"今天一个门铃都没敲到"或"刚跨过时间点"才会看到，
-        # 文案要说明"不用管，下一轮门铃就发"，否则用户会以为卡住了。
+        # 到点了但还没发：只有"今天一个定时检查都没敲到"或"刚跨过时间点"才会看到，
+        # 文案要说明"不用管，下一轮定时检查就发"，否则用户会以为卡住了。
         state_key = "due"
-        state_text = f"该发了（{plan['due_text']}），等下一次触发"
+        state_text = f"该发了（{plan['due_text']}），等下一次自动检查"
     else:
         state_key = "waiting"
         state_text = f"等 {plan['due_text']} 到点"
@@ -547,9 +547,9 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
         # 今天已经记过账的账号不会再发 —— 不排除掉的话"下次"会一直指向一个
         # 已经发生过、且今天不会再发生的时间。
         #
-        # ★ 口径必须与派发器一致（`core.schedule.select`）：`skipped` 是
-        #   "门禁没过 / 命中风控，一条都没发出去"，当天名额还在、下一次门铃还会再试。
-        #   把它算成"今天发过了"，面板就会一边显示该账号「下一次门铃会重试」、
+        # ★ 口径必须与定时任务一致（`core.schedule.select`）：`skipped` 是
+        #   "登录状态没过 / 命中风控，一条都没发出去"，当天名额还在、下一次定时检查还会再试。
+        #   把它算成"今天发过了"，面板就会一边显示该账号「下一次定时检查会重试」、
         #   一边在顶上写「今天该发的都发完了」（2026-10-09 示例号 掉登录时就是这样）。
         record = schedule.entry_for(state, uid, when)
         exhausted = False
@@ -557,10 +557,10 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
             if _text(record.get("status")) != schedule.STATUS_SKIPPED:
                 continue
             # ★ 试满上限的 `skipped` 当天**不再 due**（与 `select()` 同一判定）：它今天
-            #   不会再被门铃踹起来，所以"下一个"要落到**明天**。仍按今天算的话，面板
-            #   会写"等下一次敲门就发"——而那个敲门今天根本不会发生。
+            #   不会再被定时检查踹起来，所以"下一个"要落到**明天**。仍按今天算的话，面板
+            #   会写"等下一次检查就发"——而那个检查今天根本不会发生。
             exhausted = schedule.skip_retry_exhausted(record, day=schedule.day_of(when))
-        # jitter 同 `schedule_fields`：面板的"下次自动触发"必须和派发器同一口径，
+        # jitter 同 `schedule_fields`：面板的"下次自动触发"必须和定时任务同一口径，
         # 否则用户按面板的时间守着，实际却被抖到别的时刻。
         plan = schedule.plan_for(
             {"unique_id": uid, "username": _text(_get(item, "username")),
@@ -585,12 +585,12 @@ def next_due(accounts: Sequence[Any] = (), *, when=None) -> Optional[Dict[str, A
         "imminent": imminent,
         # 明天才轮到的账号（今天试满上限了）不能沿用"今天 HH:MM"的文案。
         "exhausted": exhausted,
-        # 过点了还没发是常态（门铃每 5 分钟才响一次），文案要把这件事说清楚，
+        # 过点了还没发是常态（定时检查每 5 分钟才响一次），文案要把这件事说清楚，
         # 否则用户会以为卡住了、去点"立即运行"。
         "text": (
             f"下一个 {name}：今天已经试到上限，明天 {best['due_text']} 再试"
             if exhausted else
-            f"下一个 {name}：已过 {best['due_text']}，等下一次敲门就发"
+            f"下一个 {name}：已过 {best['due_text']}，下一次自动检查就会发"
             if imminent else
             f"下一个 {name}：今天 {best['due_text']}"
         ),
@@ -616,11 +616,11 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     sent_fail = _get(account, "sent_fail")
     truncated = bool(_get(account, "entries_truncated"))
     if truncated:
-        # 明细被 ENTRY_CAP 截断时以账本的汇总数为准（否则数字会显得比实际好）
+        # 明细被 ENTRY_CAP 截断时以运行记录的汇总数为准（否则数字会显得比实际好）
         confirmed = max(confirmed, _int(sent_ok))
         failed = max(failed, _int(sent_fail))
 
-    # 会话列表里没出现的目标、以及选中失败的目标，都没有 entry —— 单独补进「需处理」
+    # 会话列表里没出现的目标、以及选中失败的目标，都没有 entry —— 单独补进「发送失败」
     for name, reason in (
         (
             _get(account, "missing") or [],
@@ -640,13 +640,13 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     targets = [_text(item) for item in (data.get("targets") or []) if _text(item)]
     run_targets = [_text(item) for item in (_get(account, "targets") or []) if _text(item)]
     total = max(len(targets), len(run_targets), _int(data.get("target_count")))
-    # 配置里的目标数可能比账本里的少（上一轮发完，回头把 TASKS 改小了），
+    # 配置里的目标数可能比运行记录里的少（上一轮发完，回头把 TASKS 改小了），
     # 那时分母会出现「已发送 380/2」这种超过 100% 的怪数。分母至少得容得下这一轮
-    # 真正处理过的目标数——四个档位加起来仍然恰好等于 total，进度条也不会超过 100%。
+    # 真正处理过的目标数——四个模式加起来仍然恰好等于 total，进度条也不会超过 100%。
     total = max(total, confirmed + weak + failed)
 
-    # 「未尝试」以减法为准（每个目标恰好落在一档里，四个数加起来必然等于 total）；
-    # 能点名到具体目标的就写进 pending 档位，点不出名字的只计数、不编名字。
+    # 「待发送」以减法为准（每个目标恰好落在一档里，四个数加起来必然等于 total）；
+    # 能点名到具体目标的就写进 pending 模式，点不出名字的只计数、不编名字。
     attempted = confirmed + weak + failed
     pending = max(0, total - attempted)
     covered = {row["target"] for row in entries}
@@ -654,7 +654,7 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         if len(buckets["pending"]) >= pending:
             break
         if name not in covered:
-            buckets["pending"].append(_segment_row(name, "pending", level_text="未尝试"))
+            buckets["pending"].append(_segment_row(name, "pending", level_text="待发送"))
             covered.add(name)
 
     sent = confirmed + weak
@@ -667,7 +667,7 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     # 人自己停用的账号（`TASKS[].enabled=false`，缺键 = 启用）。停用的账号照旧有
     # 配置、cookie 和上一轮的结果 —— 只是调度器不再自动发它。
     enabled = bool(data.get("enabled", True))
-    # 「运行期掉登录」/「一条都没送达」只写在账本的账号结果里
+    # 「运行期掉登录」/「一条都没送达」只写在运行记录的账号结果里
     # （`core/tasks.py` 的 `out["error"]`），配置快照 `data` 上没有这个字段
     # —— 必须从 `account` 上取。
     account_error = str(_get(account, "error") or "")
@@ -676,7 +676,7 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
     # 今天别再试"，但原因不同 —— 页面还长着 IM 的样子，是服务端单方面踢了这个会话。
     kicked = account_error.startswith("session_kicked")
     nothing_sent = account_error.startswith("nothing_sent")
-    # 门禁阶段就判出「登录态已死」的那一档（core/tasks.py 的 GATE_DEAD_STATUSES）：
+    # 登录状态阶段就判出「登录态已死」的那一档（core/tasks.py 的 GATE_DEAD_STATUSES）：
     # 一条都没发出去、当天也不会再重试 —— 和 login_lost 一样是"根本上没法干活"。
     login_dead = account_error.startswith("login_dead")
     state = _account_state_for(
@@ -691,7 +691,7 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
 
     issues: List[Dict[str, str]] = []
     # orphan 卡不往 issues 里塞东西：模板在卡头下面已经有一段说明，
-    # 这里只保留"上一轮到底怎么了"的事实（门禁、被跳过），标题也换成"它上一轮的情况"。
+    # 这里只保留"上一轮到底怎么了"的事实（登录状态、被跳过），标题也换成"它上一轮的情况"。
     if not ready and not orphan:
         issues.append(
             {
@@ -700,10 +700,10 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             }
         )
     if gate and gate != _GATE_OK:
-        text = f"上次门禁：{_text(data.get('gate_text'), gate)}"
+        text = f"上次登录状态：{_text(data.get('gate_text'), gate)}"
         if gate in ("EXPIRED", "LOGGED_OUT"):
-            # 登录失效是**唯一**能一眼看出该怎么办的门禁失败：重新扫码。
-            # 只说"上次门禁：登录已失效"用户还得自己猜下一步做什么。
+            # 登录失效是**唯一**能一眼看出该怎么办的登录状态失败：重新扫码。
+            # 只说"上次登录状态：登录已失效"用户还得自己猜下一步做什么。
             text += " —— 到下面「扫码登录」用这个账号重新扫一次即可" + _REQUEUE_NOTE
         if login_dead:
             # 登录态已死时定时器**当天不会再拿这份 cookie 重开浏览器**
@@ -712,16 +712,16 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
             text += "；本轮一条都没发出去，今天不会再重试（拿失效的登录态反复开浏览器只会喂大风控）"
         issues.append({"level": "danger", "text": text})
     if login_lost:
-        # 与"门禁没过"分开说：门禁是**操作前**就看出来的，这条是**发送时**才暴露的
+        # 与"登录状态没过"分开说：登录状态是**操作前**就看出来的，这条是**发送时**才暴露的
         # ——页面还长着 IM 的样子（列表、输入框、发送按钮都在），点击也"成功"，
         # 但服务端不认这个登录态，于是每条都拿不到回执，一条也没发出去。
         # 发送中途才失效时，前面几条是真的发出去了：文案不能一律说"一条都没发出去"
-        # （core/tasks.py 记的是「本轮发送成功 N 条」，面板得跟账本对得上）。
+        # （core/tasks.py 记的是「本轮发送成功 N 条」，面板得跟运行记录对得上）。
         sent_note = (f"本轮已送达 {sent}/{total} 条，剩下的没发出去" if sent
                      else "一条都没发出去")
         issues.append({
             "level": "danger",
-            "text": f"上一轮登录已失效（服务端不认这个 sessionid），{sent_note} —— "
+            "text": f"上一轮登录已失效（服务器不认这次登录），{sent_note} —— "
                     "到下面「扫码登录」用这个账号重新扫一次即可；"
                     "重新登录成功后会自动补发一次（不用手点「立即运行」，但只补"
                     "今天还没成功发出去的账号）",
@@ -735,16 +735,16 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
                      else "一条都没发出去")
         issues.append({
             "level": "danger",
-            "text": f"上一轮被服务端踢下线（回执 decision=KICK），{sent_note} —— "
+            "text": f"上一轮被服务器踢下线，{sent_note} —— "
                     "这个账号的登录态已经作废，到下面「扫码登录」重新扫一次即可" + _REQUEUE_NOTE,
         })
     elif nothing_sent:
-        # 更隐蔽的一档：门禁当时还是 READY、校验全 strong、输入也对，抖音那边
+        # 更隐蔽的一档：登录状态当时还是 READY、校验全 strong、输入也对，抖音那边
         # 一条都不收（响应体是空的，或者解不出 code）—— 页面看着一切正常。
-        # 2026-10-10 🌈示例号🌈 就是这样：账本里 sent_ok=0 / sent_fail=3。
+        # 2026-10-10 🌈示例号🌈 就是这样：运行记录里 sent_ok=0 / sent_fail=3。
         issues.append({
             "level": "danger",
-            "text": "上一轮**一条都没送达**（每个目标都没拿到回执；门禁当时还是通过的）—— "
+            "text": "上一轮一条都没送达（每个目标都没拿到服务器回执，而当时登录状态还是正常的）—— "
                     "通常是登录已被服务端作废或风控拦截；"
                     "到下面「扫码登录」重新扫一次" + _REQUEUE_NOTE,
         })
@@ -766,7 +766,7 @@ def build_account(snapshot: Any, record: Any = None) -> Dict[str, Any]:
         issues.append(
             {
                 "level": "warning",
-                "text": f"该轮明细只记录了前 {len(entries_raw)} 条（上限），计数以账本汇总为准",
+                "text": f"这一轮的明细只记录了前 {len(entries_raw)} 条（超出上限），总数以运行记录里的汇总为准",
             }
         )
 
@@ -858,10 +858,10 @@ def account_cards(
     """把账号列表变成卡片。
 
     ``per_account=True``（总览页）：每张卡取**它自己最近参与过的那一轮**。每个账号
-    可以有自己的发送时间（`core/schedule.py` 的派发器每 5 分钟只为当时到点的账号跑
+    可以有自己的发送时间（`core/schedule.py` 的定时任务每 5 分钟只为当时到点的账号跑
     一轮），于是"全局最近一轮"里通常只有一两个账号。2026-10-07 线上就这么骗了用户
-    一回：示例号 17:35 已经 4/4 强确认，20:35 那一轮只跑了别的账号，它的卡立刻变成
-    「未尝试 4 / 还没跑过」。
+    一回：示例号 17:35 已经 4/4 已送达，20:35 那一轮只跑了别的账号，它的卡立刻变成
+    「待发送 4 / 还没跑过」。
 
     ``per_account=False``（运行记录页）：所有卡冻在 ``record`` 那一轮 —— 那一页讲的
     就是"选中的那一轮"。两种情况都会去 ``records`` 里找出账号**自己**的那一轮，写进
@@ -914,7 +914,7 @@ def _attach_proxy(cards: List[Dict[str, Any]], cfg: Any, state: Any) -> int:
 def _attach_streak(cards: Sequence[Dict[str, Any]], data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把 core.streak 的结果贴到账号卡上（一张卡一份）。
 
-    连续天数只能从账本算，而账本是「这个账号自己最近一轮」之外的另一条数据源 ——
+    连续天数只能从运行记录算，而运行记录是「这个账号自己最近一轮」之外的另一条数据源 ——
     所以它不参与 build_account（那里只讲一轮的成败），单独挂一个 streak 子树。
     core.streak 返回的 item 只有结构化字段，这里补一个现成的一句话 text：
     模板与 10 秒轮询（/api/ops/overview 的 streakTargets[].text）必须用同一句话，
@@ -929,7 +929,7 @@ def _attach_streak(cards: Sequence[Dict[str, Any]], data: Optional[Dict[str, Any
             row["text"] = streak_core.streak_text(row)
             targets.append(row)
         card["streak"] = {
-            # has=False：这个账号在账本里一次成功都没有（新扫的号就是这种）
+            # has=False：这个账号在运行记录里一次成功都没有（新扫的号就是这种）
             "has": bool(info),
             "targets": targets,
             "current": _int(info.get("current")),
@@ -948,11 +948,11 @@ def _attach_streak(cards: Sequence[Dict[str, Any]], data: Optional[Dict[str, Any
 def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, Any]:
     """把账号卡汇总成 B 的 ``summary``（每个目标恰好落在一档里）。
 
-    ``orphan`` 卡（只活在上一轮账本里、`TASKS` 里已经没有的账号）**不计入**：
+    ``orphan`` 卡（只活在上一轮运行记录里、`TASKS` 里已经没有的账号）**不计入**：
     下一轮根本不会碰它们，计进去只会让"共 N 个目标"和"账号被阻断"对不上实际。
     """
     live = [card for card in cards if not card.get("orphan")]
-    # 停用的账号**不进计数**：它不会被派发，目标数计进去会让"未尝试 N"永远归不了零，
+    # 停用的账号**不进计数**：它不会被派发，目标数计进去会让"待发送 N"永远归不了零，
     # 看着像"还有活没干完"，其实是"这个账号被关掉了"。
     active = [card for card in live if card.get("enabled", True)]
     stopped = len(live) - len(active)
@@ -984,7 +984,7 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
         "failed": failed,
         "attention": failed,
         "pending": pending,
-        # 见模块 docstring：C 没有"已处理但未确认"的中间态，未尝试的目标全在 pending 里
+        # 见模块 docstring：C 没有"已处理但未确认"的中间态，待发送的目标全在 pending 里
         "unprocessed": 0,
         "remaining": pending,
         "sentTotal": sent,
@@ -1004,11 +1004,11 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
         "accounts_blocked": sum(1 for card in active if card.get("state") == "blocked"),
         "accounts_attention": sum(1 for card in active if card.get("state") == "attention"),
         "accounts_orphan": len(cards) - len(live),
-        # 这一格叫「最近强确认」，说明文字是"回执 ok 且能点名收件人（发送后就停在目标
-        # 会话）"—— 别写成"双确认"：收件人校验不过只会把证据降级成弱证据（ok 仍为
+        # 这一格叫「最近已送达」，说明文字是"回执 ok 且能点名收件人（发送后就停在目标
+        # 会话）"—— 别写成"双确认"：收件人校验不过只会把证据降级成可能已送达（ok 仍为
         # True），说得比实际严就会误导用户判断这条到底算不算发出去。
-        # 只有弱证据（只拿到页面回显）时不能点亮它，否则数字和说明互相打脸；
-        # 那时由 lastWeakAt 单独承载，模板用一句"只有弱证据"来讲。
+        # 只有可能已送达（只拿到页面回显）时不能点亮它，否则数字和说明互相打脸；
+        # 那时由 lastWeakAt 单独承载，模板用一句"只有可能已送达"来讲。
         "lastConfirmedAt": last_at if confirmed else "",
         "lastWeakAt": last_at if (not confirmed and weak) else "",
     }
@@ -1018,7 +1018,7 @@ def summarize(cards: Sequence[Dict[str, Any]], last_at: str = "") -> Dict[str, A
 
 
 def run_row(record: Any) -> Dict[str, Any]:
-    """账本里的一轮 → 「运行记录」页表格的一行。"""
+    """运行记录里的一轮 → 「运行记录」页表格的一行。"""
     status = _text(_get(record, "status"), "ok").lower()
     counts = _get(record, "counts") or {}
     return {
@@ -1043,7 +1043,7 @@ def run_row(record: Any) -> Dict[str, Any]:
         "source_text": _text(_get(record, "source_text"), store.source_text(_text(_get(record, "source")))),
         "rate_limited": bool(_get(record, "rate_limited")),
         "skip_reason": _text(_get(record, "skip_reason")),
-        # 模板优先用这一格；老账本里没有映射的码由它原样兜回英文。
+        # 模板优先用这一格；老运行记录里没有映射的码由它原样兜回英文。
         "skip_reason_text": _skip_text(_text(_get(record, "skip_reason"))),
         "skip_until": _text(_get(record, "skip_until")),
         "note": _text(_get(record, "note")),
@@ -1157,7 +1157,7 @@ def _task_state(lock: Any) -> Dict[str, Any]:
 def _quiet_clash(spec: str, timer_times: Sequence[str]) -> Dict[str, Any]:
     """禁跑时间窗会不会把定时器的时间整个盖掉。
 
-    盖掉的后果不是"晚一点发"，而是**到点整轮跳过、一条都不发**，而且只有翻账本
+    盖掉的后果不是"晚一点发"，而是**到点整轮跳过、一条都不发**，而且只有翻运行记录
     才看得出来（2026-10-01 改定时时间时就差点踩上：`.env` 没写 QUIET_WINDOW、
     代码默认窗 20:20-21:00，正好把新的 20:30 包住）。面板必须提前说。
     """
@@ -1197,11 +1197,11 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
                     stopped: int = 0, accounts_total: int = 0) -> Dict[str, Any]:
     labels = [_text(item) for item in (schedules or []) if _text(item)]
     timer = dict(timer or {})
-    # 新架构：timer 是每 N 分钟敲一次门的**派发器**，`OnCalendar` 里没有"几点发"。
+    # 新架构：timer 是每 N 分钟敲一次门的**定时任务**，`OnCalendar` 里没有"几点发"。
     # 这时候不能再按 `.env` 的 TASK_SCHEDULE_TIMES 画一个"下次自动触发" ——
     # 那个值现在的含义只是"没单独配时间的账号用几点"。
     dispatch = _int(timer.get("dispatchMinutes"))
-    # 值槽（26px 大字）只放得下一行数字 —— 派发器模式下把"下一个是谁、几点"
+    # 值槽（26px 大字）只放得下一行数字 —— 定时任务模式下把"下一个是谁、几点"
     # 压成短句（`示例号 · 已过 17:20`）给值槽用，整句话（`nextTriggerText`）
     # 留给提示行。短句拼不出来时前端回落到整句话，只是字号小一号。
     next_short = ""
@@ -1268,7 +1268,7 @@ def _schedule_state(records: Sequence[Any], pending: int, next_run: Any, schedul
         "nextTriggerShort": next_short,
         "remainingTargets": pending,
         "hasWorkNextTrigger": pending > 0 and armed,
-        # 派发器模式（timer 每 N 分钟敲一次门、各账号按自己的时间发）：上面那两个
+        # 定时任务模式（timer 每 N 分钟敲一次门、各账号按自己的时间发）：上面那两个
         # 键讲的是"上一轮还剩几个目标没走到"，跟"下一次触发会不会发"没关系 ——
         # 前端要靠这个标志改用 nextTriggerText 说话。
         "dispatcher": bool(dispatch),
@@ -1406,8 +1406,8 @@ def _banners(
                 "kind": "proxy_shared",
                 "level": "info",
                 "title": "多个账号共用一个出口",
-                "text": f"{proxy_shared} 个账号都是直连（同一个出口 IP）。这是已知的风控面；"
-                "要给某个账号单独走代理，在它的账号卡里填「出口」。",
+                "text": f"{proxy_shared} 个账号都是直连（同一个出口 IP）。出口 IP 一变就可能要重新扫码登录；"
+                "要让某个账号单独走一个出口，在它的账号卡里填「出口」。",
                 "until": "",
                 "secondsLeft": 0,
             }
@@ -1424,7 +1424,7 @@ def _banners(
                 "level": "warning",
                 "title": "有目标断签了",
                 "text": f"{shown}{more} 上一次成功发送在前天以前（火花已经断了）。"
-                "到下面的账号卡点「补发今天」可以让门铃在剩下的时间里补一次；"
+                "到下面的账号卡点「补发今天」可以让它今天再发一次；"
                 "连续天数不会因此恢复，但今天这一格能接上。",
                 "until": "",
                 "secondsLeft": 0,
@@ -1510,7 +1510,7 @@ def build(
     ``per_account=True``：账号卡各取各的最近一轮（总览页 —— 每个账号有自己的发送
     时间）。运行记录页传 False，那边讲的是"选中的那一轮"。
 
-    streak：core.streak.compute() 的结果（火花连续天数，issue #15）。它是从**整份账本**
+    streak：core.streak.compute() 的结果（火花连续天数，issue #15）。它是从**整份运行记录**
     算出来的，与"这一轮"无关，所以由调用方算好传进来 —— 视图层不读文件。
 
     proxy_state：core.proxy.read_state() 的原文（上一次出口自检的 IP，issue #18）。
@@ -1537,13 +1537,13 @@ def build(
         )
     finished = _text(_get(selected, "finished_at"))
     summary = summarize(cards, last_at=store.fmt_stamp(finished) if finished else "")
-    # 这一版的数字来自哪一轮、那一轮是真发还是空跑 —— 直接写在 KPI 旁边，
-    # 免得"确认成功 5"看上去像真发出去了 5 条（空跑的确认只是排练）。
+    # 这一版的数字来自哪一轮、那一轮是真发还是试运行 —— 直接写在 KPI 旁边，
+    # 免得"确认成功 5"看上去像真发出去了 5 条（试运行的确认只是排练）。
     summary["run_id"] = _text(_get(selected, "run_id"))
     summary["dry_run"] = _text(_get(selected, "dry_run"), "off")
     summary["dry_run_text"] = DRY_RUN_LABELS.get(summary["dry_run"], summary["dry_run"])
     # 各账号各算各的时候，"数字来自哪一轮"可能不止一轮：这时不能挑一个 run_id 顶上，
-    # 否则接口读到的那个 ID 只对其中一张卡是真的。同理，档位（真发/空跑）也必须
+    # 否则接口读到的那个 ID 只对其中一张卡是真的。同理，模式（真发/试运行）也必须
     # 所有卡一致才敢在 KPI 旁边写一句全局的话 —— 不一致就明说不一致。
     card_runs = {_text(card.get("run_id")) for card in cards if _text(card.get("run_id"))}
     card_dry = {
@@ -1556,7 +1556,7 @@ def build(
     if per_account:
         if len(card_dry) > 1:
             summary["dry_run"] = "mixed"
-            summary["dry_run_text"] = "各账号档位不一致"
+            summary["dry_run_text"] = "各账号模式不一致"
         elif card_dry:
             only = _text(next(iter(card_dry)), "off")
             summary["dry_run"] = only
@@ -1609,7 +1609,7 @@ def build(
     return {
         "accounts": cards,
         "summary": summary,
-        # 连续天数这块的窗口说明（模板要写"只统计最近 N 天"：账本只从尾部读 4 MB，
+        # 连续天数这块的窗口说明（模板要写"只统计最近 N 天"：运行记录只从尾部读 4 MB，
         # 天数不是"从开天辟地以来"的连续，不写清楚就等于把窗口说成历史）。
         "streak": {
             "window_text": _text(streak_view.get("window_text")),
@@ -1692,7 +1692,7 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
             "runCount": _int(summary.get("run_count")),
             # 这一版的数字是"排练"还是"真发" —— 同一个毛病：药丸与那两句说明原来
             # 由模板的 {% if %} 决定在不在页面上，首屏若是 off 档就永远不出现，
-            # 之后切成空跑跑一轮，页面就把排练讲成了发送（2026-10-18 issue #9）。
+            # 之后切成试运行跑一轮，页面就把排练讲成了发送（2026-10-18 issue #9）。
             # 键名与 static/app.js 里那两处消费必须逐字一致。
             "dryRun": _text(summary.get("dry_run"), "off"),
             "dryRunText": _text(summary.get("dry_run_text")),
@@ -1729,14 +1729,14 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
         "schedule": {
             "nextTriggerAt": schedule.get("nextTriggerAt", ""),
             "label": schedule.get("label", ""),
-            # 派发器模式下这句才是"下一次触发会干什么"的真话（"下一个 示例号：今天
+            # 定时任务模式下这句才是"下一次触发会干什么"的真话（"下一个 示例号：今天
             # 17:20" / "今天该发的都发完了"），前端要拿它写 KPI 下面那行小字。
             "nextTriggerText": schedule.get("nextTriggerText", ""),
             # 值槽那一行的短句（"示例号 · 已过 17:20"）；空串＝前端回落到整句话。
             "nextTriggerShort": schedule.get("nextTriggerShort", ""),
             "remainingTargets": schedule.get("remainingTargets", 0),
             "hasWorkNextTrigger": bool(schedule.get("hasWorkNextTrigger")),
-            # 派发器模式：前端不许拿"上一轮剩几个目标"当"下次触发还有活干"。
+            # 定时任务模式：前端不许拿"上一轮剩几个目标"当"下次触发还有活干"。
             "dispatcher": bool(schedule.get("dispatcher")),
             # 定时器是 disabled 的时候，前端**不能**把"下次触发"画成一个时间：
             # 到点什么都不会发生（真机上就是这么骗了用户一回）。
@@ -1755,7 +1755,7 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
                 "uniqueId": card.get("unique_id", ""),
                 "state": card.get("state", "idle"),
                 # 前端要按 state_css 上色（"orphan" 这种状态没有对应的配色规则），
-                # 也要知道上一轮是不是空跑 —— 否则轮询一刷新就把服务端写的标记抹掉。
+                # 也要知道上一轮是不是试运行 —— 否则轮询一刷新就把服务端写的标记抹掉。
                 "stateCss": card.get("state_css", ""),
                 # 状态那枚 chip 的文字与配色也必须能重画：只发 stateCss 的话，账号
                 # 从"已发送"翻成"已跳过/失败"时边框会变红、文字却还停在"已发送"
@@ -1813,7 +1813,7 @@ def overview_payload(view: Dict[str, Any], *, now_iso: str = "", tz: str = "") -
 # 逻辑留在一处，面板和 CLI（`python -m core.maintenance`）才不会各说各话。
 
 #: 磁盘剩余低于这个数就报红。这**不是**"性能提示"：磁盘满 = 起不了浏览器、
-#: 写不了账本 = 当天的火花直接断（2026-10-14 盘点时只剩 25G，`logs/` 已占 1.1G 还在涨）。
+#: 写不了运行记录 = 当天的火花直接断（2026-10-14 盘点时只剩 25G，`logs/` 已占 1.1G 还在涨）。
 DISK_DANGER_FREE_BYTES = 1 * 1024 ** 3
 
 #: 低于这个数报黄：还够跑，但该清一清了。
@@ -1981,11 +1981,11 @@ def _auto_prune_text(auto: Any) -> str:
                      f"（回收 {_text(data.get('last_freed_text'), '0 B')}）")
     else:
         parts.append("还没清过")
-    next_text = _text(data.get("next_text"), "门铃一响就清")
+    next_text = _text(data.get("next_text"), "定时检查时再清")
     if next_text.startswith("约"):
         parts.append(f"下次 {next_text}")
-    elif "门铃" in next_text:
-        parts.append("下次门铃一响就清")
+    elif "定时检查" in next_text or "定时检查" in next_text:
+        parts.append("下次定时检查时再清")
     else:
         parts.append(f"下次 {next_text}")
     error = _text(data.get("last_error"))

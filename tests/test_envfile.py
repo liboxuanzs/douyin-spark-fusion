@@ -297,13 +297,13 @@ class UpsertAccountTests(EnvFileTestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(str(result["fingerprint"]), "12345")
         self.assertEqual(str(result["fingerprint_kept"]), "12345")
-        self.assertIn("指纹保持 12345", result["message"])
+        self.assertIn("设备标识保持 12345", result["message"])
         self.assertEqual(str(json.loads(self.value_of("TASKS"))[0]["fingerprint"]), "12345")
 
     def test_same_fingerprint_is_not_reported_as_kept(self):
         result = envfile.upsert_account(UID, username="别的名字", fingerprint="12345")
         self.assertNotIn("fingerprint_kept", result)
-        self.assertNotIn("指纹保持", result["message"])
+        self.assertNotIn("设备标识保持", result["message"])
         self.assertEqual(str(json.loads(self.value_of("TASKS"))[0]["fingerprint"]), "12345")
 
     def test_no_change_means_no_write_and_no_backup(self):
@@ -613,7 +613,7 @@ class AccountEnabledTests(EnvFileTestCase):
         result = envfile.set_account_enabled(UID, True)
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["enabled"])
-        self.assertIn("下一次门铃", result["message"])
+        self.assertIn("下一次定时检查", result["message"])
         self.assertNotIn("enabled", json.loads(self.value_of("TASKS"))[0], "启用 = 删键，不留 true")
         self.assertIs(self.enabled_of(), True)
 

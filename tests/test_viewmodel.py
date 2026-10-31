@@ -696,12 +696,12 @@ class ScheduleTimerTests(unittest.TestCase):
                    "state": "enabled", "dispatchMinutes": 5},
             next_due={"at": "2026-10-07T23:59:00+08:00", "name": "甲",
                       "due_text": "23:59", "imminent": True,
-                      "text": "下一个 甲：已过 23:59，等下一次敲门就发"},
+                      "text": "下一个 甲：已过 23:59，下一次自动检查就会发"},
             default_dry_run="off",
         )
         schedule = view["schedule"]
         self.assertEqual(schedule["nextTriggerShort"], "甲 · 已过 23:59")
-        self.assertEqual(schedule["nextTriggerText"], "下一个 甲：已过 23:59，等下一次敲门就发",
+        self.assertEqual(schedule["nextTriggerText"], "下一个 甲：已过 23:59，下一次自动检查就会发",
                          "整句话要原样留着：提示行和没有短句时的回落都靠它")
         payload = viewmodel.overview_payload(view)
         self.assertEqual(payload["schedule"]["nextTriggerShort"], "甲 · 已过 23:59",
@@ -1257,7 +1257,7 @@ class LoginLostCardTests(unittest.TestCase):
                              status="skipped", status_text="跳过")
         card = viewmodel.build_account(snapshot, _record(accounts=[account]))
         texts = [issue["text"] for issue in card["issues"]]
-        self.assertTrue(any("上次门禁" in t and "扫码" in t for t in texts), texts)
+        self.assertTrue(any("上次登录状态" in t and "扫码" in t for t in texts), texts)
         self.assertEqual(card["state"], "blocked")
 
     def test_gate_dead_session_says_the_day_will_not_be_retried(self):
@@ -1415,22 +1415,22 @@ class SkipRetryExhaustedTests(unittest.TestCase):
     def _account(self):
         return {"unique_id": "10060yi", "username": "示例号", "send_time": "21:30"}
 
-    def test_没到上限时仍然说下一次门铃会重试(self):
+    def test_没到上限时仍然说五分钟后会重试(self):
         self._attempt(3)
-        self.assertIn("下一次门铃会重试", self._fields()["send_state_text"])
+        self.assertIn("5 分钟内会自动重试", self._fields()["send_state_text"])
 
     def test_试满上限后不再说会重试(self):
         self._attempt(6)
         text = self._fields()["send_state_text"]
-        self.assertIn("试到上限", text)
-        self.assertNotIn("下一次门铃会重试", text)
+        self.assertIn("已经试了 6 次都没发出去", text)
+        self.assertNotIn("5 分钟内会自动重试", text)
         self.assertIn("重新扫码登录", text, "到上限后唯一的补救办法必须写在面板上")
 
     def test_上限由_env_决定而不是写死_6(self):
         """`SCHEDULE_SKIP_RETRY_MAX=3` 时试 3 次就该到上限（面板不许自己比数字）。"""
         os.environ["SCHEDULE_SKIP_RETRY_MAX"] = "3"
         self._attempt(3)
-        self.assertIn("试到上限", self._fields()["send_state_text"])
+        self.assertIn("已经试了 3 次都没发出去", self._fields()["send_state_text"])
 
     def test_老记录没有_attempts_字段时文案不变(self):
         """旧版本写的 `skipped` 记录没有 `attempts` → 按"没到上限"，文案与从前一致。"""
@@ -1443,15 +1443,15 @@ class SkipRetryExhaustedTests(unittest.TestCase):
         }
         schedule.save_state(state)
         text = self._fields()["send_state_text"]
-        self.assertIn("下一次门铃会重试", text)
-        self.assertNotIn("试到上限", text)
+        self.assertIn("5 分钟内会自动重试", text)
+        self.assertNotIn("不再自动重试", text)
 
     def test_试满上限后下一个该发的是明天(self):
         self._attempt(6)
         got = viewmodel.next_due([self._account()], when=self._when())
         self.assertIsNotNone(got, "今天不动了，但「下一个」要落到明天，不能说都发完了")
         self.assertTrue(got.get("exhausted"))
-        self.assertNotIn("等下一次敲门", got["text"])
+        self.assertNotIn("下一次自动检查", got["text"])
         self.assertIn("明天", got["text"])
         due = datetime.fromisoformat(got["at"])
         self.assertEqual(schedule.day_of(due), "2026-10-13")
@@ -1466,7 +1466,7 @@ class SkipRetryExhaustedTests(unittest.TestCase):
         got = viewmodel.next_due([self._account()], when=self._when())
         self.assertIsNotNone(got)
         self.assertFalse(got.get("exhausted"))
-        self.assertIn("等下一次敲门", got["text"])
+        self.assertIn("下一次自动检查", got["text"])
 
 
 class ScheduleJitterTests(unittest.TestCase):
@@ -1638,7 +1638,7 @@ class WholeRunErrorTests(unittest.TestCase):
             _record(status="error", status_text="出错", accounts=[account]),
         )
         texts = " ".join(issue["text"] for issue in card["issues"])
-        self.assertIn("KICK", texts)
+        self.assertIn("被服务器踢下线", texts)
         self.assertIn("扫码登录", texts)
         self.assertIn("自动补发", texts)
         # 补发这句话只说一遍：`_REQUEUE_NOTE` 自己就带着"登录成功后会自动补发一次"，

@@ -36,7 +36,7 @@
   --text-2: #a0a5b0;
   --text-3: #6b707b;
 
-  /* 强调色：炉火橙。整页只有主要动作、强确认、活动项用它 */
+  /* 强调色：炉火橙。整页只有主要动作、已送达、活动项用它 */
   --accent: #f26a3d;
   --accent-hover: #ff8055;
   --accent-soft: rgba(242, 106, 61, 0.11);
@@ -731,7 +731,7 @@ html[data-skin="aurora"] [data-skin-toggle] i.skin-icon-aurora {
 }
 
 /* 真发按钮：两套皮肤、模板与 app.js 都写 `button button-send`（见
-   dashboard.html 的「立即发送」和 app.js 的档位回调）。经典皮肤以前没有这条，
+   dashboard.html 的「立即发送」和 app.js 的模式回调）。经典皮肤以前没有这条，
    按钮会回落成普通灰底——同一句"真实发送"在两套皮肤下份量完全不同。
    颜色写死深红而不是 var(--danger)：经典深色主题的 --danger 是浅红，
    白字压上去对比不足。 */
@@ -3205,7 +3205,7 @@ input.friend-search-input {
   overflow-wrap: anywhere;
 }
 
-/* 概览药丸：空跑档位与真实发送用两种颜色区分 */
+/* 概览药丸：试运行与真实发送用两种颜色区分 */
 [data-overview-dry-run] {
   flex: 0 0 auto;
 }
@@ -3374,7 +3374,7 @@ input[type="time"]:hover::-webkit-calendar-picker-indicator {
     color: var(--text);
   }
 
-  /* 耗时挪到第一行右侧（和开始时间同一行），第二行留给档位/来源/结果/账号/成败 */
+  /* 耗时挪到第一行右侧（和开始时间同一行），第二行留给模式/来源/结果/账号/成败 */
   #run-history tbody td:nth-child(7) {
     order: 1;
     margin-left: auto;
