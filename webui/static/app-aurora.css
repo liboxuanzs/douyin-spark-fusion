@@ -4872,26 +4872,32 @@ html[data-skin="aurora"] summary:focus-visible {
 }
 
 /* == 25.16 可读性收口：小字够亮、主数字够大 ==============================
-   25 层之前的分区把「概览标签」「表头」「.muted」压在 --text-4（#4d5570）上，
-   在 #06070d 的深色画布上只有 2.6～2.7:1 —— 小字看不清。这里统一抬到
-   --text-3（深色 4.75:1、浅色 4.59:1），并让概览条的主数字回到百位尺寸。
-   非交互、不改结构，只调颜色与字号。                                       */
+   概览标签 / 表头 / .muted 被前面各层压在 --text-4 派生色上，深色画布
+   (#06070d) 只有 2.6～2.7:1；概览条主数字被 .overview-value 的 15px 压住，
+   和进度条抢不到主位。这里只调颜色与字号，不动结构、不动交互。
+   前面那些规则分散在多层、特异性彼此覆盖，所以本层统一用 !important 收口；
+   日志终端里的 .muted 另给一条更亮的，保持它原本的「终端配色」。            */
 
-html[data-skin="aurora"] :where(.overview-label, .progress-text) {
-  color: var(--text-3);
+html[data-skin="aurora"] .overview-label,
+html[data-skin="aurora"] .progress-text {
+  color: var(--text-3) !important;
 }
 html[data-skin="aurora"] .table-shell thead th {
-  color: var(--text-3);
+  color: var(--text-3) !important;
   font-weight: 600;
 }
-html[data-skin="aurora"] :where(.muted) {
-  color: var(--text-3);
+html[data-skin="aurora"] .muted {
+  color: var(--text-3) !important;
+}
+html[data-skin="aurora"] .logs-code .muted,
+html[data-skin="aurora"] .logs-code .logs-meta {
+  color: #97a0c4 !important;
 }
 
 /* 概览条左侧那块是整页的「今天怎么样」，数字要压得住进度条；
-   单元格里的数字维持 15px，别抢主位。 */
+   单元格里的数字维持原尺寸，别抢主位。 */
 html[data-skin="aurora"] .overview-primary .overview-value {
-  font-size: clamp(26px, 2.2vw + 12px, 36px);
+  font-size: clamp(26px, 2.2vw + 12px, 36px) !important;
   line-height: 1.12;
   letter-spacing: -0.02em;
 }
@@ -4904,14 +4910,13 @@ html[data-skin="aurora"] .overview-primary .overview-value--prose {
   line-height: 1.5;
 }
 
-html[data-theme="light"][data-skin="aurora"] :where(.overview-label, .progress-text) {
-  color: var(--text-3);
-}
-html[data-theme="light"][data-skin="aurora"] :where(.muted) {
-  color: var(--text-3);
+html[data-theme="light"][data-skin="aurora"] .overview-label,
+html[data-theme="light"][data-skin="aurora"] .progress-text,
+html[data-theme="light"][data-skin="aurora"] .muted {
+  color: var(--text-3) !important;
 }
 html[data-theme="light"][data-skin="aurora"] .table-shell thead th {
-  color: var(--text-3);
+  color: var(--text-3) !important;
 }
 
 @media print {
