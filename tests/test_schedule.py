@@ -244,6 +244,43 @@ class LastDispatchMinuteTests(unittest.TestCase):
         self.assertEqual(plan["due_at"].date(), when.date())
 
 
+class DispatchCadenceEnvTests(unittest.TestCase):
+    """`plan_for()` 必须用**部署真实的**门铃节奏夹最后一个刻度点。
+
+    docker 的门铃是 `*/${CRON_TICK_MINUTES} * * * *`。旧写法 `last_dispatch_minute()`
+    不带参数 → 永远按 5 算成 23:55；`CRON_TICK_MINUTES=7` 时 23:55 不在格子上，
+    被夹过去的账号当天一条都发不出去（2026-10-31 issue）。
+    """
+
+    def test_default_when_the_key_is_absent(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRON_TICK_MINUTES", None)
+            self.assertEqual(schedule.dispatch_cadence_env(), schedule.DISPATCH_MINUTES)
+
+    def test_reads_the_docker_cadence(self):
+        self.assertEqual(schedule.dispatch_cadence_env("7"), 7)
+        self.assertEqual(schedule.dispatch_cadence_env(" 10 "), 10)
+        self.assertEqual(schedule.dispatch_cadence_env("59"), 59)
+
+    def test_nonsense_falls_back_like_the_entrypoint_does(self):
+        # entrypoint 对非整数 / <1 / >59 一律回落 5，这里保持同一口径
+        for bad in ("", "  ", "abc", "0", "-3", "60", "1000", "1e999"):
+            with self.subTest(bad=bad):
+                self.assertEqual(schedule.dispatch_cadence_env(bad),
+                                 schedule.DISPATCH_MINUTES)
+
+    def test_plan_clamps_onto_the_configured_grid_not_the_default_one(self):
+        """CRON_TICK_MINUTES=7 → 最后一次门铃是 23:56，而不是 23:55。"""
+        when = _at("2026-10-07 00:00:00")
+        with mock.patch.dict(os.environ, {"CRON_TICK_MINUTES": "7"}), \
+                mock.patch.object(schedule, "jitter_minutes", return_value=15):
+            plan = schedule.plan_for({"unique_id": "11223344556", "time": "23:58"},
+                                     when=when, fallback="20:30", jitter=15)
+        self.assertEqual(plan["due_at"], when.replace(hour=23, minute=56))
+        self.assertEqual(plan["due_at"].minute % 7, 0)
+        self.assertEqual(plan["due_at"].date(), when.date())
+
+
 class JitterEnvTests(unittest.TestCase):
     def test_bad_values_fall_back_to_the_default(self):
         for bad in ("", "  ", "abc", None):

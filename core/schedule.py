@@ -112,6 +112,30 @@ def last_dispatch_minute(cadence=None):
     return (59 // step) * step
 
 
+def dispatch_cadence_env(env=None):
+    """读本轮部署**真实的**门铃节奏（分钟），供 `plan_for()` 夹最后一个刻度点。
+
+    docker 侧的 cron 表达式是 `*/${CRON_TICK_MINUTES} * * * *`
+    （见 `docker/entrypoint-cron.sh`），`CRON_TICK_MINUTES` 可写在容器环境变量或
+    挂载的 `.env` 里；run-task.sh 会 source 合并后的 env 再起 `main.py task`。
+    所以应用进程里 `os.getenv("CRON_TICK_MINUTES")` 就是门铃真正的间隔。
+    非 docker（systemd）部署没有这个键，回落 `DISPATCH_MINUTES`（= 随包 timer 的 5）。
+
+    写错值的处置与 entrypoint 一致：非法（非整数、<1、>59）→ 回落默认，
+    不抛异常 —— 这个函数跑在 `plan_for()` 里，抛了就等于所有账号都算不出时间。
+    """
+    raw = env if env is not None else os.getenv("CRON_TICK_MINUTES")
+    if raw is None or not str(raw).strip():
+        return DISPATCH_MINUTES
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return DISPATCH_MINUTES
+    if value < TICK_MIN or value > 59:
+        return DISPATCH_MINUTES
+    return value
+
+
 def tick_minutes(jitter=None):
     """由抖动幅度推出"timer 该多勤快地敲门"，单位分钟。
 
@@ -280,7 +304,11 @@ def plan_for(user, *, when=None, fallback=None, jitter=None):
     #   而 `select()` 拿"今天"的日期去比一个昨天的时刻，直接变成"永远没到点"。
     #   同理挤回当天 00:00，让当天第一个门铃就发。
     day_start = when.replace(hour=0, minute=0, second=0, microsecond=0)
-    last_tick = when.replace(hour=23, minute=last_dispatch_minute(), second=0, microsecond=0)
+    # 节奏必须传进去：`last_dispatch_minute()` 不带参数时永远按 DISPATCH_MINUTES(=5)
+    # 算成 23:55，而 docker 侧 `*/N * * * *` 在 N>5 时根本没有 23:55 这一格 ——
+    # 夹过去的账号当天一条都发不出去，日志里还看不出来（2026-10-31 的 bug）。
+    last_tick = when.replace(hour=23, minute=last_dispatch_minute(dispatch_cadence_env()),
+                             second=0, microsecond=0)
     if due < day_start:
         due = day_start
     elif due > last_tick:
