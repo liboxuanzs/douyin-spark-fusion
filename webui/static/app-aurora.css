@@ -5385,6 +5385,144 @@ html[data-theme="light"][data-skin="aurora"] .nav-item.active {
   background-image: linear-gradient(180deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.03));
 }
 
+/* == 29 缓动重校：把"瞬移"改成"有重量的移动" =============================
+   27/28 把抬升和光找回来了，但读起来"生硬"，原因是三件事：
+   1) KPI 卡的 transition-property 里没有 translate —— 抬升那一帧是直接跳过去的，
+      进也硬、回也硬；
+   2) 全局只有一条 cubic-bezier(0.16,1,0.3,1)：这条曲线前 60ms 走完近九成，
+      眼睛只能看到"闪一下 + 慢慢蹭"，不是缓动；
+   3) .dashboard-section / .status-banner 的 transition 是 all 0s，等于没有。
+   这一层只重写过渡契约，不动颜色和几何。                              */
+
+html[data-skin="aurora"] {
+  --ease-out: cubic-bezier(0.22, 0.61, 0.24, 1);
+  --ease-soft: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.28, 0.64, 1);
+  --dur-lift: 320ms;
+  --dur-press: 90ms;
+}
+
+/* 会抬起/会变色的"面"：位移用带回弹的曲线，颜色阴影用柔和曲线，两者不同速 */
+html[data-skin="aurora"] :is(.metric-card, .overview-cell, .account-card, .target-record,
+  .nav-item, .status-banner, .collapsible-section, .overview-strip) {
+  transition:
+    translate var(--dur-lift) var(--ease-spring),
+    transform var(--dur-lift) var(--ease-spring),
+    box-shadow var(--dur-lift) var(--ease-out),
+    border-color 220ms var(--ease-out),
+    background-color 240ms var(--ease-out),
+    opacity 220ms linear;
+}
+
+/* 控件：按下时 90ms 归位，松开用 320ms 回弹——手感靠这个不对称 */
+html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet,
+  .button-danger, .icon-button, .section-link, .section-collapse) {
+  transition:
+    translate 240ms var(--ease-spring),
+    transform 240ms var(--ease-spring),
+    box-shadow 280ms var(--ease-out),
+    border-color 180ms var(--ease-out),
+    background-color 200ms var(--ease-out),
+    color 160ms var(--ease-out),
+    opacity 160ms linear;
+}
+html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet,
+  .button-danger, .icon-button):active:not(:disabled) {
+  translate: 0 0;
+  transition-duration: var(--dur-press);
+}
+
+/* 区块外壳：只过渡会变的四项，别用 all（all 0s 是隐形的"没过渡"） */
+html[data-skin="aurora"] :is(.dashboard-section, .maintenance-result, .login-card,
+  .table-shell, .logs-code) {
+  transition: background-color 260ms var(--ease-out), border-color 240ms var(--ease-out),
+    box-shadow 320ms var(--ease-out), opacity 240ms linear;
+}
+html[data-skin="aurora"] :is(.dashboard-section, .account-card, .login-card)::after {
+  transition: opacity 320ms var(--ease-out);
+}
+
+/* 表格行：hover 染色要慢一点，快染快退像闪烁 */
+html[data-skin="aurora"] .table-shell tbody tr {
+  transition: background-color 180ms var(--ease-out), color 160ms var(--ease-out);
+}
+
+/* 进度条：涨的时候带一点过冲，收缩时不许弹（数据变小是事实，不该抖） */
+html[data-skin="aurora"] .progress-track > i {
+  transition: width 720ms var(--ease-soft), box-shadow 320ms var(--ease-out),
+    filter 320ms var(--ease-out);
+}
+
+/* 常驻扫光放慢并压低对比：3600ms 的硬边光带看着机械 */
+html[data-skin="aurora"] .progress-track > i::after {
+  animation-duration: 4600ms;
+}
+
+/* 29.2 收口：层 25 在 .metric-grid / .overview-strip 的子元素上挂了一条
+   transition: … !important，属性表里没有 translate —— 于是 KPI 卡抬升的那一帧
+   仍然是直接跳过去的（卡片有过渡，位移没有）。这里用同一条选择器 + !important
+   把它接过来，顺便把位移曲线换成带回弹的那条。                          */
+html[data-skin="aurora"] :is(.metric-grid, .overview-strip) > * {
+  transition:
+    translate var(--dur-lift) var(--ease-spring),
+    transform var(--dur-lift) var(--ease-spring),
+    box-shadow var(--dur-lift) var(--ease-out),
+    border-color 220ms var(--ease-out),
+    background-color 240ms var(--ease-out),
+    opacity 240ms var(--ease-out) !important;
+}
+html[data-skin="aurora"] :is(.button, .button-primary, .button-soft, .button-quiet,
+  .button-danger, .icon-button, .section-link, .section-collapse) {
+  transition:
+    translate 240ms var(--ease-spring),
+    transform 240ms var(--ease-spring),
+    box-shadow 280ms var(--ease-out),
+    border-color 180ms var(--ease-out),
+    background-color 200ms var(--ease-out),
+    color 160ms var(--ease-out),
+    opacity 160ms linear !important;
+}
+
+/* == 30 开合与换肤：补上"结构性变化"的过渡 ==============================
+   hover 顺了以后，剩下的生硬都在"结构一变就跳"：<details> 展开是浏览器
+   默认的一帧到位，切换深浅色是整页闪。两者都能用原生能力补上，不需要 JS。
+   降级安全：::details-content / interpolate-size 不支持时，行为与原来一致。 */
+
+html {
+  interpolate-size: allow-keywords;
+}
+
+/* 折叠区：高度从 0 长到 auto，同时内容淡入；关闭走同一条曲线只是没有内容淡出 */
+html[data-skin="aurora"] details.section-collapse::details-content {
+  block-size: 0;
+  overflow: clip;
+  opacity: 0;
+  content-visibility: hidden;
+  transition:
+    block-size 300ms var(--ease-soft),
+    opacity 220ms var(--ease-out) 60ms,
+    content-visibility 300ms allow-discrete;
+}
+html[data-skin="aurora"] details.section-collapse[open]::details-content {
+  block-size: auto;
+  opacity: 1;
+  content-visibility: visible;
+}
+
+/* 三角/箭头跟着走同一条节奏，别自己跳 */
+html[data-skin="aurora"] details.section-collapse > summary::after {
+  transition: transform 260ms var(--ease-spring), opacity 200ms var(--ease-out);
+}
+
+/* 换肤：整页一次性染色，260ms 内完成，别闪 */
+html[data-skin="aurora"] body,
+html[data-skin="aurora"] .app-shell,
+html[data-skin="aurora"] .sidebar,
+html[data-skin="aurora"] .dashboard-section {
+  transition: background-color 260ms var(--ease-out), color 220ms var(--ease-out),
+    border-color 220ms var(--ease-out);
+}
+
 @media (prefers-reduced-motion: reduce) {
   html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
     transform: none;
