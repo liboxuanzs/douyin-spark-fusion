@@ -66,6 +66,10 @@
   --warning-soft:  rgba(251, 191, 36, 0.14);
   --danger:        #fb7185;
   --danger-soft:   rgba(251, 113, 133, 0.14);
+  /* 破坏性语法色的「边」和「hover 底」：两处都要比 --danger-soft 淡，
+     否则"移除"在静止时就有一块红面，又回到"红玻璃按钮"的老问题。 */
+  --danger-line:   rgba(251, 113, 133, 0.34);
+  --danger-hover:  rgba(251, 113, 133, 0.11);
   --info:          #60a5fa;
   --info-soft:     rgba(96, 165, 250, 0.14);
 
@@ -154,6 +158,8 @@ html[data-theme="light"] {
   --warning-soft:  #fcf4e6;
   --danger:        #b91c1c;
   --danger-soft:   #fdeaea;
+  --danger-line:   rgba(185, 28, 28, 0.26);
+  --danger-hover:  rgba(185, 28, 28, 0.08);
   --info:          #1d4ed8;
   --info-soft:     #e8eefc;
 
@@ -772,33 +778,39 @@ html[data-theme="light"] svg.lucide.theme-dark-icon { display: inline-block; }
   transform: translateY(-1px);
 }
 
-/* 危险按钮：红玻璃 + 红光。它表达的是破坏性（移除、卸载），不是主操作 ——
-   真正会发消息的按钮走下面那档 .button-send，别让用户把淡红当禁用。 */
+/* 危险按钮：语法色只做「点」，不做「面」。
+   以前是红玻璃底 + 红字 + hover 实心霓虹红：满屏紫靛里突然一整块纯红，
+   既抢主操作的注意力，也让"破坏性"看起来像"主按钮"。现在只留红字 + 一道
+   红发丝边，hover 也只是同色淡底——红只用来提示"这一步不可逆"，不用来表示"重要"。 */
 .button-danger {
   color: var(--danger);
-  background: var(--danger-soft);
-  border-color: rgba(251, 113, 133, 0.32);
+  background: transparent;
+  border-color: var(--danger-line);
 }
 .button-danger:hover:not(:disabled) {
-  color: #fff;
-  background: linear-gradient(100deg, #f43f5e, #fb7185);
-  border-color: transparent;
+  color: var(--danger);
+  background: var(--danger-hover);
+  border-color: var(--danger);
   transform: translateY(-1px);
-  box-shadow: 0 16px 32px -18px rgba(244, 63, 94, 0.9);
+  box-shadow: 0 14px 30px -22px rgba(251, 113, 133, 0.55);
 }
 
-/* 真发按钮：整个页面只有它会真的把消息发出去，必须一眼看出「主操作、不可撤销」。
-   实心红 + 白字（白字在 #be123c 上约 6:1），hover 只抬 1px，不闪烁。 */
+/* 真发按钮：整个页面只有它会真的把消息发出去，得比"保存"重一档 ——
+   但重量靠实心 + 投影 + 白字，不靠另起一个色系。底色仍然是品牌光谱
+   （靛 → 紫 → 品红），只是比 .button-primary 压深一档好托白字：
+   最亮的一档 #db2777 上白字 4.65:1、最暗的 #5b53e8 上 5.47:1，两套主题共用。 */
 .button-send {
   color: #fff;
   font-weight: 650;
-  background: linear-gradient(180deg, #e11d48, #9f1239);
+  background-image: linear-gradient(100deg, #5b53e8 0%, #7b45e0 46%, #b32ad6 74%, #db2777 100%);
+  background-size: 200% 100%;
   border-color: transparent;
-  box-shadow: 0 12px 28px -14px rgba(190, 18, 60, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  box-shadow: 0 14px 34px -16px rgba(139, 92, 246, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 .button-send:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 18px 34px -14px rgba(190, 18, 60, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.36);
+  background-position: 100% 0;
+  box-shadow: 0 20px 42px -16px rgba(168, 85, 247, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.36);
 }
 .button-send:active:not(:disabled) { transform: translateY(0); }
 

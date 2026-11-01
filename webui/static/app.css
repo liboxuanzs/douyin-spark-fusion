@@ -733,34 +733,36 @@ html[data-skin="aurora"] [data-skin-toggle] i.skin-icon-aurora {
 /* 真发按钮：两套皮肤、模板与 app.js 都写 `button button-send`（见
    dashboard.html 的「立即发送」和 app.js 的模式回调）。经典皮肤以前没有这条，
    按钮会回落成普通灰底——同一句"真实发送"在两套皮肤下份量完全不同。
-   颜色写死深红而不是 var(--danger)：经典深色主题的 --danger 是浅红，
-   白字压上去对比不足。 */
+   底色与极光皮肤共用同一条光谱渐变（靛 → 紫 → 品红）并压深到能托白字：
+   以前是一整块火红，在靛紫色的面板里像另一套设计语言。 */
 .button-send {
-  background: linear-gradient(180deg, #e11d48, #9f1239);
+  background: linear-gradient(100deg, #5b53e8 0%, #7b45e0 46%, #b32ad6 74%, #db2777 100%);
   border-color: transparent;
   color: #fff;
   font-weight: 650;
-  box-shadow: 0 12px 28px -14px rgba(190, 18, 60, .55),
+  box-shadow: 0 12px 28px -14px rgba(124, 58, 237, .55),
               inset 0 1px 0 rgba(255, 255, 255, .28);
 }
 
 .button-send:hover {
-  background: linear-gradient(180deg, #f02d57, #a81440);
+  filter: brightness(1.08);
   border-color: transparent;
   color: #fff;
 }
 
 .button-send:disabled,
 .button-send[disabled] {
-  background: linear-gradient(180deg, #b3405a, #7d283c);
-  color: rgba(255, 255, 255, .85);
+  filter: saturate(.55);
+  opacity: .55;
+  color: rgba(255, 255, 255, .9);
 }
 
 .button-send:disabled:hover,
 .button-send[disabled]:hover {
-  background: linear-gradient(180deg, #b3405a, #7d283c);
+  filter: saturate(.55);
+  opacity: .55;
   border-color: transparent;
-  color: rgba(255, 255, 255, .85);
+  color: rgba(255, 255, 255, .9);
 }
 
 .button-success {

@@ -4595,13 +4595,23 @@ class SkinWebUITestCase(unittest.TestCase):
         self.assertGreaterEqual(alpha, 0.72, "再透下去极光会把白卡染成淡紫")
         self.assertLessEqual(alpha, 0.9, "太实就丢了底色，极光皮肤变回纯白卡片")
 
-    def test_真发按钮是实心红而不是淡红边框(self) -> None:
-        """「立即发送」原来与「移除」共用 button-danger：淡红底红字，看着就是 disabled。"""
+    def test_真发按钮走品牌光谱而不是警示红(self) -> None:
+        """「立即发送」一度是整块火红（#e11d48 → #9f1239）：满屏靛紫里只有一个纯红面，
+        既是另一套设计语言，又把"不可撤销"读成了"最危险"。现在底色归到光谱
+        （靛 → 紫 → 品红），重量靠实心 + 投影 + 白字，红色只留给破坏性语法。"""
         css = self.AURORA.read_text(encoding="utf-8")
         block = css.split(".button-send {", 1)[1].split("}", 1)[0]
-        for token in ("color: #fff;", "linear-gradient(180deg, #e11d48, #9f1239)"):
+        for token in ("color: #fff;",
+                      "linear-gradient(100deg, #5b53e8 0%, #7b45e0 46%, #b32ad6 74%, #db2777 100%)"):
             self.assertIn(token, block)
+        self.assertNotIn("#e11d48", css, "警示红不该再出现在极光皮肤里")
         self.assertIn(".button-danger {", css, "移除 / 确认这类破坏性动作仍走 button-danger")
+        danger = css.split(".button-danger {", 1)[1].split("}", 1)[0]
+        self.assertIn("background: transparent;", danger, "破坏性按钮不该有红色底面")
+        self.assertIn("color: var(--danger);", danger)
+        hover = css.split(".button-danger:hover:not(:disabled) {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("color: #fff;", hover, "hover 见到实心红就等于又回到老方案")
+        self.assertIn("var(--danger-hover)", hover)
         page = (REPO_ROOT / "webui" / "templates" / "dashboard.html").read_text(encoding="utf-8")
         self.assertIn("'button-send' if view.dry_run.default == 'off'", page)
         # 首屏的类会被下面这段按档位重画（切到空跑再切回来），只改模板等于白改：
@@ -4614,8 +4624,10 @@ class SkinWebUITestCase(unittest.TestCase):
         经典皮肤缺这两组规则时，按钮回落成灰底、palette 与 sparkles 一起亮。"""
         css = self.CLASSIC.read_text(encoding="utf-8")
         block = css.split(".button-send {", 1)[1].split("}", 1)[0]
-        for token in ("color: #fff;", "linear-gradient(180deg, #e11d48, #9f1239)"):
+        for token in ("color: #fff;",
+                      "linear-gradient(100deg, #5b53e8 0%, #7b45e0 46%, #b32ad6 74%, #db2777 100%)"):
             self.assertIn(token, block)
+        self.assertNotIn("#e11d48", css, "经典皮肤也不该留一整块火红")
         for skin in ("classic", "aurora"):
             self.assertIn(
                 f'html[data-skin="{skin}"] [data-skin-toggle] svg.lucide.skin-icon-{skin}', css,
