@@ -4658,10 +4658,10 @@ html[data-skin="aurora"] .target-meta,
 html[data-skin="aurora"] .target-reason { font-size: 11.5px; color: var(--text-3); }
 html[data-skin="aurora"] .target-message { font-size: 12.5px; color: var(--text-2); }
 
-/* 1281 以上：七列足够宽，卡片列表反而把 20 轮记录拉成 20 张卡（一屏只看得到四行）。
-   恢复成表格：表头一次给全，行与行之间一条发丝线，扫视成本立刻降下来。
-   1081-1280 之间仍是卡片列表 —— 那里七列会挤成一条条竖排文字。 */
-@media (min-width: 1281px) {
+/* 1081 以上：七列实测只要 764px，卡片列表反而把 20 轮记录拉成 20 张卡
+   （一屏只看得到四行）。恢复成表格：表头一次给全，行与行之间一条发丝线，
+   扫视成本立刻降下来。1080 以下仍走卡片列表 —— 那里是手机/窄窗。 */
+@media (min-width: 1081px) {
   html[data-skin="aurora"] #run-history .table-shell {
     overflow: visible;
     border: 1px solid var(--stroke);
@@ -5533,6 +5533,169 @@ html[data-skin="aurora"] .sidebar,
 html[data-skin="aurora"] .dashboard-section {
   transition: background-color 260ms var(--ease-out), color 220ms var(--ease-out),
     border-color 220ms var(--ease-out);
+}
+
+/* == 28 结构收口：卡里不再套盒子，次要动作不再喊 ========================== */
+
+/* 28.1 账号卡内部分段 -------------------------------------------------------
+   过去卡里四块编辑区各自带 1px 描边 + 圆角 + 底色，第三层再嵌一个「预览」框，
+   一张卡能数出三条框线。层次不是靠框出来的，是靠留白和一条线切出来的：
+   它们本来就是同一张表里的五段，用发丝线分段就够。 */
+html[data-skin="aurora"] .account-card { gap: 0; }
+html[data-skin="aurora"] .account-card > * { margin-top: 16px; }
+html[data-skin="aurora"] .account-card > :first-child { margin-top: 0; }
+html[data-skin="aurora"] .account-card :is(.account-streak, .time-editor, .message-editor, .proxy-editor, .friend-picker) {
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 1px solid var(--stroke-soft);
+  border-radius: 0;
+  background: none;
+}
+
+/* 28.2 卡内次要动作降一档：一张卡里只留一个主按钮（立即发送的光谱实心），
+   其余「保存 / 自检」走幽灵 —— 悬停才上色，平时只是一行字加一道发丝边。 */
+html[data-skin="aurora"] .account-card :is(.time-editor, .message-editor, .proxy-editor, .friend-picker)
+  :is(.button-soft, .button-primary) {
+  background: transparent;
+  border-color: var(--stroke-strong);
+  color: var(--text-2);
+  box-shadow: none;
+}
+html[data-skin="aurora"] .account-card :is(.time-editor, .message-editor, .proxy-editor, .friend-picker)
+  :is(.button-soft, .button-primary):hover:not(:disabled) {
+  background: rgba(124, 131, 255, 0.13);
+  border-color: rgba(124, 131, 255, 0.36);
+  color: var(--text);
+}
+html[data-theme="light"][data-skin="aurora"] .account-card
+  :is(.time-editor, .message-editor, .proxy-editor, .friend-picker)
+  :is(.button-soft, .button-primary):hover:not(:disabled) {
+  background: rgba(67, 56, 202, 0.08);
+  border-color: rgba(67, 56, 202, 0.28);
+  color: var(--text);
+}
+
+/* 28.3 预览 = 样品，不是第四个输入框：虚线标明「这是渲染结果，不是输入」 */
+html[data-skin="aurora"] .message-preview {
+  margin-top: 12px;
+  padding: 11px 13px 12px;
+  border: 1px dashed var(--stroke-strong);
+  border-radius: var(--r-2);
+  background: none;
+}
+
+/* 28.4 内容框跟着内容长：一行就一行高，别留下一段死白 */
+html[data-skin="aurora"] .message-input {
+  field-sizing: content;
+  box-sizing: border-box;
+  min-height: 62px;
+  max-height: 260px;
+}
+
+/* 28.5 数字对齐：概览与统计行用等宽数字，刷新时不再左右抖 */
+html[data-skin="aurora"] :is(.overview-value, .metric-value, .summary-value, .account-stats) {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 28.6 1081-1280 的表格再收一档内距：七列在这个宽度够用，但别撑满 */
+@media (min-width: 1081px) and (max-width: 1280px) {
+  html[data-skin="aurora"] #run-history thead th { padding: 9px 12px; }
+  html[data-skin="aurora"] #run-history tbody td { padding: 10px 12px; font-size: 12px; }
+}
+
+/* 28.6b 时间是全表最长的一格，auto 布局会把多出来的宽度全塞给它，
+   结果"开始"列占掉三分之一、后面几列挤成一条。把它钉到内容宽。 */
+html[data-skin="aurora"] #run-history table { table-layout: auto; }
+html[data-skin="aurora"] #run-history :is(thead th, tbody td):first-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* 28.7 好友勾选：整行就是开关，复选框只做状态指示
+   模板里是 label.friend-option > input + span.friend-option-name，
+   原来把 name 当胶囊、又用 .friend-option-name:has(input:checked) 找选中态——
+   input 是它的兄弟，:has 永远不命中，复选框只好孤零零飘在名字框上面。
+   现在让 label 当胶囊，name 退化成纯文本，选中态挂在 label 上。 */
+html[data-skin="aurora"] .friend-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.022);
+  cursor: pointer;
+  transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out);
+}
+html[data-skin="aurora"] .friend-option:hover {
+  border-color: var(--stroke-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+html[data-skin="aurora"] .friend-option:has(input:checked),
+html[data-skin="aurora"] .friend-option.selected {
+  border-color: rgba(124, 131, 255, 0.42);
+  background: rgba(124, 131, 255, 0.1);
+}
+html[data-skin="aurora"] .friend-option .friend-option-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+html[data-skin="aurora"] .friend-option .friend-option-name:hover {
+  background: none;
+  border-color: transparent;
+  transform: none;
+}
+html[data-skin="aurora"] .friend-option:has(input:checked) .friend-option-name,
+html[data-skin="aurora"] .friend-option.selected .friend-option-name { color: var(--text); }
+
+/* 勾选框：15px 小方，未选只留描边，选中铺品牌紫，不再整块光谱+发光 */
+html[data-skin="aurora"] .friend-option input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--stroke-strong);
+  border-radius: 5px;
+  background: transparent;
+}
+html[data-skin="aurora"] .friend-option input[type="checkbox"]:hover {
+  border-color: rgba(139, 147, 255, 0.55);
+}
+html[data-skin="aurora"] .friend-option input[type="checkbox"]:checked {
+  border-color: transparent;
+  background: var(--accent);
+  box-shadow: none;
+  transform: none;
+}
+html[data-skin="aurora"] .friend-option input[type="checkbox"]:checked::after {
+  width: 8px;
+  height: 4px;
+  margin: 3.5px 0 0 2.4px;
+  border-left: 1.7px solid var(--accent-ink);
+  border-bottom: 1.7px solid var(--accent-ink);
+}
+
+html[data-theme="light"][data-skin="aurora"] .friend-option {
+  background: #ffffff;
+  border-color: rgba(21, 28, 56, 0.12);
+}
+html[data-theme="light"][data-skin="aurora"] .friend-option:hover {
+  background: #f7f9fe;
+  border-color: rgba(21, 28, 56, 0.2);
+}
+html[data-theme="light"][data-skin="aurora"] .friend-option:has(input:checked),
+html[data-theme="light"][data-skin="aurora"] .friend-option.selected {
+  background: #eef1fd;
+  border-color: rgba(67, 56, 202, 0.32);
+}
+html[data-theme="light"][data-skin="aurora"] .friend-option input[type="checkbox"] {
+  border-color: rgba(21, 28, 56, 0.26);
 }
 
 @media (prefers-reduced-motion: reduce) {
