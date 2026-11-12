@@ -5698,6 +5698,125 @@ html[data-theme="light"][data-skin="aurora"] .friend-option input[type="checkbox
   border-color: rgba(21, 28, 56, 0.26);
 }
 
+/* == 29 主次分层：全页只有一个主角数字 ===================================
+   28 把结构收直了，但首页还有五个差不多大的数字在抢位置：概览条主数字
+   36px、四张 KPI 卡 26–32px。眼睛每次都要重新判断"先看哪个"，于是整页
+   显得平。这一层只定一条规矩：**全页只有一个主角**，其余全部降成读数。
+   不动信息、不动动效、不动几何，只改字号/材质/分隔。            */
+
+/* -- 29.1 主角：今日进度再上一个量级，行高收到 1 ---------------------- */
+html[data-skin="aurora"] .overview-primary { gap: 15px; padding: 26px 26px 24px; }
+html[data-skin="aurora"] .overview-primary .overview-value {
+  font-size: clamp(40px, 2.6vw + 22px, 56px) !important;
+  font-weight: 680;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+html[data-skin="aurora"] .overview-primary .overview-value--short {
+  font-size: clamp(26px, 1.6vw + 14px, 34px) !important;
+  letter-spacing: -0.03em;
+}
+html[data-skin="aurora"] .overview-primary .overview-value--prose {
+  font-size: 15px !important;
+  line-height: 1.5;
+}
+
+/* 宽屏上主角那一块改成「数字在左、进度在右」：一整行只有 5/5 和一条进度条时，
+   右边会空出一大片。两栏一摆，眼睛从数字滑到进度是连续的。            */
+@media (min-width: 1281px) {
+  html[data-skin="aurora"] .overview-primary {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(320px, 1fr);
+    grid-template-areas:
+      "head prog"
+      "value prog";
+    align-items: center;
+    column-gap: 36px;
+    row-gap: 8px;
+  }
+  html[data-skin="aurora"] .overview-primary > .overview-head { grid-area: head; }
+  html[data-skin="aurora"] .overview-primary > .overview-value { grid-area: value; }
+  html[data-skin="aurora"] .overview-primary > .overview-progress { grid-area: prog; margin-top: 0; }
+  html[data-skin="aurora"] .overview-primary > .overview-help { grid-column: 1 / -1; }
+}
+
+/* -- 29.2 概览条的三格：只当读数，别跟主角比大小 --------------------- */
+html[data-skin="aurora"] .overview-cell { padding: 18px 22px 20px; }
+html[data-skin="aurora"] .overview-cell .overview-label {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+}
+
+/* -- 29.3 KPI 四卡：合成一条读数带，靠发丝线分栏，不再各占一块面 ---- */
+@media (min-width: 1081px) {
+  html[data-skin="aurora"] .metric-grid {
+    gap: 0;
+    border: 1px solid var(--stroke);
+    border-radius: var(--r-3);
+    background: var(--surface-1);
+    box-shadow: none;
+    overflow: hidden;
+  }
+  html[data-skin="aurora"] .metric-grid > .metric-card,
+  html[data-theme="light"][data-skin="aurora"] .metric-grid > .metric-card {
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    min-height: 0;
+    padding: 17px 20px 16px;
+  }
+  html[data-skin="aurora"] .metric-grid > .metric-card + .metric-card {
+    border-left: 1px solid var(--stroke-soft);
+  }
+  /* 1081–1399 这条带子还是 2×2（四列要到 1400 才排得开）：每行第一张不要左边线，
+     第二行补一条上边线，2×2 才不会露出半截分隔。 */
+  @media (max-width: 1399px) {
+    html[data-skin="aurora"] .metric-grid > .metric-card:nth-child(2n + 1) { border-left: 0; }
+    html[data-skin="aurora"] .metric-grid > .metric-card:nth-child(n + 3) {
+      border-top: 1px solid var(--stroke-soft);
+    }
+  }
+  html[data-skin="aurora"] .metric-grid > .metric-card:hover {
+    border-color: transparent;
+    background: rgba(139, 147, 255, 0.055);
+  }
+  html[data-theme="light"][data-skin="aurora"] .metric-grid > .metric-card:hover {
+    background: rgba(21, 28, 56, 0.028);
+  }
+}
+@media (max-width: 1080px) {
+  html[data-skin="aurora"] .metric-card { box-shadow: none; }
+}
+html[data-skin="aurora"] .metric-card .metric-value {
+  font-size: clamp(22px, 0.9vw + 14px, 26px) !important;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: color-mix(in oklab, var(--metric-tone) 48%, var(--text));
+}
+html[data-skin="aurora"] .metric-grid .metric-label { font-size: 10px; letter-spacing: 0.14em; }
+html[data-skin="aurora"] .metric-grid .metric-help { font-size: 11px; line-height: 1.55; }
+
+/* -- 29.4 输入即控件：时间与出口的输入框和保存键合成一个整体 ---------
+   两块圆角贴在一起时中间那道缝会把一个动作劈成两半。合成一条：
+   左边输入、右边提交，接缝只留一条 1px。                          */
+html[data-skin="aurora"] .time-editor-tools { gap: 0; align-items: stretch; }
+/* 26.4 那条 html[data-skin="aurora"] :is(.button, input:not(...), ...) { border-radius } 的
+   特异性是 (0,3,2)，比 (0,3,1) 高一级，圆角必须再挂一层 .account-card 才按得住。 */
+html[data-skin="aurora"] .account-card .time-editor-tools > input.time-input,
+html[data-skin="aurora"] .account-card .proxy-form > input.proxy-input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+html[data-skin="aurora"] .account-card .time-editor-tools > .button,
+html[data-skin="aurora"] .account-card .proxy-form > .button {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+html[data-skin="aurora"] .time-editor-tools:focus-within > .button,
+html[data-skin="aurora"] .proxy-form:focus-within > .button { border-color: var(--stroke-strong); }
+
 @media (prefers-reduced-motion: reduce) {
   html[data-skin="aurora"] :is(.metric-card, .account-card, .target-record, .overview-cell):hover {
     transform: none;
